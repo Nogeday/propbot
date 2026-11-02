@@ -26,6 +26,16 @@
 //          the day once breached; - Consecutive-loss breaker (default 2) does the same on
 //          a toxic streak; - a red wash + "🛑 TRADING HALTED" label + bottom banner show why.
 //  REALISTIC FRICTION DEFAULTS (slippage + non-zero commission). Tune in Properties.
+//  COSTS PER INSTRUMENT — strategy() cost fields are constants, so set them in Properties.
+//        TradingView charges commission on EACH fill (entry and exit separately) and adds
+//        slippage only to market and stop fills (never to limit fills).
+//          SPY / ETF : Commission "% of value" per side (default 0.01) · slippage 1 tick
+//          MES / ES  : Commission "cash per contract" = your broker's PER-SIDE rate · slippage 1 tick
+//          US500 CFD : Commission 0 unless the broker charges one · slippage = (spread / 2 +
+//                      expected slip) in ticks of the chart symbol (a round trip pays two fills)
+//        NOTE: SPY/SPX have no 20:00–00:00 ET data → use a ~23h instrument (ES/MES, US500 CFD).
+//  QUANTITY ROUNDING: "Auto" = whole contracts on futures; a size < 1 skips the trade.
+//  WEBHOOK ALERTS: JSON via alert() (create the alert with "alert() function calls only").
 //  NOTE: keep the Asian and Active windows non-overlapping.
 // =====================================================================================
 
@@ -37,8 +47,8 @@ strategy(title              = "Asian Range Liquidity Sweep & Reversal",
          default_qty_type   = strategy.fixed,   // fallback only; every entry passes an explicit qty
          default_qty_value  = 1,
          commission_type    = strategy.commission.percent,
-         commission_value   = 0.01,             // 0.01% PER SIDE (≈0.02% round turn). Realistic for SPY/SPX.
-         slippage           = 1,                // 1 tick of slippage per fill. Test 2–3 for fast/news bars.
+         commission_value   = 0.01,             // 0.01% PER SIDE (≈0.02% round turn). SPY profile — see COSTS in the header.
+         slippage           = 1,                // ticks per market/stop fill. Test 2–3 for fast/news bars.
          max_boxes_count    = 500,
          max_lines_count    = 500,
          max_labels_count   = 500)
@@ -52,6 +62,7 @@ grpRisk    = "Risk Management"
 grpBrk     = "Circuit Breakers (Daily Lockout)"
 grpTable   = "Weekday Stats Table"
 grpVis     = "Visuals"
+grpAlert   = "Alerts (webhook)"
 
 // Sessions
 tz             = input.string("America/New_York", "Exchange timezone", group = grpSession, tooltip = "All session times below are in this timezone. Keep as America/New_York for SPX/SPY.")
@@ -91,6 +102,7 @@ stopMethod  = input.string("FVG Buffer", "Initial stop method", options = ["FVG 
 slBuf       = input.int(2, "FVG stop buffer (ticks)", minval = 0, group = grpRisk, tooltip = "FVG Buffer method: extra ticks placed beyond the gap edge for the stop.")
 atrLenInit  = input.int(14, "Initial stop ATR length", minval = 1, group = grpRisk, tooltip = "ATR Based method: ATR period used for the initial stop distance.")
 atrMultInit = input.float(1.5, "Initial stop ATR multiplier", minval = 0.1, step = 0.1, group = grpRisk, tooltip = "ATR Based method: initial stop distance = ATR × this value. Larger = wider stop AND a proportionally wider 1:2 target.")
+qtyRound    = input.string("Auto", "Quantity rounding", options = ["Auto", "Whole units", "Fractional"], group = grpRisk, tooltip = "Auto = whole contracts on futures (syminfo.type == futures), fractional otherwise. Sizes are always rounded DOWN; a rounded size < 1 skips the trade.")
 
 // Circuit breakers (hard daily lockout)
 useBreakers   = input.bool(true, "Enable hard daily circuit breakers", group = grpBrk, tooltip = "When ON, the engine automatically blocks ALL new entries for the rest of the day once a daily risk limit is breached, then resets at the next Asian-session cycle. Detection / visuals keep running so you still SEE the setups that were skipped.")
@@ -108,6 +120,9 @@ showRange = input.bool(true, "Draw Asian range lines", group = grpVis)
 rangeProj = input.int(720, "Range line length (bars)", minval = 60, group = grpVis, tooltip = "How far the Asian High/Low lines extend to the right (in 1m bars). ~720 covers midnight through the late morning.")
 showZones = input.bool(true, "Highlight sweep + FVG entry zone", group = grpVis)
 boxProj   = input.int(40, "Entry zone box projection (bars)", minval = 1, group = grpVis)
+
+// Alerts
+alertToken = input.string("", "Webhook token", group = grpAlert, tooltip = "Webhook-only random value (NOT a login or API key). Must match the receiver. Create ONE alert: condition = this strategy, 'alert() function calls only', webhook URL = receiver. Re-create the alert after changing any input.")
 
 // ───────────────────────────── STATE ─────────────────────────────
 var float asianHigh   = na
@@ -135,6 +150,7 @@ var int   inDir         = 0     // 1 long / -1 short while a position is open
 var float inFvgStop     = na    // FVG-buffer stop level captured at the entry trigger
 var float inInitialStop = na    // finalized on the entry (fill) bar
 var float inTakeProfit  = na
+var float inAtrDist     = na    // ATR-method stop distance captured at signal time (re-applied to the fill)
 
 // Per-trade records for the weekday table (index aligns with strategy.closedtrades)
 var float[] stopArr = array.new_float()
@@ -179,6 +195,7 @@ if asianStartBar
         inFvgStop     := na
         inInitialStop := na
         inTakeProfit  := na
+        inAtrDist     := na
 
 // Build the Asian range
 if asianNow
@@ -212,13 +229,28 @@ atrInit = ta.atr(atrLenInit)
 // Entry is a MARKET order, so the signal-bar close is the estimated fill used to size BEFORE
 // the fill exists (the most robust v5 approach). ATR-based stop distance is fill-independent
 // (= ATR×mult) so risk is essentially exact; the FVG-buffer distance carries one bar of drift.
-// Qty is left as a float so backtest risk is exact. For whole-contract futures, wrap the
-// result with math.floor() and switch commission to per-contract.
+// Qty stays a float unless "Quantity rounding" asks for whole units (futures): f_roundQty
+// rounds DOWN, and a result < 1 makes the caller skip the trade (never rounds risk up).
 f_qty(float estEntry, float estStop, float risk, float eq) =>
     riskAmt = eq * (risk / 100.0)
     dist    = math.max(math.abs(estEntry - estStop), syminfo.mintick)   // floor prevents qty blow-up on a degenerate stop
     perUnit = dist * syminfo.pointvalue
     perUnit > 0 ? riskAmt / perUnit : 0.0
+
+f_roundQty(float q) =>
+    bool whole = qtyRound == "Whole units" or (qtyRound == "Auto" and syminfo.type == "futures")
+    whole ? math.floor(q) : q
+
+// ───────────────────────────── WEBHOOK ALERT (JSON, schema v1 — docs/SPEC.md §5.1) ─────────────────────────────
+f_num(float x) => na(x) ? "null" : str.tostring(x, format.mintick)
+
+f_alert(string action, string side, string setup, float estEntry, float stop, float tp) =>
+    string j = '{"v":1,"token":"' + alertToken + '","strategy_id":"asian_sweep"'
+    j := j + ',"symbol":"' + syminfo.tickerid + '","tf":"' + timeframe.period + '","bar_time":' + str.tostring(time, "#")
+    j := j + ',"action":"' + action + '","side":"' + side + '","setup":"' + setup + '","order_type":"market"'
+    j := j + ',"est_entry":' + f_num(estEntry) + ',"stop":' + f_num(stop) + ',"tp":' + f_num(tp)
+    j := j + ',"stop_dist_pts":' + f_num(math.abs(estEntry - stop)) + ',"rr":' + str.tostring(rr) + '}'
+    alert(j, alert.freq_once_per_bar_close)
 
 // ───────────────────────────── CIRCUIT BREAKERS (hard daily lockout) ─────────────────────────────
 // Tracks the cycle's REALIZED net P&L (incl. commission) plus a consecutive-loss counter.
@@ -324,67 +356,90 @@ if canTrade and not tradedToday and not halted and strategy.position_size == 0 a
     if armDir == 1 and bar_index > armBar and low <= armTop
         // --- Fixed-fractional sizing (estimate the fill at the signal-bar close) ---
         estStop = (stopMethod == "ATR Based" and not na(atrInit)) ? close - atrInit * atrMultInit : armBot - buffer
-        qty     = f_qty(close, estStop, riskPct, strategy.equity)
-        strategy.entry("Long", strategy.long, qty = qty, comment = "Long")
-        inDir := 1
-        inFvgStop := armBot - buffer
-        inInitialStop := na
-        inTakeProfit  := na
-        tradedToday := true
-        armDir := 0
-        if showZones and inDateRange
-            label.new(bar_index, armTop, "▲", style = label.style_label_up, color = color.new(color.green, 0), textcolor = color.white, size = size.tiny)
+        estStop := math.min(estStop, close - syminfo.mintick)
+        qty     = f_roundQty(f_qty(close, estStop, riskPct, strategy.equity))
+        if qty > 0
+            estTP = close + rr * (close - estStop)
+            strategy.entry("Long", strategy.long, qty = qty, comment = "Long")
+            // Bracket in the SAME bar as the entry so the fill bar is protected;
+            // the management block re-prices it from the real fill on the next bar.
+            strategy.exit("Exit L", from_entry = "Long", stop = estStop, limit = estTP)
+            inDir := 1
+            inFvgStop := armBot - buffer
+            inAtrDist := close - estStop
+            inInitialStop := na
+            inTakeProfit  := na
+            tradedToday := true
+            array.push(stopArr, estStop)   // record at signal; refined on the fill bar
+            array.push(dirArr, 1)
+            f_alert("entry", "long", "SWEEP_FVG", close, estStop, estTP)
+            armDir := 0
+            if showZones and inDateRange
+                label.new(bar_index, armTop, "▲", style = label.style_label_up, color = color.new(color.green, 0), textcolor = color.white, size = size.tiny)
     else if armDir == -1 and bar_index > armBar and high >= armBot
         // --- Fixed-fractional sizing (estimate the fill at the signal-bar close) ---
         estStop = (stopMethod == "ATR Based" and not na(atrInit)) ? close + atrInit * atrMultInit : armTop + buffer
-        qty     = f_qty(close, estStop, riskPct, strategy.equity)
-        strategy.entry("Short", strategy.short, qty = qty, comment = "Short")
-        inDir := -1
-        inFvgStop := armTop + buffer
-        inInitialStop := na
-        inTakeProfit  := na
-        tradedToday := true
-        armDir := 0
-        if showZones and inDateRange
-            label.new(bar_index, armBot, "▼", style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.tiny)
+        estStop := math.max(estStop, close + syminfo.mintick)
+        qty     = f_roundQty(f_qty(close, estStop, riskPct, strategy.equity))
+        if qty > 0
+            estTP = close - rr * (estStop - close)
+            strategy.entry("Short", strategy.short, qty = qty, comment = "Short")
+            strategy.exit("Exit S", from_entry = "Short", stop = estStop, limit = estTP)
+            inDir := -1
+            inFvgStop := armTop + buffer
+            inAtrDist := estStop - close
+            inInitialStop := na
+            inTakeProfit  := na
+            tradedToday := true
+            array.push(stopArr, estStop)
+            array.push(dirArr, -1)
+            f_alert("entry", "short", "SWEEP_FVG", close, estStop, estTP)
+            armDir := 0
+            if showZones and inDateRange
+                label.new(bar_index, armBot, "▼", style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.tiny)
 
 // ───────────────────────────── TRADE MANAGEMENT (initial stop + fixed 1:2 TP) ─────────────────────────────
 // LONG
 if strategy.position_size > 0 and inDir == 1
     avg = strategy.position_avg_price
     if na(inTakeProfit)
-        rawStop = (stopMethod == "ATR Based" and not na(atrInit)) ? avg - atrInit * atrMultInit : inFvgStop
+        // ATR method: the signal-bar ATR distance is re-applied to the real fill (SPEC §3.1)
+        rawStop = (stopMethod == "ATR Based" and not na(atrInit)) ? avg - inAtrDist : inFvgStop
         inInitialStop := math.min(rawStop, avg - syminfo.mintick)   // keep stop below entry
         inTakeProfit  := avg + rr * (avg - inInitialStop)           // 1:2 (rr) of actual risk
-        array.push(stopArr, inInitialStop)
-        array.push(dirArr, 1)
+        array.set(stopArr, array.size(stopArr) - 1, inInitialStop)  // refine the signal-bar record
     strategy.exit("Exit L", from_entry = "Long", stop = inInitialStop, limit = inTakeProfit)
 
 // SHORT
 if strategy.position_size < 0 and inDir == -1
     avg = strategy.position_avg_price
     if na(inTakeProfit)
-        rawStop = (stopMethod == "ATR Based" and not na(atrInit)) ? avg + atrInit * atrMultInit : inFvgStop
+        rawStop = (stopMethod == "ATR Based" and not na(atrInit)) ? avg + inAtrDist : inFvgStop
         inInitialStop := math.max(rawStop, avg + syminfo.mintick)   // keep stop above entry
         inTakeProfit  := avg - rr * (inInitialStop - avg)
-        array.push(stopArr, inInitialStop)
-        array.push(dirArr, -1)
+        array.set(stopArr, array.size(stopArr) - 1, inInitialStop)
     strategy.exit("Exit S", from_entry = "Short", stop = inInitialStop, limit = inTakeProfit)
 
-// Close at active session end
-if closeAtEnd and not activeNow and activeNow[1] and strategy.position_size != 0
-    strategy.close_all(comment = "Session end")
+// Close at active session end: first bar after the window, or the chart session's last bar
+// inside it (early close). immediately = fill at this bar's close, not the next bar's open.
+activeExit = (not activeNow and activeNow[1]) or (activeNow and session.islastbar)
+if closeAtEnd and activeExit and strategy.position_size != 0
+    f_alert("exit", strategy.position_size > 0 ? "long" : "short", "", close, na, na)
+    strategy.close_all(comment = "Session end", immediately = true)
 
 // Stop trading outside the backtest date range
 if time > endDate and strategy.position_size != 0
     strategy.close_all(comment = "End of test range")
 
-// Reset management vars once flat
-if strategy.position_size == 0 and inDir != 0
+// Reset management vars ONLY after a trade has actually closed. On the signal bar the market
+// entry is still pending (position_size == 0), so a plain "flat" test would wipe inDir before
+// the fill and the bracket above would never be managed.
+if strategy.position_size == 0 and strategy.closedtrades > strategy.closedtrades[1] and inDir != 0
     inDir := 0
     inFvgStop     := na
     inInitialStop := na
     inTakeProfit  := na
+    inAtrDist     := na
 
 // ───────────────────────────── DATE-RANGE / OOS VISUALS ─────────────────────────────
 bgcolor(showDateViz and not inDateRange       ? color.new(color.gray, 92) : na, title = "Out of date range")
