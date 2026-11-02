@@ -25,6 +25,16 @@
 //   - MAX CONSECUTIVE LOSSES: a losing streak halts new trades for the day.
 //   - OVERALL DRAWDOWN LIMIT: a peak-to-equity drop past Y% stops the strategy entirely.
 //   - Realistic friction defaults (commission + slippage). CALIBRATE to your instrument.
+//     TradingView charges commission on EACH fill (entry and exit separately), so
+//     "cash per contract" = PER-SIDE rate (2.0 => $4 round turn). Slippage is added only to
+//     market and stop fills; the LIMIT entry instead needs price to trade
+//     backtest_fill_limits_assumption ticks THROUGH the level (a mere touch is not a fill).
+//       MES / ES  : Commission "cash per contract" = your broker's PER-SIDE rate · slippage 1–2 ticks
+//       US500 CFD : Commission 0 unless the broker charges one · slippage = (spread / 2 +
+//                   expected slip) in ticks of the chart symbol (a round trip pays two fills)
+//       SPY / ETF : Commission "% of value" per side · slippage 1 tick
+//   - WEBHOOK ALERTS: JSON via alert() (create the alert with "alert() function calls only").
+//     The entry alert is a LIMIT order (order_type "limit"); a "cancel" alert withdraws it.
 // -------------------------------------------------------------------------------------
 //  NON-REPAINTING NOTES
 //   - All decisions are taken on CLOSED bars (calc_on_every_tick stays OFF) and no
@@ -42,8 +52,9 @@ strategy(title              = "ICT Silver Bullet (Sweep+MSS+FVG)",
          default_qty_type   = strategy.fixed,
          default_qty_value  = 1,
          commission_type    = strategy.commission.cash_per_contract,
-         commission_value   = 2.0,        // <-- CALIBRATE: round-turn commission per contract
-         slippage           = 2,          // <-- CALIBRATE: slippage in TICKS per fill
+         commission_value   = 2.0,        // <-- CALIBRATE: commission per contract PER SIDE (2.0 => $4 round turn)
+         slippage           = 2,          // <-- CALIBRATE: slippage in TICKS per market/stop fill
+         backtest_fill_limits_assumption = 1,   // limit entry fills only after trading 1 tick through the level
          calc_on_every_tick = false,
          process_orders_on_close = false,
          max_boxes_count    = 500,
@@ -61,6 +72,7 @@ grpDates = "7) Backtest Date Range & OOS"
 grpDow   = "8) Day of Week Filter"
 grpDash  = "9) Dashboard"
 grpVis   = "10) Visuals"
+grpAlert = "11) Alerts (webhook)"
 
 // ── 1) Windows
 tz        = input.string("America/New_York", "Exchange timezone", group = grpWin, tooltip = "All session times are in this timezone. Keep America/New_York for ES/SPX/SPY.")
@@ -135,6 +147,9 @@ dashSize = input.string("Normal", "Dashboard text size", options = ["Tiny", "Sma
 // ── 10) Visuals
 showVis  = input.bool(true, "Draw sweeps / MSS / FVG", group = grpVis)
 boxProj  = input.int(30, "FVG box projection (bars)", minval = 1, group = grpVis)
+
+// ── 11) Alerts
+alertToken = input.string("", "Webhook token", group = grpAlert, tooltip = "Webhook-only random value (NOT a login or API key). Must match the receiver. Create ONE alert: condition = this strategy, 'alert() function calls only', webhook URL = receiver. Re-create the alert after changing any input.")
 
 // ───────────────────────────── STATE ─────────────────────────────
 var int   phase        = 0      // 0 idle, 1 swept (awaiting MSS/FVG), 2 armed (limit), 3 in-trade
@@ -230,6 +245,18 @@ f_target(_dir, _entry, _risk) =>
             _cand = na(_best) ? na : _best + liqBuf * syminfo.mintick
             _tp := (not na(_cand) and (_entry - _cand) >= minRRliq * _risk) ? _cand : _tp
     _tp
+
+// Webhook alert (JSON, schema v1 — docs/SPEC.md §5.1)
+f_num(float x) => na(x) ? "null" : str.tostring(x, format.mintick)
+
+f_alert(string action, string side, string orderType, float estEntry, float stop, float tp) =>
+    float rrOut = na(tp) or na(stop) or estEntry == stop ? na : math.abs(tp - estEntry) / math.abs(estEntry - stop)
+    string j = '{"v":1,"token":"' + alertToken + '","strategy_id":"ict_silver_bullet"'
+    j := j + ',"symbol":"' + syminfo.tickerid + '","tf":"' + timeframe.period + '","bar_time":' + str.tostring(time, "#")
+    j := j + ',"action":"' + action + '","side":"' + side + '","setup":"SB_FVG","order_type":"' + orderType + '"'
+    j := j + ',"est_entry":' + f_num(estEntry) + ',"stop":' + f_num(stop) + ',"tp":' + f_num(tp)
+    j := j + ',"stop_dist_pts":' + f_num(math.abs(estEntry - stop)) + ',"rr":' + (na(rrOut) ? "null" : str.tostring(rrOut, "#.##")) + '}'
+    alert(j, alert.freq_once_per_bar_close)
 
 // ───────────────────────────── PIVOTS / LIQUIDITY POOLS ─────────────────────────────
 ph = ta.pivothigh(pivotLen, pivotLen)
@@ -352,27 +379,39 @@ if phase == 1 and inWindow
                             stopLevel  := stp
                             tpLevel    := f_target(dir, ent, rsk)
                             armBar     := bar_index
+                            // Bracket goes in with the limit entry: it only activates once the entry
+                            // fills, so the fill bar is protected; cancelled together with the entry.
                             if dir == -1
                                 strategy.entry("Short", strategy.short, qty = q, limit = ent)
+                                strategy.exit("Exit S", from_entry = "Short", stop = stopLevel, limit = tpLevel)
                             else
                                 strategy.entry("Long", strategy.long, qty = q, limit = ent)
+                                strategy.exit("Exit L", from_entry = "Long", stop = stopLevel, limit = tpLevel)
+                            f_alert("entry", dir == -1 ? "short" : "long", "limit", ent, stopLevel, tpLevel)
                             phase := 2
                             if showVis and inDateRange
                                 box.new(math.max(bar_index - 2, sweepBar), fT, bar_index + boxProj, fB, border_color = color.new(dir == -1 ? color.red : color.green, 25), bgcolor = color.new(dir == -1 ? color.red : color.green, 82))
 
+// Count-based fill detection: also catches a limit entry that fills AND exits on the same bar
+// (position_size never leaves 0 at a bar close in that case). Computed before the cancel
+// block so such a bar is not mistaken for an unfilled order.
+justEntered = strategy.opentrades + strategy.closedtrades > nz(strategy.opentrades[1] + strategy.closedtrades[1], 0)
+
 // ───────────────────────────── 4) CANCEL / INVALIDATE (armed, unfilled) ─────────────────────────────
-if phase == 2 and strategy.position_size == 0
+if phase == 2 and strategy.position_size == 0 and not justEntered
     brokeStop = (dir == -1 and close > stopLevel) or (dir == 1 and close < stopLevel)
     expired   = not inWindow or (bar_index - armBar) > maxBarsToFill
     if brokeStop or expired
         strategy.cancel("Long")
         strategy.cancel("Short")
+        strategy.cancel("Exit L")       // position is flat here: only the pending bracket goes
+        strategy.cancel("Exit S")
+        f_alert("cancel", dir == -1 ? "short" : "long", "limit", entryLevel, stopLevel, tpLevel)
         phase   := 0
         dir     := 0
         mssDone := false
 
 // ───────────────────────────── 5) FILL DETECTION ─────────────────────────────
-justEntered = strategy.position_size != 0 and nz(strategy.position_size[1], 0) == 0
 if justEntered
     phase        := 3
     tradesWindow += 1
@@ -415,6 +454,11 @@ if useDailyDD and not haltedToday and dailyPnLPct <= -maxDailyDDPct
         strategy.close_all(comment = "Daily DD halt")
     strategy.cancel("Long")
     strategy.cancel("Short")
+    if strategy.position_size == 0      // never pull the stop of an open position
+        strategy.cancel("Exit L")
+        strategy.cancel("Exit S")
+        if phase == 2
+            f_alert("cancel", dir == -1 ? "short" : "long", "limit", entryLevel, stopLevel, tpLevel)
     if phase != 3
         phase := 0
 
@@ -427,10 +471,17 @@ if useOverallDD and not haltedPerma and ddPeakPct <= -maxOverallPct
         strategy.close_all(comment = "Overall DD halt")
     strategy.cancel("Long")
     strategy.cancel("Short")
+    if strategy.position_size == 0
+        strategy.cancel("Exit L")
+        strategy.cancel("Exit S")
+        if phase == 2
+            f_alert("cancel", dir == -1 ? "short" : "long", "limit", entryLevel, stopLevel, tpLevel)
 
 // ───────────────────────────── INTRADAY / END-OF-RANGE FLATTEN ─────────────────────────────
-if closeAtDayEnd and strategy.position_size != 0 and curMin >= flatMin
-    strategy.close_all(comment = "EOD flat")
+// session.islastbar also flattens on half days; immediately = fill at this bar's close
+if closeAtDayEnd and strategy.position_size != 0 and (curMin >= flatMin or session.islastbar)
+    f_alert("exit", strategy.position_size > 0 ? "long" : "short", "market", close, na, na)
+    strategy.close_all(comment = "EOD flat", immediately = true)
 
 if time > endDate and strategy.position_size != 0
     strategy.close_all(comment = "End of range")
