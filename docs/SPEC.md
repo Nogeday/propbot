@@ -178,19 +178,20 @@ if strategy.position_size == 0 and strategy.closedtrades > strategy.closedtrades
 |---|---|---|
 | `v` | int | şema sürümü (1) |
 | `token` | str | yalnızca webhook'a özel rastgele değer (login bilgisi değil) |
-| `strategy_id` | str | `ny_orb_fvg`, `asian_sweep`, … |
+| `strategy_id` | str | `ny_orb_fvg`, `asian_sweep`, `ict_silver_bullet`, `mr_bb_kc_rsi2`, `mtf_trend_cont` (Master: S1 = `ny_orb_fvg`, S2 = `asian_sweep`) |
 | `symbol` | str | `syminfo.tickerid` |
 | `tf` | str | `timeframe.period` |
 | `bar_time` | int | sinyal barının açılış zamanı, epoch ms (`time`) |
-| `action` | str | `entry` · `stop_update` · `exit` · `heartbeat` |
+| `action` | str | `entry` · `stop_update` · `exit` · `cancel` (bekleyen limit girişi geri çek) · `heartbeat` |
 | `side` | str | `long` · `short` |
-| `setup` | str | `FVG` · `IFVG` · `SWEEP_FVG` |
+| `setup` | str | `FVG` · `IFVG` · `SWEEP_FVG` · `SB_FVG` · `BB_KC_RSI2` · `MTF_PULLBACK` (`stop_update`/`exit`'te boş) |
+| `order_type` | str | `market` · `limit` (limit: `est_entry` = limit fiyatı; iptalde `cancel` gelir) |
 | `est_entry` | float | sinyal barı kapanışı |
 | `stop`, `tp` | float | seviye |
 | `stop_dist_pts` | float | `abs(est_entry - stop)` |
 | `rr` | float | |
 
-Fiyatları `str.tostring(x, format.mintick)` ile yaz. Strateji başına TradingView'da bir alarm: koşul
+Fiyatları `str.tostring(x, format.mintick)` ile yaz; olmayan sayısal alan `null` (ör. `exit`'te `stop`/`tp`). Strateji başına TradingView'da bir alarm: koşul
 "alert() function calls only", webhook URL'si alıcı adresi.
 
 ### 5.2 Alıcı
