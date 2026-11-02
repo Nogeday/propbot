@@ -38,6 +38,17 @@
 //   • Background shading on the realtime (forming) bar may flicker until that bar closes;
 //       this is cosmetic only and never alters a historical signal or trade.
 //   • Set realistic Commission / Slippage in the strategy "Properties" tab to match broker.
+//
+//  COSTS PER INSTRUMENT — strategy() cost fields are constants, so set them in Properties.
+//   TradingView charges commission on EACH fill (entry and exit separately) and adds
+//   slippage only to market and stop fills (never to limit fills such as the basis target).
+//     SPY / ETF : Commission "% of value" per side · slippage 1 tick
+//     MES / ES  : Commission "cash per contract" = your broker's PER-SIDE rate · slippage 1 tick
+//     US500 CFD : Commission 0 unless the broker charges one · slippage = (spread / 2 +
+//                 expected slip) in ticks of the chart symbol (a round trip pays two fills)
+//   The 0.02 % default below is a PLACEHOLDER, not a calibrated value.
+//  QUANTITY ROUNDING: "Auto" = whole contracts on futures; a size < 1 skips the trade.
+//  WEBHOOK ALERTS: JSON via alert() (create the alert with "alert() function calls only").
 // =====================================================================================
 
 strategy(title                   = "Mean Reversion BB/KC + RSI(2) Fade",
@@ -48,8 +59,8 @@ strategy(title                   = "Mean Reversion BB/KC + RSI(2) Fade",
          default_qty_type        = strategy.fixed,
          default_qty_value       = 1,
          commission_type         = strategy.commission.percent,
-         commission_value        = 0.02,   // placeholder — calibrate to your instrument/broker
-         slippage                = 2,       // ticks — calibrate to realistic index spread
+         commission_value        = 0.02,   // placeholder — % PER SIDE; calibrate to your instrument/broker (see COSTS)
+         slippage                = 2,       // ticks per market/stop fill — calibrate to realistic index spread
          calc_on_every_tick      = false,   // no intrabar recalculation -> no signal repaint
          process_orders_on_close = false,   // entries fill next open; stops/limits stay intrabar
          max_lines_count         = 500,
@@ -65,6 +76,7 @@ grpDow    = "Day of Week Filter"
 grpDates  = "Backtest Date Range"
 grpTable  = "Weekday Stats Table"
 grpVis    = "Visuals"
+grpAlert  = "Alerts (webhook)"
 
 // Bands & indicators
 bbLen   = input.int(20,    "Bollinger length",          minval = 1,                 group = grpBands)
@@ -89,6 +101,7 @@ allowShort     = input.bool(true,  "Allow shorts (fade upper band)",            
 riskPct      = input.float(1.0, "Risk per trade (% of equity)",                 minval = 0.01, step = 0.1, group = grpRisk, tooltip = "True fixed-fractional sizing. Quantity is solved so a full stop-out loses ≈ this % of current equity (before slippage/commission).")
 maxDailyLoss = input.float(3.0, "Max daily loss halt (% of day-start equity)",  minval = 0.1,  step = 0.1, group = grpRisk, tooltip = "Once the day's equity drawdown (including open P&L) reaches this, NEW entries are blocked until the next session. Mirrors a prop-firm daily loss limit.")
 closeOnHalt  = input.bool(true,  "Flatten open trade when daily halt triggers",              group = grpRisk, tooltip = "Prop-firm-safe: close any open position the moment the daily loss limit is breached.")
+qtyRound     = input.string("Auto", "Quantity rounding", options = ["Auto", "Whole units", "Fractional"], group = grpRisk, tooltip = "Auto = whole contracts on futures (syminfo.type == futures), fractional otherwise. Sizes are always rounded DOWN; a rounded size < 1 skips the trade.")
 
 // Time filter
 tz            = input.string("America/New_York", "Exchange timezone", group = grpTime, tooltip = "Session times below are in this timezone. Keep as America/New_York for SPX / ES / SPY.")
@@ -132,13 +145,31 @@ showEma     = input.bool(true,  "Show trend EMA",                  group = grpVi
 showSetupBg = input.bool(true,  "Shade background on forming setup", group = grpVis)
 showLevels  = input.bool(true,  "Show active stop / target",       group = grpVis)
 
+// Alerts
+alertToken = input.string("", "Webhook token", group = grpAlert, tooltip = "Webhook-only random value (NOT a login or API key). Must match the receiver. Create ONE alert: condition = this strategy, 'alert() function calls only', webhook URL = receiver. Re-create the alert after changing any input.")
+
 // ───────────────────────────── POSITION SIZING HELPER ─────────────────────────────
 // Solve quantity from the STOP DISTANCE so a full stop-out ≈ riskPct of equity.
 //   loss_at_stop = qty × stopDistance(points) × pointvalue  ->  qty = riskCapital / (dist × pv)
+// Rounds DOWN to whole units when requested (futures); a result < 1 skips the trade (qty > 0 gate).
 f_qtyFromDist(_distPoints) =>
     _riskCapital = strategy.equity * (riskPct / 100.0)
     _perUnit     = _distPoints * syminfo.pointvalue
-    _perUnit > 0 ? _riskCapital / _perUnit : 0.0
+    _raw         = _perUnit > 0 ? _riskCapital / _perUnit : 0.0
+    _whole       = qtyRound == "Whole units" or (qtyRound == "Auto" and syminfo.type == "futures")
+    _whole ? math.floor(_raw) : _raw
+
+// ───────────────────────────── WEBHOOK ALERT (JSON, schema v1 — docs/SPEC.md §5.1) ─────────────────────────────
+f_num(float x) => na(x) ? "null" : str.tostring(x, format.mintick)
+
+f_alert(string action, string side, float estEntry, float stop, float tp) =>
+    float rrOut = na(tp) or na(stop) or estEntry == stop ? na : math.abs(tp - estEntry) / math.abs(estEntry - stop)
+    string j = '{"v":1,"token":"' + alertToken + '","strategy_id":"mr_bb_kc_rsi2"'
+    j := j + ',"symbol":"' + syminfo.tickerid + '","tf":"' + timeframe.period + '","bar_time":' + str.tostring(time, "#")
+    j := j + ',"action":"' + action + '","side":"' + side + '","setup":"BB_KC_RSI2","order_type":"market"'
+    j := j + ',"est_entry":' + f_num(estEntry) + ',"stop":' + f_num(stop) + ',"tp":' + f_num(tp)
+    j := j + ',"stop_dist_pts":' + f_num(math.abs(estEntry - stop)) + ',"rr":' + (na(rrOut) ? "null" : str.tostring(rrOut, "#.##")) + '}'
+    alert(j, alert.freq_once_per_bar_close)
 
 // ───────────────────────────── INDICATORS (every bar) ─────────────────────────────
 // Bollinger Bands (SMA basis + stdev width)
@@ -243,13 +274,11 @@ goShort = tradingAllowed and shortConfirm
 if strategy.position_size > 0 and na(inStop)
     inDir  := 1
     inStop := strategy.position_avg_price - atrMult * atrStored
-    array.push(stopArr, inStop)              // record for the weekday stats table
-    array.push(dirArr, 1)
+    array.set(stopArr, array.size(stopArr) - 1, inStop)   // refine the signal-bar record
 if strategy.position_size < 0 and na(inStop)
     inDir  := -1
     inStop := strategy.position_avg_price + atrMult * atrStored
-    array.push(stopArr, inStop)
-    array.push(dirArr, -1)
+    array.set(stopArr, array.size(stopArr) - 1, inStop)
 
 // LONG: fixed ATR stop + live 20-SMA basis target (never placed below the entry)
 if strategy.position_size > 0 and inDir == 1
@@ -262,9 +291,11 @@ if strategy.position_size < 0 and inDir == -1
     strategy.exit("Exit S", from_entry = "Short", stop = inStop, limit = tpS)
 
 // ───────────────────────────── FORCED EXITS ─────────────────────────────
-// Flatten at session end
-if closeAtEnd and atOrPastEnd and strategy.position_size != 0
-    strategy.close_all(comment = "Session end")
+// Flatten at session end. session.islastbar also covers half days; immediately = fill at
+// this bar's close (on an RTH-only chart the next open would be the next session).
+if closeAtEnd and (atOrPastEnd or session.islastbar) and strategy.position_size != 0
+    f_alert("exit", strategy.position_size > 0 ? "long" : "short", close, na, na)
+    strategy.close_all(comment = "Session end", immediately = true)
 
 // Flatten the instant the daily loss breaker trips
 if closeOnHalt and dailyHalt and strategy.position_size != 0
@@ -281,16 +312,30 @@ if strategy.position_size == 0 and inDir != 0
     atrStored := na
 
 // ───────────────────────────── ENTRY (submitted on confirmation close, fills next open) ─────────────────────────────
+// The bracket is placed in the SAME bar as the entry (estimated from this close) so the fill
+// bar is protected; the management block re-prices it from the real fill on the next bar.
 if goLong
     qtyL = f_qtyFromDist(atrMult * atrVal)
     if qtyL > 0
         atrStored := atrVal
+        estStopL = close - atrMult * atrVal
+        estTpL   = math.max(basis, close + syminfo.mintick)
         strategy.entry("Long", strategy.long, qty = qtyL, comment = "MR Long")
+        strategy.exit("Exit L", from_entry = "Long", stop = estStopL, limit = estTpL)
+        array.push(stopArr, estStopL)    // record at signal; refined on the fill bar
+        array.push(dirArr, 1)
+        f_alert("entry", "long", close, estStopL, estTpL)
 if goShort
     qtyS = f_qtyFromDist(atrMult * atrVal)
     if qtyS > 0
         atrStored := atrVal
+        estStopS = close + atrMult * atrVal
+        estTpS   = math.min(basis, close - syminfo.mintick)
         strategy.entry("Short", strategy.short, qty = qtyS, comment = "MR Short")
+        strategy.exit("Exit S", from_entry = "Short", stop = estStopS, limit = estTpS)
+        array.push(stopArr, estStopS)
+        array.push(dirArr, -1)
+        f_alert("entry", "short", close, estStopS, estTpS)
 
 // ───────────────────────────── VISUALS ─────────────────────────────
 // Bollinger Bands + fill
