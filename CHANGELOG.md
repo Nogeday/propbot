@@ -7,7 +7,8 @@ varsayılanları değişmedi; aşağıda "davranış notu" olarak işaretlenen y
 Tüm dosyalara eklenen iki girdi: **Quantity rounding** (B5; Master/NY/Asian/MR) ve **Webhook token** (B7; hepsi).
 
 Commit'ler: `e26e1bb` baseline · `1035771` NY dosya adı · `aa4025d` NY · `7ad1979` Asian · `a14240f` Master ·
-`7d3694a` Silver Bullet · `ab5ecf6` Mean Reversion · `8c0aa72` MTF · `cc6aa94` SPEC §5.1.
+`7d3694a` Silver Bullet · `ab5ecf6` Mean Reversion · `8c0aa72` MTF · `cc6aa94` SPEC §5.1 ·
+`e997dd5` MTF `riskPts` bildirimi.
 
 ### `pine/ny_open_fvg_strategy.pine` (eski adı `ny_open_fvg_strategy_2.pine`)
 - Yeniden adlandırıldı: SPEC §3.2 bu adı kullanıyor.
@@ -87,28 +88,32 @@ Commit'ler: `e26e1bb` baseline · `1035771` NY dosya adı · `aa4025d` NY · `7a
   Davranış notu: "Restrict entries to a session window" kapalıyken de seans son barında kapatır; varsayılan açık.
 - **B7:** `strategy_id = mtf_trend_cont`, `setup = MTF_PULLBACK`, `rr = tp1RR`, `tp = TP1`; `entry`, `stop_update`
   (init → BE/trail), `exit`.
+- **Derleme düzeltmesi (B-kapsamı dışı, kullanıcı onayıyla):** dolum bloklarındaki `riskPts := ...` (long ve short)
+  bildirimi olmayan bir değişkene atıyordu → `float riskPts = ...` yerel bildirime çevrildi. Değer ve kullanım aynı.
 
 ### `docs/SPEC.md` §5.1
 - `strategy_id` değerleri, `cancel` action, yeni `setup` değerleri ve `order_type` (`market`/`limit`) alanı eklendi;
   olmayan sayısal alan `null`.
 
-## Açık bulgular (düzeltilmedi — karar bekliyor)
+## Açık bulgular
 
-1. **MTF derleme riski:** `riskPts := ...` (satır ~414 ve short simetriği) bildirimi olmayan bir değişkene `:=` ile atıyor;
-   Pine v5'te bu normalde "Undeclared identifier" hatasıdır. Orijinalde de aynı. Derleme hatası verirse düzeltme
-   `riskPts = ...` (bildirim) olur — onay gerekiyor.
-2. **B4 sayısal değerleri:** Varsayılanlar değişmedi. FTMO `US500.cash` spread'i/komisyonu ve kullanılacak TV sembolü
-   (CFD karşılığı) gelince her dosyada `commission_*`/`slippage` tek commit'le ayarlanacak.
-3. **Master dolum barında yeniden fiyatlamıyor:** TP ve ATR stop sinyal kapanışına göre sabit; trailing R'si de
+Durum: 1 çözüldü; 2–8 Faz 2'ye ertelendi (kullanıcı kararı, Faz 0'da dokunulmayacak); 9–11 açık.
+
+1. ~~**MTF derleme riski:** `riskPts := ...` bildirimi olmayan değişkene atama.~~ **Çözüldü** (`e997dd5`,
+   `float riskPts = ...`).
+2. **B4 sayısal değerleri — Faz 2:** Koddaki varsayılanlar değişmedi. FTMO `US500.cash` spread'i/komisyonu Faz 2'de
+   verilecek. Faz 0 TradingView testleri altı dosyada da `CME_MINI:MES1!` üzerinde, Properties'te elle
+   Commission = 0,50 USD/kontrat (taraf başı), Slippage = 1 tick ile yapılıyor (orijinal ve v2 aynı).
+3. **[Faz 2]** **Master dolum barında yeniden fiyatlamıyor:** TP ve ATR stop sinyal kapanışına göre sabit; trailing R'si de
    `s1_entryEst`'e göre. NY/Asian tekil dosyalar dolum fiyatını kullanıyor → S1/S2 dosyalar arasında farklı, §3.1
    parite tanımından sapma. Faz 2 paritesinden önce karar verilmeli.
-4. **Boyutlandırma güncel equity'ye göre** (bileşik) — NY/Asian/Master/MR/MTF; SB varsayılanı "Account Equity".
+4. **[Faz 2]** **Boyutlandırma güncel equity'ye göre** (bileşik) — NY/Asian/Master/MR/MTF; SB varsayılanı "Account Equity".
    §8.1 başlangıç bakiyesini istiyor.
-5. **Risk varsayılanları:** SB ve MR `riskPct = 1.0` (§8.1 tavanı 0,5); SB günlük DD %4.
-6. **Günlük işlem sınırı:** MR'de yok; MTF 3, SB 2 — §3.1 "strateji başına günde en fazla 1".
-7. **Seansın son barında giriş:** NY/MR/MTF/SB yarım günde (veya yalnız-RTH grafikte) son barda piyasa girişi
+5. **[Faz 2]** **Risk varsayılanları:** SB ve MR `riskPct = 1.0` (§8.1 tavanı 0,5); SB günlük DD %4.
+6. **[Faz 2]** **Günlük işlem sınırı:** MR'de yok; MTF 3, SB 2 — §3.1 "strateji başına günde en fazla 1".
+7. **[Faz 2]** **Seansın son barında giriş:** NY/MR/MTF/SB yarım günde (veya yalnız-RTH grafikte) son barda piyasa girişi
    üretebilir → emir bir sonraki seansın açılışında dolar (gece taşıma). B3 yalnızca çıkış tarafını kapsıyor.
-8. **`immediately` olmayan zorunlu kapanışlar:** günlük/toplam DD kapanışları ve "End of (test) range" bir sonraki
+8. **[Faz 2]** **`immediately` olmayan zorunlu kapanışlar:** günlük/toplam DD kapanışları ve "End of (test) range" bir sonraki
    barın açılışında doluyor.
 9. **NY/Asian/Master başlıkları "SPY/SPX"** diyor; Asian ve S2 23 saatlik enstrüman gerektiriyor (§3.3).
 10. **`pine/README.md`** dosya adları gerçek adlarla eşleşmiyor.

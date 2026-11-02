@@ -5,32 +5,40 @@ oturumuna yapıştırırsın. Sıra: **Master → NY → Asian → Silver Bullet
 Her dosya için A–F adımlarını tamamla, sonra bir sonrakine geç.
 
 ## 0. Hazırlık (bir kez)
-- [ ] Önce/sonra karşılaştırması için **aynı** sembol, zaman dilimi ve tarih aralığı seç ve aşağıya yaz.
-      Asian ve Master S2, SPY/SPX'te çalışmaz (20:00–00:00 ET verisi yok) → bunlar için ES/MES veya bir US500 CFD
-      sembolü kullan.
+- [ ] Faz 0 testlerinin hepsi **`CME_MINI:MES1!`** üzerinde (altı dosya). Önce/sonra karşılaştırmasında orijinal ve
+      v2 için **aynı** zaman dilimi ve tarih aralığını kullan ve aşağıya yaz.
+- [ ] Asian ve Master S2, 20:00–00:00 ET verisi ister → bu ikisinde grafikte "Extended trading hours" **açık** olmalı.
+- [ ] **Maliyet ayarları (Properties sekmesi, altı dosyada da, orijinal ve v2'de aynı):**
+
+      | Ayar | Değer |
+      |---|---|
+      | Commission | **0.50**, tip: cash per contract (USD/kontrat, taraf başı → gidiş-dönüş $1,00) |
+      | Slippage | **1** tick |
+
+      Bu değerler koddaki varsayılanlar değildir; her script'te Properties'te elle girilir. FTMO `US500.cash`
+      değerleri Faz 2'de gelecek (CHANGELOG "Açık bulgular" 2).
 - [ ] Grafik saat dilimi fark etmez (script `America/New_York` kullanıyor), ama kontrolü kolaylaştırmak için
       grafiği `(UTC-5) New York` yap.
 
 | Dosya | Sembol | TF | Tarih aralığı | Seans (RTH / ETH) |
 |---|---|---|---|---|
-| master | | 1m | | |
-| ny_open_fvg | | 1m | | |
-| asian_sweep | | 1m | | |
-| ict_silver_bullet | | 1m veya 5m | | |
-| mean_reversion | | 5m–15m | | |
-| mtf_trend | | 5m | | |
+| master | CME_MINI:MES1! | 1m | | ETH |
+| ny_open_fvg | CME_MINI:MES1! | 1m | | |
+| asian_sweep | CME_MINI:MES1! | 1m | | ETH |
+| ict_silver_bullet | CME_MINI:MES1! | 1m veya 5m | | |
+| mean_reversion | CME_MINI:MES1! | 5m–15m | | |
+| mtf_trend | CME_MINI:MES1! | 5m | | |
 
 ## A. Derleme ve kayıt
 - [ ] Pine Editor → **yeni** script → düzeltilmiş `.pine` dosyasının tamamını yapıştır → **"… v2"** adıyla kaydet.
       Orijinalin üzerine yazma.
 - [ ] "Add to chart" — derleme hatası varsa **mesajı ve satır numarasını** olduğu gibi kopyala.
-  - MTF için özel not: `riskPts` ile ilgili "Undeclared identifier" hatası çıkarsa bunu belirt (orijinal kodda da
-    aynı satır var; CHANGELOG "Açık bulgular" 1).
+  - MTF için özel not: v2'de `riskPts` bildirimi düzeltildi (`e997dd5`). **Orijinal** MTF'de "Undeclared identifier"
+    hatası çıkıyorsa bunu yaz; o zaman orijinal sütunu boş kalır (karşılaştırma yapılamaz).
 - [ ] Uyarı (sarı) mesajları varsa onları da kopyala.
 
 ## B. Maliyet ayarları (Properties sekmesi)
-- [ ] Script başlığındaki "COSTS PER INSTRUMENT" tablosuna göre Commission ve Slippage değerlerini seçtiğin sembole
-      ayarla. Önce/sonra karşılaştırmasında orijinal ve v2'de **aynı** değerleri kullan.
+- [ ] Commission = 0.50 cash per contract, Slippage = 1 tick (bkz. 0. Hazırlık). Orijinal ve v2'de **aynı**.
 - [ ] Silver Bullet: Properties'te "Verify price for limit orders" = **1 tick** göründüğünü kontrol et.
 - [ ] Kullandığın değerleri yaz: komisyon tipi/değeri, slipaj (tick), limit doğrulama.
 
@@ -86,5 +94,5 @@ Orijinal ve v2 için aynı ayarlarla doldur. "Tot R" script'in kendi tablosundan
 3. C bölümündeki önce/sonra tablosu + maliyetsiz koşu sonucu.
 4. D ve E maddelerinde geçen/kalan/test edilemeyen her madde.
 5. En az bir alarm yükü örneği (token maskeli).
-6. B4 için: FTMO terminalinde `US500.cash` tipik spread'i (puan), komisyon olup olmadığı ve TV'de kullanacağın CFD
-   sembolü.
+
+(B4 FTMO `US500.cash` değerleri Faz 2'de istenecek; Faz 0'da gerekmez.)
