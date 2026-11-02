@@ -411,7 +411,7 @@ if inLong
     if na(activeTP1)                                   // first bar of the long -> finalize
         avg = strategy.position_avg_price
         activeInitStop := math.min(pendingStop, avg - syminfo.mintick)
-        riskPts := avg - activeInitStop
+        float riskPts = avg - activeInitStop
         activeTP1 := avg + tp1RR * riskPts
         runnerStop := activeInitStop
         // Submitted qty, not the current position: TP1 may already have filled on this bar.
@@ -458,7 +458,7 @@ if inShort
     if na(activeTP1)
         avg = strategy.position_avg_price
         activeInitStop := math.max(pendingStop, avg + syminfo.mintick)
-        riskPts := activeInitStop - avg
+        float riskPts = activeInitStop - avg
         activeTP1 := avg - tp1RR * riskPts
         runnerStop := activeInitStop
         entryQty := pendingQty
