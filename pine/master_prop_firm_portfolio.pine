@@ -34,6 +34,17 @@
 //   drift for the FVG-buffer stop (inherent to market orders).
 //
 //   Commission/Slippage are pre-filled with realistic defaults; confirm them for your symbol.
+//   COSTS PER INSTRUMENT — strategy() cost fields are constants, so set them in Properties.
+//     TradingView charges commission on EACH fill (entry and exit separately) and adds
+//     slippage only to market and stop fills (never to limit fills).
+//       SPY / ETF : Commission "% of value" per side (default 0.01) · slippage 1 tick
+//       MES / ES  : Commission "cash per contract" = your broker's PER-SIDE rate · slippage 1 tick
+//       US500 CFD : Commission 0 unless the broker charges one · slippage = (spread / 2 +
+//                   expected slip) in ticks of the chart symbol (a round trip pays two fills)
+//     NOTE: S2 needs 20:00–00:00 ET data → SPY/SPX cannot run S2; use ES/MES or a US500 CFD.
+//   QUANTITY ROUNDING: "Auto" = whole contracts on futures; a size < 1 skips the trade.
+//   WEBHOOK ALERTS: JSON via alert() (create ONE alert with "alert() function calls only");
+//     S1 alerts carry strategy_id "ny_orb_fvg", S2 alerts "asian_sweep".
 // =====================================================================================
 
 strategy(title              = "Master Prop Firm Portfolio (S1 ORB + S2 Sweep)",
@@ -44,8 +55,8 @@ strategy(title              = "Master Prop Firm Portfolio (S1 ORB + S2 Sweep)",
          default_qty_type   = strategy.fixed,   // fallback only; every entry passes an explicit qty
          default_qty_value  = 1,
          commission_type    = strategy.commission.percent,
-         commission_value   = 0.01,             // 0.01% PER SIDE (≈0.02% round turn). Realistic for SPY/SPX.
-         slippage           = 1,                // 1 tick of slippage per fill. Test 2–3 for fast/news bars.
+         commission_value   = 0.01,             // 0.01% PER SIDE (≈0.02% round turn). SPY profile — see COSTS in the header.
+         slippage           = 1,                // ticks per market/stop fill. Test 2–3 for fast/news bars.
          max_boxes_count    = 500,
          max_lines_count    = 500,
          max_labels_count   = 500)
@@ -63,6 +74,7 @@ grpS2risk   = "S2 · Asian Sweep — Risk & Stop"
 grpS2dow    = "S2 · Asian Sweep — Day Filter"
 grpTable    = "Unified Stats Table"
 grpVis      = "Visuals"
+grpAlert    = "Alerts (webhook)"
 
 // ── Master / global ──
 s1_enable           = input.bool(true,  "Enable NY Breakout (S1)",  group = grpMaster)
@@ -71,6 +83,7 @@ riskPct             = input.float(0.5, "Risk Per Trade (%) — both engines", mi
 rr                  = input.float(2.0, "Reward : Risk — both engines", minval = 0.1, step = 0.1, group = grpMaster)
 maxConcurrentRiskPct= input.float(1.0, "Max concurrent open risk (%)", minval = 0.1, step = 0.1, group = grpMaster, tooltip = "If one engine is already open and the other fires, the new entry is blocked unless total OPEN risk stays ≤ this. With 0.5% per trade, 1.0% permits exactly two concurrent positions (same direction only — see header).")
 tz                  = input.string("America/New_York", "Exchange timezone", group = grpMaster, tooltip = "Keep as America/New_York for SPX/SPY. All session times are in this zone.")
+qtyRound            = input.string("Auto", "Quantity rounding — both engines", options = ["Auto", "Whole units", "Fractional"], group = grpMaster, tooltip = "Auto = whole contracts on futures (syminfo.type == futures), fractional otherwise. Sizes are always rounded DOWN; a rounded size < 1 skips the trade.")
 
 // ── Global circuit breakers ──
 useBreakers   = input.bool(true, "Enable global daily circuit breakers", group = grpBrk, tooltip = "When ON, the engine blocks ALL new entries (S1 AND S2) for the rest of the NY day once a combined daily limit is breached, then resets next day. Detection/visuals keep running so skipped setups are still drawn.")
@@ -163,6 +176,9 @@ s2_rangeProj  = input.int(720, "S2 range line length (bars)", minval = 60, group
 s2_showZones  = input.bool(true, "S2 highlight sweep + FVG zone", group = grpVis)
 s2_boxProj    = input.int(40, "S2 entry zone box projection (bars)", minval = 1, group = grpVis)
 
+// ── Alerts ──
+alertToken = input.string("", "Webhook token", group = grpAlert, tooltip = "Webhook-only random value (NOT a login or API key). Must match the receiver. Create ONE alert: condition = this strategy, 'alert() function calls only', webhook URL = receiver. Re-create the alert after changing any input.")
+
 // ═════════════════════════════ STATE ═════════════════════════════
 // S1 state
 var float s1_orHigh = na
@@ -230,7 +246,8 @@ s1_orStart  = s1_orStartHour * 60 + s1_orStartMin
 s1_orEnd    = s1_orStart + s1_orMinutes
 s1_sessEnd  = s1_sessEndHour * 60 + s1_sessEndMin
 s1_isInOR       = curMin >= s1_orStart and curMin < s1_orEnd
-s1_atSessionEnd = curMin == s1_sessEnd
+// ">=" + session.islastbar: also flattens on half days and when the sessEnd bar is missing
+s1_atSessionEnd = curMin >= s1_sessEnd or session.islastbar
 s1_dayOK = (dow == dayofweek.monday and s1_tradeMon) or (dow == dayofweek.tuesday and s1_tradeTue) or (dow == dayofweek.wednesday and s1_tradeWed) or (dow == dayofweek.thursday and s1_tradeThu) or (dow == dayofweek.friday and s1_tradeFri)
 
 // S2 session math (supports windows that wrap past midnight)
@@ -243,6 +260,7 @@ s2_activeNow = s2_activeEndM > s2_activeStartM ? (curMin >= s2_activeStartM and 
 s2_asianStartBar = s2_asianNow and not s2_asianNow[1]
 s2_asianEndBar   = not s2_asianNow and s2_asianNow[1]
 s2_activeFirst   = s2_activeNow and not s2_activeNow[1]
+s2_activeExit    = (not s2_activeNow and s2_activeNow[1]) or (s2_activeNow and session.islastbar)
 s2_dayOK = (dow == dayofweek.monday and s2_tradeMon) or (dow == dayofweek.tuesday and s2_tradeTue) or (dow == dayofweek.wednesday and s2_tradeWed) or (dow == dayofweek.thursday and s2_tradeThu) or (dow == dayofweek.friday and s2_tradeFri)
 
 // ───────────────────────────── DAILY / CYCLE RESETS ─────────────────────────────
@@ -308,6 +326,22 @@ f_qty(float estEntry, float estStop, float risk, float eq) =>
     dist    = math.max(math.abs(estEntry - estStop), syminfo.mintick)
     perUnit = dist * syminfo.pointvalue
     perUnit > 0 ? riskAmt / perUnit : 0.0
+
+// Rounds DOWN to whole units when requested (futures); a result < 1 makes the caller skip the trade.
+f_roundQty(float q) =>
+    bool whole = qtyRound == "Whole units" or (qtyRound == "Auto" and syminfo.type == "futures")
+    whole ? math.floor(q) : q
+
+// ───────────────────────────── WEBHOOK ALERT (JSON, schema v1 — docs/SPEC.md §5.1) ─────────────────────────────
+f_num(float x) => na(x) ? "null" : str.tostring(x, format.mintick)
+
+f_alert(string strategyId, string action, string side, string setup, float estEntry, float stop, float tp) =>
+    string j = '{"v":1,"token":"' + alertToken + '","strategy_id":"' + strategyId + '"'
+    j := j + ',"symbol":"' + syminfo.tickerid + '","tf":"' + timeframe.period + '","bar_time":' + str.tostring(time, "#")
+    j := j + ',"action":"' + action + '","side":"' + side + '","setup":"' + setup + '","order_type":"market"'
+    j := j + ',"est_entry":' + f_num(estEntry) + ',"stop":' + f_num(stop) + ',"tp":' + f_num(tp)
+    j := j + ',"stop_dist_pts":' + f_num(math.abs(estEntry - stop)) + ',"rr":' + str.tostring(rr) + '}'
+    alert(j, alert.freq_once_per_bar_close)
 
 // Color helper for P&L / R cells. MUST be global — Pine functions cannot be declared in a local block.
 f_pcol(float v) => v > 0 ? color.new(color.green, 0) : v < 0 ? color.new(color.red, 0) : chart.fg_color
@@ -453,7 +487,7 @@ if s1_canEnter
                         estStop  = (s1_stopMethod == "ATR Based" and not na(s1_atrInit)) ? estEntry - s1_atrInit * s1_atrMultInit : b - s1_buffer
                         estStop := math.min(estStop, estEntry - syminfo.mintick)
                         s1_risk  = math.max(estEntry - estStop, syminfo.mintick)
-                        qty      = f_qty(estEntry, estStop, riskPct, strategy.equity)
+                        qty      = f_roundQty(f_qty(estEntry, estStop, riskPct, strategy.equity))
                         if qty > 0
                             strategy.entry("S1 Long", strategy.long, qty = qty, comment = "S1 Long")
                             s1_inDir := 1
@@ -464,6 +498,7 @@ if s1_canEnter
                             s1_entryBar      := bar_index
                             array.push(s1_stopQueue, estStop)
                             s1_tradedToday := true
+                            f_alert("ny_orb_fvg", "entry", "long", st == 1 ? "IFVG" : "FVG", estEntry, estStop, s1_inTakeProfit)
                             box.new(array.get(s1_aFormBar, i), t, bar_index + s1_boxProj, b, border_color = color.new(color.yellow, 0), bgcolor = color.new(color.yellow, 80))
                             label.new(bar_index, b, st == 1 ? "S1 IFVG ▲" : "S1 FVG ▲", style = label.style_label_up, color = color.new(color.green, 0), textcolor = color.white, size = size.small)
                         break
@@ -482,7 +517,7 @@ if s1_canEnter
                         estStop  = (s1_stopMethod == "ATR Based" and not na(s1_atrInit)) ? estEntry + s1_atrInit * s1_atrMultInit : t + s1_buffer
                         estStop := math.max(estStop, estEntry + syminfo.mintick)
                         s1_risk  = math.max(estStop - estEntry, syminfo.mintick)
-                        qty      = f_qty(estEntry, estStop, riskPct, strategy.equity)
+                        qty      = f_roundQty(f_qty(estEntry, estStop, riskPct, strategy.equity))
                         if qty > 0
                             strategy.entry("S1 Short", strategy.short, qty = qty, comment = "S1 Short")
                             s1_inDir := -1
@@ -493,6 +528,7 @@ if s1_canEnter
                             s1_entryBar      := bar_index
                             array.push(s1_stopQueue, estStop)
                             s1_tradedToday := true
+                            f_alert("ny_orb_fvg", "entry", "short", st == 1 ? "IFVG" : "FVG", estEntry, estStop, s1_inTakeProfit)
                             box.new(array.get(s1_aFormBar, i), t, bar_index + s1_boxProj, b, border_color = color.new(color.yellow, 0), bgcolor = color.new(color.yellow, 80))
                             label.new(bar_index, t, st == 1 ? "S1 IFVG ▼" : "S1 FVG ▼", style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.small)
                         break
@@ -500,22 +536,30 @@ if s1_canEnter
 // S1 trade management (initial stop fixed at entry + 1:2 TP + optional trailing)
 if s1_inDir == 1
     riskL = math.max(s1_entryEst - s1_inInitialStop, syminfo.mintick)
+    prevTrailL = s1_inTrailStop
     if s1_useTrail
         cand = s1_trailMode == "Swing (1m structure)" ? s1_swLow - s1_buffer : s1_trailMode == "ATR step" ? close - s1_atrT * s1_atrMultT : close * (1 - s1_trailPct / 100)
         if (close - s1_entryEst) >= s1_trailActR * riskL
             s1_inTrailStop := math.max(s1_inTrailStop, cand)
     strategy.exit("S1 ExitL", from_entry = "S1 Long", stop = s1_inTrailStop, limit = s1_inTakeProfit)
+    if bar_index > s1_entryBar and s1_inTrailStop > prevTrailL
+        f_alert("ny_orb_fvg", "stop_update", "long", "", s1_entryEst, s1_inTrailStop, s1_inTakeProfit)
 else if s1_inDir == -1
     riskS = math.max(s1_inInitialStop - s1_entryEst, syminfo.mintick)
+    prevTrailS = s1_inTrailStop
     if s1_useTrail
         cand = s1_trailMode == "Swing (1m structure)" ? s1_swHigh + s1_buffer : s1_trailMode == "ATR step" ? close + s1_atrT * s1_atrMultT : close * (1 + s1_trailPct / 100)
         if (s1_entryEst - close) >= s1_trailActR * riskS
             s1_inTrailStop := math.min(s1_inTrailStop, cand)
     strategy.exit("S1 ExitS", from_entry = "S1 Short", stop = s1_inTrailStop, limit = s1_inTakeProfit)
+    if bar_index > s1_entryBar and s1_inTrailStop < prevTrailS
+        f_alert("ny_orb_fvg", "stop_update", "short", "", s1_entryEst, s1_inTrailStop, s1_inTakeProfit)
 
-// S1 force flat at its session end
+// S1 force flat at its session end (immediately = fill at this bar's close, not the next
+// bar's open, which on an RTH-only chart would be the next session)
 if s1_closeAtEnd and s1_atSessionEnd and s1_inDir != 0
-    strategy.close(s1_inDir == 1 ? "S1 Long" : "S1 Short", comment = "S1 EOD")
+    f_alert("ny_orb_fvg", "exit", s1_inDir == 1 ? "long" : "short", "", close, na, na)
+    strategy.close(s1_inDir == 1 ? "S1 Long" : "S1 Short", comment = "S1 EOD", immediately = true)
 
 // ═════════════════════════════ S2 · ASIAN SWEEP ENGINE ═════════════════════════════
 s2_canTrade = s2_enable and s2_asianReady and s2_dayOK and inDateRange and s2_activeNow
@@ -581,7 +625,7 @@ if s2_canEnter
         estStop  = (s2_stopMethod == "ATR Based" and not na(s2_atrInit)) ? estEntry - s2_atrInit * s2_atrMultInit : s2_armBot - s2_buffer
         estStop := math.min(estStop, estEntry - syminfo.mintick)
         s2_risk  = math.max(estEntry - estStop, syminfo.mintick)
-        qty      = f_qty(estEntry, estStop, riskPct, strategy.equity)
+        qty      = f_roundQty(f_qty(estEntry, estStop, riskPct, strategy.equity))
         if qty > 0
             strategy.entry("S2 Long", strategy.long, qty = qty, comment = "S2 Long")
             s2_inDir := 1
@@ -591,6 +635,7 @@ if s2_canEnter
             s2_entryBar      := bar_index
             array.push(s2_stopQueue, estStop)
             s2_tradedToday := true
+            f_alert("asian_sweep", "entry", "long", "SWEEP_FVG", estEntry, estStop, s2_inTakeProfit)
             s2_armDir := 0
             if s2_showZones and inDateRange
                 label.new(bar_index, s2_armTop, "S2 ▲", style = label.style_label_up, color = color.new(color.green, 0), textcolor = color.white, size = size.tiny)
@@ -599,7 +644,7 @@ if s2_canEnter
         estStop  = (s2_stopMethod == "ATR Based" and not na(s2_atrInit)) ? estEntry + s2_atrInit * s2_atrMultInit : s2_armTop + s2_buffer
         estStop := math.max(estStop, estEntry + syminfo.mintick)
         s2_risk  = math.max(estStop - estEntry, syminfo.mintick)
-        qty      = f_qty(estEntry, estStop, riskPct, strategy.equity)
+        qty      = f_roundQty(f_qty(estEntry, estStop, riskPct, strategy.equity))
         if qty > 0
             strategy.entry("S2 Short", strategy.short, qty = qty, comment = "S2 Short")
             s2_inDir := -1
@@ -609,6 +654,7 @@ if s2_canEnter
             s2_entryBar      := bar_index
             array.push(s2_stopQueue, estStop)
             s2_tradedToday := true
+            f_alert("asian_sweep", "entry", "short", "SWEEP_FVG", estEntry, estStop, s2_inTakeProfit)
             s2_armDir := 0
             if s2_showZones and inDateRange
                 label.new(bar_index, s2_armBot, "S2 ▼", style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.tiny)
@@ -619,9 +665,11 @@ if s2_inDir == 1
 else if s2_inDir == -1
     strategy.exit("S2 ExitS", from_entry = "S2 Short", stop = s2_inInitialStop, limit = s2_inTakeProfit)
 
-// S2 force flat at its active session end
-if s2_closeAtEnd and not s2_activeNow and s2_activeNow[1] and s2_inDir != 0
-    strategy.close(s2_inDir == 1 ? "S2 Long" : "S2 Short", comment = "S2 session end")
+// S2 force flat at its active session end (first bar after the window, or the chart session's
+// last bar inside it); immediately = fill at this bar's close
+if s2_closeAtEnd and s2_activeExit and s2_inDir != 0
+    f_alert("asian_sweep", "exit", s2_inDir == 1 ? "long" : "short", "", close, na, na)
+    strategy.close(s2_inDir == 1 ? "S2 Long" : "S2 Short", comment = "S2 session end", immediately = true)
 
 // ───────────────────────────── END OF TEST RANGE ─────────────────────────────
 if time > endDate and strategy.position_size != 0
