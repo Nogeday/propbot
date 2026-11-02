@@ -1,0 +1,26 @@
+# FTMO 2-Step template. EVERY value marked VERIFY must be checked on the firm's official pages
+# before paper/approve/auto. Modes other than `signal`/`paper` stay locked while
+# rules_verified_at is null or older than 30 days.
+venue: ftmo
+program: 2-step
+rules_verified_at: null                           # YYYY-MM-DD
+platform: mt5
+symbol: US500.cash                                # VERIFY in the terminal (Market Watch)
+initial_balance: 100000
+account_currency: USD
+profit_target_pct: {phase1: 10.0, phase2: 5.0}    # VERIFY
+daily_loss_limit_pct: 5.0                         # VERIFY (1-Step: 3.0)
+max_loss_pct: 10.0                                # VERIFY
+max_loss_type: static                             # VERIFY (1-Step: trailing_eod)
+daily_reset: {tz: Europe/Prague, time: "00:00"}   # VERIFY (some sources say UTC)
+daily_loss_basis: max_balance_equity_at_reset     # conservative assumption
+min_trading_days: null                            # VERIFY
+news_rule: {applies_to: [funded_standard], window_minutes: 2}   # VERIFY
+automation_allowed: true                          # VERIFY against the current EA policy
+firm_request_threshold_per_day: 2000              # VERIFY ("hyperactivity" rule)
+server_tz: null                                   # MT5 server time zone for bar export conversion — VERIFY
+contract:                                         # never hard-code; read from MT5 SymbolInfo at runtime
+  tick_size: null
+  tick_value_per_lot: null
+  min_lot: null
+  lot_step: null

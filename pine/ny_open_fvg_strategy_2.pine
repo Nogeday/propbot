@@ -1,0 +1,566 @@
+//@version=5
+// =====================================================================================
+//  NY OPEN — 5m Opening Range + FVG / IFVG Strategy   (S&P 500: SPY / SPX)
+//  Built for a 1-MINUTE chart. Switch the chart to 1m before backtesting.
+// -------------------------------------------------------------------------------------
+//  LOGIC
+//   1. Mark the High/Low of the first 5 minutes of the RTH session (09:30–09:35 EST).
+//   2. After the range is set, wait for a 1m breakout above the High (long bias) or
+//      below the Low (short bias). First break of the day sets the bias.
+//   3. After the breakout, look for a Fair Value Gap (FVG) or an Inversion FVG (IFVG)
+//      in the bias direction, and enter when price pulls back and touches the gap.
+//   4. Risk: fixed 1:2 reward/risk + a trailing stop that locks profit as price moves.
+//   5. One trade per day. Optionally flat at session end.
+// -------------------------------------------------------------------------------------
+//  FEATURES
+//   • POSITION SIZING — TRUE FIXED-FRACTIONAL RISK:
+//        Every trade is sized from "Risk Per Trade (%)" of CURRENT equity and the initial
+//        stop distance, so each trade risks the SAME % whether the stop is tight or wide.
+//   • HARD DAILY CIRCUIT BREAKERS (auto lockout):
+//        - Daily realized-loss limit (default −2%): once the day's realized net loss
+//          (incl. commission) reaches the limit, ALL new entries are blocked till next day.
+//        - Consecutive-loss breaker (default 2): N losing trades in a row on the same day
+//          also halts new entries (toxic-regime guard).
+//        - On a trip, a red wash + a "🛑 TRADING HALTED" label + a bottom-of-chart banner
+//          show exactly why a valid FVG setup was skipped.
+//   • REALISTIC FRICTION DEFAULTS (slippage + non-zero commission) so the backtest is not
+//        a "zero-fee" illusion. Tune to your instrument/broker in Properties.
+//   • INITIAL STOP METHOD: "FVG Buffer" or "ATR Based".
+//   • DAY OF WEEK FILTER · BACKTEST DATE RANGE + OOS SPLITTER · WEEKDAY STATS TABLE.
+// =====================================================================================
+
+strategy(title              = "NY Open ORB + FVG/IFVG Strategy",
+         shorttitle         = "NY FVG ORB",
+         overlay            = true,
+         pyramiding         = 0,
+         initial_capital    = 10000,
+         default_qty_type   = strategy.fixed,   // fallback only; every entry passes an explicit qty
+         default_qty_value  = 1,
+         commission_type    = strategy.commission.percent,
+         commission_value   = 0.01,             // 0.01% PER SIDE (≈0.02% round turn). Realistic for SPY/SPX.
+         slippage           = 1,                // 1 tick of slippage per fill. Test 2–3 for fast/news bars.
+         max_boxes_count    = 500,
+         max_lines_count    = 500,
+         max_labels_count   = 500)
+
+// ───────────────────────────── INPUT GROUPS ─────────────────────────────
+grpSession = "Session & Opening Range"
+grpDates   = "Backtest Date Range"
+grpDow     = "Day of Week Filter"
+grpEntry   = "Entry"
+grpFVG     = "FVG / IFVG"
+grpRisk    = "Risk Management"
+grpBrk     = "Circuit Breakers (Daily Lockout)"
+grpTrail   = "Trailing Stop"
+grpTable   = "Weekday Stats Table"
+grpVis     = "Visuals"
+
+// Session / range
+tz          = input.string("America/New_York", "Exchange timezone", group = grpSession, tooltip = "Used to detect the opening range. Keep as America/New_York for SPX/SPY.")
+orStartHour = input.int(9,  "OR start hour (24h)",  minval = 0, maxval = 23, group = grpSession)
+orStartMin  = input.int(30, "OR start minute",      minval = 0, maxval = 59, group = grpSession)
+orMinutes   = input.int(5,  "OR length (minutes)",  minval = 1, maxval = 60, group = grpSession, tooltip = "How many 1-minute candles form the range. 5 = the 09:30–09:35 range.")
+sessEndHour = input.int(15, "Trading end hour (24h)", minval = 0, maxval = 23, group = grpSession, tooltip = "No new trades after this time; open trade is force-closed (with minute below).")
+sessEndMin  = input.int(59, "Trading end minute",   minval = 0, maxval = 59, group = grpSession)
+closeAtEnd  = input.bool(true, "Close any open trade at session end", group = grpSession, tooltip = "Recommended for an intraday model. If off, a trade can carry overnight.")
+
+// Backtest date range / OOS splitter
+startDate   = input.time(timestamp("01 Jan 2024 00:00 +0000"), "Start date", group = grpDates, tooltip = "Trades only begin on/after this date.")
+oosStart    = input.time(timestamp("01 Jan 2025 00:00 +0000"), "In-sample end / OOS start", group = grpDates, tooltip = "Boundary between in-sample (optimization) data and out-of-sample (unseen) data. The strategy keeps trading across it; it drives the chart marker and the table scope.")
+endDate     = input.time(timestamp("01 Jan 2030 00:00 +0000"), "End date", group = grpDates, tooltip = "No new trades after this date; any open trade is closed.")
+showDateViz = input.bool(true, "Shade OOS / out-of-range region", group = grpDates, tooltip = "Dashed line at the OOS boundary, a faint tint over the OOS period, and grey over dates outside [Start, End].")
+
+// Day of week filter
+tradeMon = input.bool(true, "Trade Monday",    group = grpDow)
+tradeTue = input.bool(true, "Trade Tuesday",   group = grpDow)
+tradeWed = input.bool(true, "Trade Wednesday", group = grpDow)
+tradeThu = input.bool(true, "Trade Thursday",  group = grpDow)
+tradeFri = input.bool(true, "Trade Friday",    group = grpDow)
+
+// Entry
+breakConfirm = input.string("Close", "Breakout confirmation", options = ["Close", "Wick"], group = grpEntry, tooltip = "Close = needs a 1m CLOSE beyond the range. Wick = any touch beyond the range counts.")
+allowLong    = input.bool(true, "Allow longs",  group = grpEntry)
+allowShort   = input.bool(true, "Allow shorts", group = grpEntry)
+
+// FVG / IFVG
+useFVG      = input.bool(true,  "Use Fair Value Gaps (FVG)",   group = grpFVG)
+useIFVG     = input.bool(true,  "Use Inversion FVGs (IFVG)",   group = grpFVG)
+minFvgTicks = input.int(0, "Minimum FVG size (ticks)", minval = 0, group = grpFVG, tooltip = "Ignore gaps smaller than this many ticks. 0 = accept any gap.")
+
+// Risk
+riskPct     = input.float(0.5, "Risk Per Trade (%)", minval = 0.1, step = 0.1, group = grpRisk, tooltip = "TRUE fixed-fractional risk. Position size is computed from this % of CURRENT equity and the initial stop distance, so every trade risks the same % regardless of stop width. Keep ≤ 0.5% for prop-firm challenges. (Risk compounds with equity; for fixed-dollar risk off the starting balance, replace strategy.equity with strategy.initial_capital in f_qty.)")
+rr          = input.float(2.0, "Reward : Risk", minval = 0.1, step = 0.1, group = grpRisk, tooltip = "Take-profit distance as a multiple of initial risk. 2 = 1:2 R/R. Adapts to whichever stop method is selected.")
+stopMethod  = input.string("FVG Buffer", "Initial stop method", options = ["FVG Buffer", "ATR Based"], group = grpRisk, tooltip = "FVG Buffer: stop just beyond the entry gap. ATR Based: stop = entry ± ATR×multiplier.")
+slBuf       = input.int(2, "FVG stop buffer (ticks)", minval = 0, group = grpRisk, tooltip = "FVG Buffer method: extra ticks beyond the gap edge. Also used as a small cushion for the Swing trailing stop.")
+atrLenInit  = input.int(14, "Initial stop ATR length", minval = 1, group = grpRisk, tooltip = "ATR Based method: ATR period used for the initial stop distance.")
+atrMultInit = input.float(1.5, "Initial stop ATR multiplier", minval = 0.1, step = 0.1, group = grpRisk, tooltip = "ATR Based method: initial stop distance = ATR × this value. Larger = wider stop AND a proportionally wider 1:2 target.")
+
+// Circuit breakers (hard daily lockout)
+useBreakers   = input.bool(true, "Enable hard daily circuit breakers", group = grpBrk, tooltip = "When ON, the engine automatically blocks ALL new entries for the rest of the day once a daily risk limit is breached, then resets the next day. Detection / visuals keep running so you still SEE the setups that were skipped.")
+dailyDDPct    = input.float(2.0, "Daily max realized loss (%)", minval = 0.1, step = 0.1, group = grpBrk, tooltip = "Halts new entries once the day's REALIZED net loss (incl. commission) reaches this % of the day's starting equity (capped at initial capital = the more conservative $ limit). Keep well under the firm's hard daily wall (e.g. 2% internal vs a 5% firm limit).")
+maxConsecLoss = input.int(2, "Consecutive losses to halt", minval = 1, group = grpBrk, tooltip = "Halts new entries after this many losing trades in a row on the SAME day (toxic-regime guard). NOTE: with the built-in one-trade-per-day cap, this can only trip if you raise that cap or run at portfolio level; under 1 trade/day the daily-loss breaker is the active guard.")
+
+// Trailing
+useTrail  = input.bool(true, "Enable trailing stop", group = grpTrail)
+trailMode = input.string("Swing (1m structure)", "Trailing method", options = ["Swing (1m structure)", "ATR step", "Percent step"], group = grpTrail)
+swingLen  = input.int(5, "Swing lookback (bars)", minval = 1, group = grpTrail, tooltip = "Swing method: bars used to find the recent 1m swing low/high to trail behind.")
+atrLenT   = input.int(14, "ATR length (trailing)", minval = 1, group = grpTrail)
+atrMultT  = input.float(1.5, "ATR multiplier (trailing)", minval = 0.1, step = 0.1, group = grpTrail)
+trailPct  = input.float(0.3, "Trail distance %", minval = 0.01, step = 0.01, group = grpTrail)
+trailActR = input.float(1.0, "Start trailing after (R multiple)", minval = 0.0, step = 0.1, group = grpTrail)
+
+// Stats table
+showTable  = input.bool(true, "Show weekday stats table", group = grpTable, tooltip = "Enable ALL weekdays first to see the full breakdown, then disable the weak days.")
+tableScope = input.string("All", "Table scope", options = ["All", "In-Sample", "Out-of-Sample"], group = grpTable, tooltip = "Filter the table to in-sample or out-of-sample trades to check whether the edge survives on unseen data.")
+tablePos   = input.string("Bottom Right", "Table position", options = ["Bottom Right", "Top Right", "Bottom Left", "Top Left"], group = grpTable)
+tableSize  = input.string("Normal", "Table text size", options = ["Tiny", "Small", "Normal", "Large"], group = grpTable)
+
+// Visuals
+showAllFVG = input.bool(false, "Show all detected FVGs", group = grpVis, tooltip = "Draws every gap (can be cluttered). The entry gap is always highlighted in yellow.")
+boxProj    = input.int(40, "Entry box projection (bars)", minval = 1, group = grpVis)
+fvgProj    = input.int(20, "FVG box projection (bars)",   minval = 1, group = grpVis)
+
+// ───────────────────────────── STATE ─────────────────────────────
+var float orHigh = na
+var float orLow  = na
+var bool  orReady    = false
+var bool  tradedToday = false
+var int   bias       = 0        // 1 = long bias, -1 = short bias, 0 = none
+var bool  oosDrawn   = false    // OOS boundary marker drawn yet?
+
+// Tracked FVGs (parallel arrays). type: 1 = bullish FVG, -1 = bearish FVG.
+// state: 0 = fresh, 1 = inverted (became an IFVG), 2 = dead.
+var float[] aTop     = array.new_float()
+var float[] aBot     = array.new_float()
+var int[]   aType    = array.new_int()
+var int[]   aState   = array.new_int()
+var int[]   aFormBar = array.new_int()
+var int[]   aFlipBar = array.new_int()
+
+// Open-trade management
+var int   inDir         = 0     // 1 long / -1 short while a position is open
+var float inFvgStop     = na    // FVG-buffer stop level captured at signal time
+var float inInitialStop = na    // finalized on the entry (fill) bar
+var float inTakeProfit  = na
+var float inTrailStop   = na
+
+// Per-trade records for the weekday table (index aligns with strategy.closedtrades)
+var float[] stopArr = array.new_float()   // initial stop of each trade
+var int[]   dirArr  = array.new_int()     // direction of each trade (1 / -1)
+
+// ───────────────────────────── TIME / DATE / DAY ─────────────────────────────
+nyH = hour(time, tz)
+nyM = minute(time, tz)
+curMin   = nyH * 60 + nyM
+orStart  = orStartHour * 60 + orStartMin
+orEnd    = orStart + orMinutes
+sessEnd  = sessEndHour * 60 + sessEndMin
+
+isInOR       = curMin >= orStart and curMin < orEnd
+atSessionEnd = curMin == sessEnd
+
+inDateRange = time >= startDate and time <= endDate
+isOOS       = time >= oosStart
+
+dow   = dayofweek(time, tz)
+dayOK = (dow == dayofweek.monday and tradeMon) or (dow == dayofweek.tuesday and tradeTue) or (dow == dayofweek.wednesday and tradeWed) or (dow == dayofweek.thursday and tradeThu) or (dow == dayofweek.friday and tradeFri)
+
+// Daily reset (NY calendar day change)
+newDay = ta.change(dayofmonth(time, tz)) != 0
+if newDay
+    orHigh := na
+    orLow  := na
+    orReady := false
+    tradedToday := false
+    bias := 0
+    array.clear(aTop)
+    array.clear(aBot)
+    array.clear(aType)
+    array.clear(aState)
+    array.clear(aFormBar)
+    array.clear(aFlipBar)
+    if strategy.position_size == 0
+        inDir := 0
+        inFvgStop     := na
+        inInitialStop := na
+        inTakeProfit  := na
+        inTrailStop   := na
+
+// Build the opening range
+if isInOR
+    orHigh := na(orHigh) ? high : math.max(orHigh, high)
+    orLow  := na(orLow)  ? low  : math.min(orLow, low)
+
+// Finalize the range right after the window
+if not orReady and not na(orHigh) and curMin >= orEnd and curMin <= sessEnd
+    orReady := true
+
+// Master gate: scan / enter only when the range is ready, the day is enabled, we are
+// inside the date range, and inside the trading window (after range, before session end).
+canScan = orReady and dayOK and inDateRange and curMin >= orEnd and curMin < sessEnd
+
+// ───────────────────────────── INDICATORS (every bar) ─────────────────────────────
+buffer  = slBuf * syminfo.mintick
+atrT    = ta.atr(atrLenT)        // trailing-stop ATR
+atrInit = ta.atr(atrLenInit)     // initial-stop ATR
+swLow   = ta.lowest(low,  swingLen)
+swHigh  = ta.highest(high, swingLen)
+
+// ───────────────────────────── POSITION SIZING (true fixed-fractional risk) ─────────────────────────────
+// Returns the qty so that hitting the INITIAL stop loses exactly riskPct of CURRENT equity.
+//   riskAmt = equity × risk%        perUnitRisk = stopDistance × pointValue        qty = riskAmt / perUnitRisk
+// Entry is a MARKET order, so the signal-bar close is the estimated fill used to size BEFORE
+// the fill exists (the most robust v5 approach). ATR-based stop distance is fill-independent
+// (= ATR×mult) so risk is essentially exact; the FVG-buffer distance carries one bar of drift.
+// Qty is left as a float so backtest risk is exact. For whole-contract futures, wrap the
+// result with math.floor() and switch commission to per-contract.
+f_qty(float estEntry, float estStop, float risk, float eq) =>
+    riskAmt = eq * (risk / 100.0)
+    dist    = math.max(math.abs(estEntry - estStop), syminfo.mintick)   // floor prevents qty blow-up on a degenerate stop
+    perUnit = dist * syminfo.pointvalue
+    perUnit > 0 ? riskAmt / perUnit : 0.0
+
+// ───────────────────────────── CIRCUIT BREAKERS (hard daily lockout) ─────────────────────────────
+// Tracks the day's REALIZED net P&L (incl. commission) plus a consecutive-loss counter.
+// Once tripped, the engine blocks ALL new entries for the rest of the day; everything resets
+// the next day. Detection/visuals keep running so skipped setups are still drawn.
+// IMPORTANT: under the built-in one-trade-per-day cap and ~riskPct per trade, a single
+// script's realized daily loss is bounded near riskPct — so these breakers act mainly as a
+// HARD BACKSTOP (gap / catastrophic stop slippage) and as portfolio-level / multi-trade
+// protection. They become primary guards if you raise the per-day trade cap or risk %.
+var float dayStartEquity  = na
+var float dayStartNet     = na
+var int   consecLossToday = 0
+var int   lastClosedCount = 0
+var bool  haltedDD        = false   // tripped by the daily realized-loss limit
+var bool  haltedStreak    = false   // tripped by consecutive losses
+
+// (re)baseline at the start of each calendar trading day
+if newDay
+    dayStartEquity  := strategy.equity
+    dayStartNet     := strategy.netprofit
+    consecLossToday := 0
+    haltedDD        := false
+    haltedStreak    := false
+
+// Fold in any trades that have closed since the previous bar (updates the loss streak).
+if strategy.closedtrades > lastClosedCount
+    for j = lastClosedCount to strategy.closedtrades - 1
+        if strategy.closedtrades.profit(j) < 0
+            consecLossToday += 1
+        else
+            consecLossToday := 0
+    lastClosedCount := strategy.closedtrades
+
+// Evaluate both breakers. Base is capped at initial capital → the more conservative $ limit.
+dayBaseEq    = na(dayStartEquity) ? strategy.initial_capital : math.min(dayStartEquity, strategy.initial_capital)
+dailyLossCap = dayBaseEq * (dailyDDPct / 100.0)
+dailyRealPnL = na(dayStartNet) ? 0.0 : strategy.netprofit - dayStartNet
+if dailyRealPnL <= -dailyLossCap
+    haltedDD := true
+if consecLossToday >= maxConsecLoss
+    haltedStreak := true
+
+halted = useBreakers and (haltedDD or haltedStreak)
+
+// ───────────────────────────── BREAKOUT → BIAS ─────────────────────────────
+if canScan and bias == 0
+    brokeUp = breakConfirm == "Close" ? close > orHigh : high > orHigh
+    brokeDn = breakConfirm == "Close" ? close < orLow  : low  < orLow
+    if brokeUp and allowLong
+        bias := 1
+    else if brokeDn and allowShort
+        bias := -1
+
+// ───────────────────────────── DETECT FVGs (after breakout) ─────────────────────────────
+if canScan and bias != 0
+    minSize = minFvgTicks * syminfo.mintick
+    // Bullish FVG: gap between high[2] (bottom) and current low (top)
+    if low > high[2] and (low - high[2]) >= minSize
+        array.push(aTop, low)
+        array.push(aBot, high[2])
+        array.push(aType, 1)
+        array.push(aState, 0)
+        array.push(aFormBar, bar_index)
+        array.push(aFlipBar, -1)
+        if showAllFVG
+            box.new(bar_index - 1, low, bar_index + fvgProj, high[2], border_color = color.new(color.teal, 70), bgcolor = color.new(color.teal, 90))
+    // Bearish FVG: gap between current high (bottom) and low[2] (top)
+    if high < low[2] and (low[2] - high) >= minSize
+        array.push(aTop, low[2])
+        array.push(aBot, high)
+        array.push(aType, -1)
+        array.push(aState, 0)
+        array.push(aFormBar, bar_index)
+        array.push(aFlipBar, -1)
+        if showAllFVG
+            box.new(bar_index - 1, low[2], bar_index + fvgProj, high, border_color = color.new(color.red, 70), bgcolor = color.new(color.red, 90))
+    // Keep the array bounded
+    if array.size(aTop) > 60
+        array.shift(aTop)
+        array.shift(aBot)
+        array.shift(aType)
+        array.shift(aState)
+        array.shift(aFormBar)
+        array.shift(aFlipBar)
+
+// ───────────────────────────── UPDATE INVERSIONS / DEATHS ─────────────────────────────
+if canScan and array.size(aTop) > 0
+    for i = 0 to array.size(aTop) - 1
+        st = array.get(aState, i)
+        if st != 2
+            ty = array.get(aType, i)
+            t  = array.get(aTop, i)
+            b  = array.get(aBot, i)
+            if ty == 1
+                // bullish FVG closed below -> becomes bearish IFVG
+                if st == 0 and close < b
+                    array.set(aState, i, 1)
+                    array.set(aFlipBar, i, bar_index)
+                // bearish IFVG reclaimed -> dead
+                else if st == 1 and close > t
+                    array.set(aState, i, 2)
+            else
+                // bearish FVG closed above -> becomes bullish IFVG
+                if st == 0 and close > t
+                    array.set(aState, i, 1)
+                    array.set(aFlipBar, i, bar_index)
+                // bullish IFVG lost -> dead
+                else if st == 1 and close < b
+                    array.set(aState, i, 2)
+
+// ───────────────────────────── ENTRY (pullback into the gap) ─────────────────────────────
+// NOTE the "not halted" gate: a tripped circuit breaker blocks every new entry for the day.
+if canScan and not tradedToday and not halted and strategy.position_size == 0 and array.size(aTop) > 0
+    if bias == 1
+        for i = array.size(aTop) - 1 to 0
+            st = array.get(aState, i)
+            ty = array.get(aType, i)
+            if st != 2
+                // long zone = fresh bullish FVG, or an inverted bearish FVG (bullish IFVG)
+                longZone = (ty == 1 and st == 0 and useFVG) or (ty == -1 and st == 1 and useIFVG)
+                if longZone
+                    t = array.get(aTop, i)
+                    b = array.get(aBot, i)
+                    actBar = st == 1 ? array.get(aFlipBar, i) : array.get(aFormBar, i)
+                    // enter when a LATER bar pulls back down and touches the gap top
+                    if bar_index > actBar and low <= t
+                        // --- Fixed-fractional sizing (estimate the fill at the signal-bar close) ---
+                        estStop = (stopMethod == "ATR Based" and not na(atrInit)) ? close - atrInit * atrMultInit : b - buffer
+                        qty     = f_qty(close, estStop, riskPct, strategy.equity)
+                        strategy.entry("Long", strategy.long, qty = qty, comment = "Long")
+                        inDir := 1
+                        inFvgStop := b - buffer     // captured now; finalized on fill bar
+                        inInitialStop := na
+                        inTrailStop   := na
+                        inTakeProfit  := na
+                        tradedToday := true
+                        box.new(array.get(aFormBar, i), t, bar_index + boxProj, b, border_color = color.new(color.yellow, 0), bgcolor = color.new(color.yellow, 80))
+                        label.new(bar_index, b, st == 1 ? "IFVG ▲" : "FVG ▲", style = label.style_label_up, color = color.new(color.green, 0), textcolor = color.white, size = size.small)
+                        break
+    else if bias == -1
+        for i = array.size(aTop) - 1 to 0
+            st = array.get(aState, i)
+            ty = array.get(aType, i)
+            if st != 2
+                // short zone = fresh bearish FVG, or an inverted bullish FVG (bearish IFVG)
+                shortZone = (ty == -1 and st == 0 and useFVG) or (ty == 1 and st == 1 and useIFVG)
+                if shortZone
+                    t = array.get(aTop, i)
+                    b = array.get(aBot, i)
+                    actBar = st == 1 ? array.get(aFlipBar, i) : array.get(aFormBar, i)
+                    // enter when a LATER bar pulls back up and touches the gap bottom
+                    if bar_index > actBar and high >= b
+                        // --- Fixed-fractional sizing (estimate the fill at the signal-bar close) ---
+                        estStop = (stopMethod == "ATR Based" and not na(atrInit)) ? close + atrInit * atrMultInit : t + buffer
+                        qty     = f_qty(close, estStop, riskPct, strategy.equity)
+                        strategy.entry("Short", strategy.short, qty = qty, comment = "Short")
+                        inDir := -1
+                        inFvgStop := t + buffer     // captured now; finalized on fill bar
+                        inInitialStop := na
+                        inTrailStop   := na
+                        inTakeProfit  := na
+                        tradedToday := true
+                        box.new(array.get(aFormBar, i), t, bar_index + boxProj, b, border_color = color.new(color.yellow, 0), bgcolor = color.new(color.yellow, 80))
+                        label.new(bar_index, t, st == 1 ? "IFVG ▼" : "FVG ▼", style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.small)
+                        break
+
+// ───────────────────────────── TRADE MANAGEMENT (initial stop + TP + trailing) ─────────────────────────────
+// LONG
+if strategy.position_size > 0 and inDir == 1
+    avg = strategy.position_avg_price
+    // Finalize the INITIAL STOP on the entry (fill) bar, then derive the 1:2 target.
+    if na(inTakeProfit)
+        rawStop = (stopMethod == "ATR Based" and not na(atrInit)) ? avg - atrInit * atrMultInit : inFvgStop
+        inInitialStop := math.min(rawStop, avg - syminfo.mintick)   // keep stop below entry
+        inTrailStop   := inInitialStop                              // seed the trail
+        inTakeProfit  := avg + rr * (avg - inInitialStop)           // 1:2 (rr) of actual risk
+        array.push(stopArr, inInitialStop)                          // record for the stats table
+        array.push(dirArr, 1)
+    riskL = math.max(avg - inInitialStop, syminfo.mintick)
+    if useTrail
+        cand = trailMode == "Swing (1m structure)" ? swLow - buffer : trailMode == "ATR step" ? close - atrT * atrMultT : close * (1 - trailPct / 100)
+        if (close - avg) >= trailActR * riskL
+            inTrailStop := math.max(inTrailStop, cand)              // only ever moves up
+    strategy.exit("Exit L", from_entry = "Long", stop = inTrailStop, limit = inTakeProfit)
+
+// SHORT
+if strategy.position_size < 0 and inDir == -1
+    avg = strategy.position_avg_price
+    if na(inTakeProfit)
+        rawStop = (stopMethod == "ATR Based" and not na(atrInit)) ? avg + atrInit * atrMultInit : inFvgStop
+        inInitialStop := math.max(rawStop, avg + syminfo.mintick)   // keep stop above entry
+        inTrailStop   := inInitialStop
+        inTakeProfit  := avg - rr * (inInitialStop - avg)
+        array.push(stopArr, inInitialStop)
+        array.push(dirArr, -1)
+    riskS = math.max(inInitialStop - avg, syminfo.mintick)
+    if useTrail
+        cand = trailMode == "Swing (1m structure)" ? swHigh + buffer : trailMode == "ATR step" ? close + atrT * atrMultT : close * (1 + trailPct / 100)
+        if (avg - close) >= trailActR * riskS
+            inTrailStop := math.min(inTrailStop, cand)              // only ever moves down
+    strategy.exit("Exit S", from_entry = "Short", stop = inTrailStop, limit = inTakeProfit)
+
+// Force flat at session end
+if closeAtEnd and atSessionEnd and strategy.position_size != 0
+    strategy.close_all(comment = "EOD close")
+
+// Stop trading outside the backtest date range (close anything still open past the End date)
+if time > endDate and strategy.position_size != 0
+    strategy.close_all(comment = "End of test range")
+
+// Reset management vars once flat
+if strategy.position_size == 0 and inDir != 0
+    inDir := 0
+    inFvgStop     := na
+    inInitialStop := na
+    inTakeProfit  := na
+    inTrailStop   := na
+
+// ───────────────────────────── DATE-RANGE / OOS VISUALS ─────────────────────────────
+// Faint grey outside [Start, End]; faint blue over the in-range OOS period.
+bgcolor(showDateViz and not inDateRange            ? color.new(color.gray, 92) : na, title = "Out of date range")
+bgcolor(showDateViz and inDateRange and isOOS      ? color.new(color.blue, 90) : na, title = "Out-of-sample period")
+
+// Dashed vertical line + label at the first OOS bar
+if showDateViz and isOOS and not oosDrawn
+    line.new(bar_index, low, bar_index, high, xloc = xloc.bar_index, extend = extend.both, color = color.new(color.blue, 20), style = line.style_dashed, width = 1)
+    label.new(bar_index, high, "OOS ►", style = label.style_label_down, color = color.new(color.blue, 20), textcolor = color.white, size = size.small)
+    oosDrawn := true
+
+// ───────────────────────────── CIRCUIT-BREAKER VISUALS ─────────────────────────────
+// Faint red wash over every halted bar (historical record of lockout periods).
+bgcolor(halted ? color.new(color.red, 85) : na, title = "Trading halted (circuit breaker)")
+
+// One-time marker at the exact bar the lockout trips, stating the reason.
+if halted and not halted[1]
+    rTxt = haltedDD and haltedStreak ? "DAILY LOSS + LOSS STREAK" : haltedDD ? "−" + str.tostring(dailyDDPct, "#.#") + "% DAILY LOSS LIMIT" : str.tostring(maxConsecLoss) + " CONSECUTIVE LOSSES"
+    label.new(bar_index, low, "🛑 DAILY LIMIT REACHED — TRADING HALTED\n(" + rTxt + ")", yloc = yloc.belowbar, style = label.style_label_up, color = color.new(color.red, 0), textcolor = color.white, size = size.small)
+
+// Live banner pinned to the bottom of the chart while currently halted.
+var table haltTable = table.new(position.bottom_center, 1, 1, frame_width = 1, frame_color = color.new(color.red, 0))
+if barstate.islast
+    if halted
+        lr = haltedDD and haltedStreak ? "daily loss + loss streak" : haltedDD ? "daily " + str.tostring(dailyDDPct, "#.#") + "% loss limit" : str.tostring(maxConsecLoss) + " consecutive losses"
+        table.cell(haltTable, 0, 0, "🛑 DAILY LIMIT REACHED — TRADING HALTED  ·  " + lr, text_color = color.white, bgcolor = color.new(color.red, 0), text_size = size.normal)
+    else
+        table.cell(haltTable, 0, 0, "", bgcolor = color.new(color.gray, 100))
+
+// ───────────────────────────── TRADE VISUALS ─────────────────────────────
+showOR = orReady and dayOK and inDateRange and curMin >= orEnd and curMin <= sessEnd
+plot(showOR ? orHigh : na, "5m OR High", color = color.new(color.teal, 0), linewidth = 2, style = plot.style_linebr)
+plot(showOR ? orLow  : na, "5m OR Low",  color = color.new(color.red, 0),  linewidth = 2, style = plot.style_linebr)
+
+inPos = strategy.position_size != 0
+plot(inPos ? inTrailStop : na, "Stop / Trail", color = color.new(color.orange, 0), linewidth = 1, style = plot.style_linebr)
+plot(inPos and not na(inTakeProfit) ? inTakeProfit : na, "Take Profit", color = color.new(color.green, 0), linewidth = 1, style = plot.style_linebr)
+
+// Reminder if the chart is not 1m
+if barstate.islast and timeframe.period != "1"
+    label.new(bar_index, high, "⚠ This strategy is built for the 1-minute chart.\nSwitch the timeframe to 1m for correct results.", style = label.style_label_down, color = color.new(color.orange, 0), textcolor = color.black, size = size.normal)
+
+// ───────────────────────────── WEEKDAY STATS TABLE ─────────────────────────────
+// Buckets CLOSED trades by their ENTRY weekday, filtered by the chosen Table scope.
+//   R is price-based: long R = (exit - entry)/(entry - initialStop); short mirrored.
+//   Net P&L is the realized profit reported by the strategy (net of commission/slippage).
+tblPos = tablePos == "Top Right" ? position.top_right : tablePos == "Bottom Left" ? position.bottom_left : tablePos == "Top Left" ? position.top_left : position.bottom_right
+tblTxt = tableSize == "Tiny" ? size.tiny : tableSize == "Small" ? size.small : tableSize == "Large" ? size.large : size.normal
+
+var table statTable = table.new(position = tblPos, columns = 5, rows = 7, frame_width = 1, frame_color = color.new(color.gray, 50), border_width = 1, border_color = color.new(color.gray, 70))
+
+if showTable and barstate.islast
+    nTr  = array.new_int(5, 0)        // index 0=Mon .. 4=Fri
+    nWin = array.new_int(5, 0)
+    pnl  = array.new_float(5, 0.0)
+    rsum = array.new_float(5, 0.0)
+
+    nClosed = strategy.closedtrades
+    if nClosed > 0
+        for k = 0 to nClosed - 1
+            et      = strategy.closedtrades.entry_time(k)
+            inScope = tableScope == "All" or (tableScope == "In-Sample" and et < oosStart) or (tableScope == "Out-of-Sample" and et >= oosStart)
+            idx     = dayofweek(et, tz) - 2   // Mon(2)->0 .. Fri(6)->4
+            if inScope and idx >= 0 and idx <= 4
+                prof   = strategy.closedtrades.profit(k)
+                entryP = strategy.closedtrades.entry_price(k)
+                exitP  = strategy.closedtrades.exit_price(k)
+                isLong = (k < array.size(dirArr) ? array.get(dirArr, k) : 1) == 1
+                stp    = k < array.size(stopArr) ? array.get(stopArr, k) : na
+                risk   = isLong ? (entryP - stp) : (stp - entryP)
+                rm     = (not na(stp) and risk > 0) ? (isLong ? (exitP - entryP) : (entryP - exitP)) / risk : na
+                array.set(nTr, idx, array.get(nTr, idx) + 1)
+                if prof > 0
+                    array.set(nWin, idx, array.get(nWin, idx) + 1)
+                array.set(pnl, idx, array.get(pnl, idx) + prof)
+                if not na(rm)
+                    array.set(rsum, idx, array.get(rsum, idx) + rm)
+
+    fg       = chart.fg_color
+    hdrBg    = color.new(color.gray, 65)
+    totBg    = color.new(color.gray, 80)
+    scopeTag = tableScope == "In-Sample" ? " · IS" : tableScope == "Out-of-Sample" ? " · OOS" : ""
+
+    // Header
+    table.cell(statTable, 0, 0, "Day" + scopeTag, text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
+    table.cell(statTable, 1, 0, "Trades",  text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
+    table.cell(statTable, 2, 0, "Win %",   text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
+    table.cell(statTable, 3, 0, "Net P&L", text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
+    table.cell(statTable, 4, 0, "Tot R",   text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
+
+    names = array.from("Mon", "Tue", "Wed", "Thu", "Fri")
+    tTr  = 0
+    tWin = 0
+    tPnl = 0.0
+    tR   = 0.0
+    for idx = 0 to 4
+        r   = idx + 1
+        tr  = array.get(nTr, idx)
+        win = array.get(nWin, idx)
+        pv  = array.get(pnl, idx)
+        rv  = array.get(rsum, idx)
+        tTr  += tr
+        tWin += win
+        tPnl += pv
+        tR   += rv
+        wpTxt = tr > 0 ? str.tostring(100.0 * win / tr, "#.0") + "%" : "—"
+        pvTxt = tr > 0 ? str.tostring(pv, "#") : "—"
+        rvTxt = tr > 0 ? str.tostring(rv, "#.#") : "—"
+        pvCol = pv > 0 ? color.new(color.green, 0) : pv < 0 ? color.new(color.red, 0) : fg
+        rvCol = rv > 0 ? color.new(color.green, 0) : rv < 0 ? color.new(color.red, 0) : fg
+        table.cell(statTable, 0, r, array.get(names, idx), text_color = fg,    text_size = tblTxt)
+        table.cell(statTable, 1, r, str.tostring(tr),      text_color = fg,    text_size = tblTxt)
+        table.cell(statTable, 2, r, wpTxt,                 text_color = fg,    text_size = tblTxt)
+        table.cell(statTable, 3, r, pvTxt,                 text_color = pvCol, text_size = tblTxt)
+        table.cell(statTable, 4, r, rvTxt,                 text_color = rvCol, text_size = tblTxt)
+
+    // Total row
+    twpTxt = tTr > 0 ? str.tostring(100.0 * tWin / tTr, "#.0") + "%" : "—"
+    tpvTxt = tTr > 0 ? str.tostring(tPnl, "#") : "—"
+    trvTxt = tTr > 0 ? str.tostring(tR, "#.#") : "—"
+    tpvCol = tPnl > 0 ? color.new(color.green, 0) : tPnl < 0 ? color.new(color.red, 0) : fg
+    trvCol = tR   > 0 ? color.new(color.green, 0) : tR   < 0 ? color.new(color.red, 0) : fg
+    table.cell(statTable, 0, 6, "All",            text_color = fg,     bgcolor = totBg, text_size = tblTxt)
+    table.cell(statTable, 1, 6, str.tostring(tTr), text_color = fg,    bgcolor = totBg, text_size = tblTxt)
+    table.cell(statTable, 2, 6, twpTxt,           text_color = fg,     bgcolor = totBg, text_size = tblTxt)
+    table.cell(statTable, 3, 6, tpvTxt,           text_color = tpvCol, bgcolor = totBg, text_size = tblTxt)
+    table.cell(statTable, 4, 6, trvTxt,           text_color = trvCol, bgcolor = totBg, text_size = tblTxt)

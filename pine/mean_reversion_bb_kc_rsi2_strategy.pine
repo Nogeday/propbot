@@ -1,0 +1,424 @@
+//@version=5
+// =====================================================================================
+//  MEAN REVERSION — Bollinger / Keltner / RSI(2) Exhaustion Fade   (S&P 500: SPX / ES / SPY)
+//  Built for the 5-minute to 15-minute chart.
+// -------------------------------------------------------------------------------------
+//  CORE IDEA
+//   Fade statistically extreme, momentum-exhausted stretches that REJECT back inside the
+//   Bollinger Band, taken only in agreement with the higher-timeframe (200 EMA) trend.
+//
+//  ENTRY  (strict 2-bar pattern, fully closed-bar / non-repainting)
+//   1. SETUP bar  : close is OUTSIDE the 2.5σ Bollinger Band, RSI(2) is exhausted
+//                   (> overbought for shorts, < oversold for longs), AND volatility is
+//                   EXPANDING — the Bollinger Band is outside the Keltner Channel
+//                   (optional squeeze filter; see notes below).
+//   2. CONFIRM bar: the IMMEDIATE next bar closes back INSIDE the band and the 200-EMA
+//                   trend filter agrees. The order is submitted on this bar's close.
+//
+//  RISK & TRADE LIFECYCLE
+//   • Initial stop : entry ± (ATR(14) × multiplier). FIXED at entry — this is NOT a trail.
+//   • Take profit  : the LIVE 20-SMA Bollinger basis (dynamic mean-reversion target),
+//                    clamped so it can never sit on the losing side of the entry.
+//   • Sizing       : TRUE fixed-fractional — quantity is solved so a full stop-out loses
+//                    ≈ Risk% of current equity (the SL distance defines the size).
+//   • Time filter  : trade only inside [10:00 , 15:45] exchange time (skip the noisy open).
+//   • Daily breaker: latch-HALT new entries (and optionally flatten) once the day's equity
+//                    drawdown — including open P&L — exceeds the user threshold. Resets daily.
+//   • Date filter  : Year/Month/Day → Year/Month/Day backtest window.
+//
+//  NO-REPAINT GUARANTEES  (read this before changing the fill model)
+//   • calc_on_every_tick      = FALSE → orders are generated ONLY on bar close.
+//   • process_orders_on_close = FALSE → market entries fill at the NEXT bar's OPEN
+//       (the conservative industry standard), while stop/limit EXITS remain INTRABAR /
+//       touch-based (a wick through the stop fills the stop — realistic risk).
+//       NOTE: this is why the entry fills at the next open rather than literally at the
+//       confirmation close. Flipping this to TRUE would fill entries at the confirmation
+//       close BUT would also make the stop close-based (no intrabar stop) — not advised.
+//   • Every condition references confirmed bars only. No request.security, no lookahead.
+//   • Background shading on the realtime (forming) bar may flicker until that bar closes;
+//       this is cosmetic only and never alters a historical signal or trade.
+//   • Set realistic Commission / Slippage in the strategy "Properties" tab to match broker.
+// =====================================================================================
+
+strategy(title                   = "Mean Reversion BB/KC + RSI(2) Fade",
+         shorttitle              = "MR BB/KC RSI2",
+         overlay                 = true,
+         pyramiding              = 0,
+         initial_capital         = 10000,
+         default_qty_type        = strategy.fixed,
+         default_qty_value       = 1,
+         commission_type         = strategy.commission.percent,
+         commission_value        = 0.02,   // placeholder — calibrate to your instrument/broker
+         slippage                = 2,       // ticks — calibrate to realistic index spread
+         calc_on_every_tick      = false,   // no intrabar recalculation -> no signal repaint
+         process_orders_on_close = false,   // entries fill next open; stops/limits stay intrabar
+         max_lines_count         = 500,
+         max_labels_count        = 500,
+         max_boxes_count         = 500)
+
+// ───────────────────────────── INPUT GROUPS ─────────────────────────────
+grpBands  = "Volatility Bands & Indicators"
+grpFilter = "Filters"
+grpRisk   = "Risk Management"
+grpTime   = "Time Filter (NY session)"
+grpDow    = "Day of Week Filter"
+grpDates  = "Backtest Date Range"
+grpTable  = "Weekday Stats Table"
+grpVis    = "Visuals"
+
+// Bands & indicators
+bbLen   = input.int(20,    "Bollinger length",          minval = 1,                 group = grpBands)
+bbMult  = input.float(2.5, "Bollinger multiplier (σ)",  minval = 0.1, step = 0.1,   group = grpBands, tooltip = "Standard deviations for the outer band. Price must CLOSE beyond this to qualify as an extreme.")
+kcLen   = input.int(20,    "Keltner length",            minval = 1,                 group = grpBands)
+kcMult  = input.float(1.5, "Keltner multiplier (ATR)",  minval = 0.1, step = 0.1,   group = grpBands)
+rsiLen  = input.int(2,     "RSI length",                minval = 1,                 group = grpBands, tooltip = "2-period RSI is intentionally hyper-sensitive — it measures short-term exhaustion, not trend.")
+rsiOB   = input.float(90,  "RSI overbought (shorts)",   minval = 50, maxval = 100,  group = grpBands)
+rsiOS   = input.float(10,  "RSI oversold (longs)",      minval = 0,  maxval = 50,   group = grpBands)
+emaLen  = input.int(200,   "Trend EMA length",          minval = 1,                 group = grpBands)
+atrLen  = input.int(14,    "ATR length (stop)",         minval = 1,                 group = grpBands)
+atrMult = input.float(2.0, "ATR stop multiplier",       minval = 0.1, step = 0.1,   group = grpBands, tooltip = "Initial stop distance = ATR × this. Larger = wider stop AND smaller position (risk stays constant).")
+
+// Filters
+useTrendFilter = input.bool(true,  "Use 200-EMA trend filter",                          group = grpFilter, tooltip = "Longs only when price ≥ EMA, shorts only when price ≤ EMA. You fade pullbacks WITH the higher-timeframe trend, never against it.")
+useKcFilter    = input.bool(true,  "Require volatility expansion (BB outside Keltner)",  group = grpFilter, tooltip = "Rejects 'squeeze' states where the Bollinger Band is INSIDE the Keltner Channel. A close beyond a narrow (coiled) band is more likely a breakout than an exhaustion fade — this filters those out.")
+requireStrong  = input.bool(false, "Require strong rejection confirmation candle",       group = grpFilter, tooltip = "Optional: the confirmation candle must close in the rejecting half of its range and in the trade direction. OFF = any close back inside the band confirms.")
+allowLong      = input.bool(true,  "Allow longs (fade lower band)",                      group = grpFilter)
+allowShort     = input.bool(true,  "Allow shorts (fade upper band)",                     group = grpFilter)
+
+// Risk management
+riskPct      = input.float(1.0, "Risk per trade (% of equity)",                 minval = 0.01, step = 0.1, group = grpRisk, tooltip = "True fixed-fractional sizing. Quantity is solved so a full stop-out loses ≈ this % of current equity (before slippage/commission).")
+maxDailyLoss = input.float(3.0, "Max daily loss halt (% of day-start equity)",  minval = 0.1,  step = 0.1, group = grpRisk, tooltip = "Once the day's equity drawdown (including open P&L) reaches this, NEW entries are blocked until the next session. Mirrors a prop-firm daily loss limit.")
+closeOnHalt  = input.bool(true,  "Flatten open trade when daily halt triggers",              group = grpRisk, tooltip = "Prop-firm-safe: close any open position the moment the daily loss limit is breached.")
+
+// Time filter
+tz            = input.string("America/New_York", "Exchange timezone", group = grpTime, tooltip = "Session times below are in this timezone. Keep as America/New_York for SPX / ES / SPY.")
+useTimeFilter = input.bool(true, "Use time filter",                   group = grpTime)
+startHour     = input.int(10, "Session start hour (24h)", minval = 0, maxval = 23, group = grpTime)
+startMin      = input.int(0,  "Session start minute",     minval = 0, maxval = 59, group = grpTime)
+endHour       = input.int(15, "Session end hour (24h)",   minval = 0, maxval = 23, group = grpTime)
+endMin        = input.int(45, "Session end minute",       minval = 0, maxval = 59, group = grpTime)
+closeAtEnd    = input.bool(true, "Flatten open trade at session end", group = grpTime, tooltip = "Recommended for an intraday model. Off = a position can carry past the session.")
+
+// Day of week filter (applies to the entry day). Disable a weak weekday here to skip it.
+tradeMon = input.bool(true, "Trade Monday",    group = grpDow)
+tradeTue = input.bool(true, "Trade Tuesday",   group = grpDow)
+tradeWed = input.bool(true, "Trade Wednesday", group = grpDow)
+tradeThu = input.bool(true, "Trade Thursday",  group = grpDow)
+tradeFri = input.bool(true, "Trade Friday",    group = grpDow)
+
+// Backtest date range (granular Y/M/D)
+startYear  = input.int(2023, "Start year",                          group = grpDates)
+startMonth = input.int(1,    "Start month", minval = 1, maxval = 12, group = grpDates)
+startDay   = input.int(1,    "Start day",   minval = 1, maxval = 31, group = grpDates)
+endYear    = input.int(2030, "End year",                            group = grpDates)
+endMonth   = input.int(12,   "End month",   minval = 1, maxval = 12, group = grpDates)
+endDay     = input.int(31,   "End day",     minval = 1, maxval = 31, group = grpDates)
+// In-sample / Out-of-sample (OOS) splitter — granular Y/M/D boundary
+oosYear     = input.int(2025, "OOS start year",                          group = grpDates, tooltip = "Boundary between in-sample (optimization) data and out-of-sample (unseen) data. The strategy keeps trading across it; it only drives the chart marker and the table scope.")
+oosMonth    = input.int(1,    "OOS start month", minval = 1, maxval = 12, group = grpDates)
+oosDay      = input.int(1,    "OOS start day",   minval = 1, maxval = 31, group = grpDates)
+showDateViz = input.bool(true, "Shade OOS / out-of-range region",         group = grpDates, tooltip = "Dashed line at the OOS boundary, a faint tint over the OOS period, and grey over dates outside [Start, End].")
+
+// Weekday stats table
+showTable  = input.bool(true, "Show weekday stats table", group = grpTable, tooltip = "Buckets every closed trade by its entry weekday. Use it to spot weak days; pair it with a day-of-week filter if you later want to act on it.")
+tableScope = input.string("All", "Table scope", options = ["All", "In-Sample", "Out-of-Sample"], group = grpTable, tooltip = "Filter the table to in-sample or out-of-sample trades to check whether the edge survives on unseen data.")
+tablePos   = input.string("Bottom Right", "Table position", options = ["Bottom Right", "Top Right", "Bottom Left", "Top Left"], group = grpTable)
+tableSize  = input.string("Normal", "Table text size", options = ["Tiny", "Small", "Normal", "Large"], group = grpTable)
+
+// Visuals
+showBands   = input.bool(true,  "Show Bollinger Bands",            group = grpVis)
+showKc      = input.bool(false, "Show Keltner Channel",            group = grpVis)
+showEma     = input.bool(true,  "Show trend EMA",                  group = grpVis)
+showSetupBg = input.bool(true,  "Shade background on forming setup", group = grpVis)
+showLevels  = input.bool(true,  "Show active stop / target",       group = grpVis)
+
+// ───────────────────────────── POSITION SIZING HELPER ─────────────────────────────
+// Solve quantity from the STOP DISTANCE so a full stop-out ≈ riskPct of equity.
+//   loss_at_stop = qty × stopDistance(points) × pointvalue  ->  qty = riskCapital / (dist × pv)
+f_qtyFromDist(_distPoints) =>
+    _riskCapital = strategy.equity * (riskPct / 100.0)
+    _perUnit     = _distPoints * syminfo.pointvalue
+    _perUnit > 0 ? _riskCapital / _perUnit : 0.0
+
+// ───────────────────────────── INDICATORS (every bar) ─────────────────────────────
+// Bollinger Bands (SMA basis + stdev width)
+basis   = ta.sma(close, bbLen)
+bbDev   = bbMult * ta.stdev(close, bbLen)
+bbUpper = basis + bbDev
+bbLower = basis - bbDev
+
+// Keltner Channel (EMA basis + ATR width)
+kcBasis = ta.ema(close, kcLen)
+kcRange = ta.atr(kcLen)
+kcUpper = kcBasis + kcMult * kcRange
+kcLower = kcBasis - kcMult * kcRange
+
+// Squeeze = Bollinger Band fully INSIDE the Keltner Channel (low-volatility coil).
+// Expansion = the opposite. We fade only during expansion when the filter is on.
+isSqueeze    = bbUpper < kcUpper and bbLower > kcLower
+volExpansion = not isSqueeze
+kcOk         = not useKcFilter or volExpansion
+
+// Momentum, trend, and the volatility-stop input
+rsi2   = ta.rsi(close, rsiLen)
+emaTr  = ta.ema(close, emaLen)
+atrVal = ta.atr(atrLen)
+
+// ───────────────────────────── TIME / DATE / DAY ─────────────────────────────
+nyH    = hour(time, tz)
+nyM    = minute(time, tz)
+curMin = nyH * 60 + nyM
+sMin   = startHour * 60 + startMin
+eMin   = endHour   * 60 + endMin
+
+inWindow    = curMin >= sMin and curMin < eMin
+sessOk      = not useTimeFilter or inWindow         // entries permitted now?
+atOrPastEnd = useTimeFilter and curMin >= eMin       // time to force flat?
+
+startTime   = timestamp(tz, startYear, startMonth, startDay, 0, 0)
+endTime     = timestamp(tz, endYear,   endMonth,   endDay,   23, 59)
+oosStart    = timestamp(tz, oosYear,   oosMonth,   oosDay,   0, 0)
+inDateRange = time >= startTime and time <= endTime
+isOOS       = time >= oosStart
+
+isNewDay = ta.change(dayofmonth(time, tz)) != 0      // NY-calendar day change
+
+// Day-of-week gate (NY calendar). A disabled weekday blocks every entry on that day.
+dow   = dayofweek(time, tz)
+dayOK = (dow == dayofweek.monday and tradeMon) or (dow == dayofweek.tuesday and tradeTue) or (dow == dayofweek.wednesday and tradeWed) or (dow == dayofweek.thursday and tradeThu) or (dow == dayofweek.friday and tradeFri)
+
+// ───────────────────────────── DAILY LOSS CIRCUIT BREAKER ─────────────────────────────
+// Capture equity at the start of each NY day; halt (and latch) when the day's equity
+// drawdown — including open P&L — breaches the threshold. Resets automatically next day.
+var float dayStartEquity = na
+if isNewDay or na(dayStartEquity)
+    dayStartEquity := strategy.equity
+
+dayDDPct = (na(dayStartEquity) or dayStartEquity <= 0) ? 0.0 : (dayStartEquity - strategy.equity) / dayStartEquity * 100.0
+
+var bool dailyHalt = false
+if isNewDay
+    dailyHalt := false
+if dayDDPct >= maxDailyLoss
+    dailyHalt := true
+
+// ───────────────────────────── OPEN-TRADE STATE ─────────────────────────────
+var int   inDir     = 0     // 1 long / -1 short while a position is open
+var float inStop    = na    // fixed initial stop, finalized from the actual fill price
+var float atrStored = na    // ATR captured at signal time (keeps sizing & stop consistent)
+
+// OOS marker + per-trade records for the weekday stats table
+var bool    oosDrawn = false                 // OOS boundary marker drawn yet?
+var float[] stopArr  = array.new_float()     // initial stop of each trade (index aligns with closedtrades)
+var int[]   dirArr   = array.new_int()       // direction of each trade (1 / -1)
+
+// ───────────────────────────── ENTRY CONDITIONS ─────────────────────────────
+// Trend gates (checked on the confirmation / entry bar)
+trendOkLong  = not useTrendFilter or close >= emaTr
+trendOkShort = not useTrendFilter or close <= emaTr
+
+// Optional strong-rejection confirmation candle
+rng         = math.max(high - low, syminfo.mintick)
+strongLong  = close > open and (close - low)  / rng >= 0.5     // closes in upper half = rejects lows
+strongShort = close < open and (high - close) / rng >= 0.5     // closes in lower half = rejects highs
+confLongOk  = not requireStrong or strongLong
+confShortOk = not requireStrong or strongShort
+
+// SETUP bar: extreme close outside band + RSI exhaustion + volatility expansion
+longSetup  = allowLong  and close < bbLower and rsi2 < rsiOS and kcOk
+shortSetup = allowShort and close > bbUpper and rsi2 > rsiOB and kcOk
+
+// CONFIRM bar: the IMMEDIATE next bar closes back inside the band (+ trend + optional strength)
+longConfirm  = longSetup[1]  and close > bbLower and trendOkLong  and confLongOk
+shortConfirm = shortSetup[1] and close < bbUpper and trendOkShort and confShortOk
+
+// Master permission to open a NEW position
+tradingAllowed = inDateRange and sessOk and dayOK and not dailyHalt and strategy.position_size == 0
+goLong  = tradingAllowed and longConfirm
+goShort = tradingAllowed and shortConfirm
+
+// ───────────────────────────── TRADE MANAGEMENT (stop + dynamic target) ─────────────────────────────
+// Finalize the FIXED stop from the ACTUAL average fill price, using the ATR captured at
+// signal time. This keeps the realized risk ≈ riskPct even though the fill is the next open.
+if strategy.position_size > 0 and na(inStop)
+    inDir  := 1
+    inStop := strategy.position_avg_price - atrMult * atrStored
+    array.push(stopArr, inStop)              // record for the weekday stats table
+    array.push(dirArr, 1)
+if strategy.position_size < 0 and na(inStop)
+    inDir  := -1
+    inStop := strategy.position_avg_price + atrMult * atrStored
+    array.push(stopArr, inStop)
+    array.push(dirArr, -1)
+
+// LONG: fixed ATR stop + live 20-SMA basis target (never placed below the entry)
+if strategy.position_size > 0 and inDir == 1
+    tpL = math.max(basis, strategy.position_avg_price + syminfo.mintick)
+    strategy.exit("Exit L", from_entry = "Long", stop = inStop, limit = tpL)
+
+// SHORT: fixed ATR stop + live basis target (never placed above the entry)
+if strategy.position_size < 0 and inDir == -1
+    tpS = math.min(basis, strategy.position_avg_price - syminfo.mintick)
+    strategy.exit("Exit S", from_entry = "Short", stop = inStop, limit = tpS)
+
+// ───────────────────────────── FORCED EXITS ─────────────────────────────
+// Flatten at session end
+if closeAtEnd and atOrPastEnd and strategy.position_size != 0
+    strategy.close_all(comment = "Session end")
+
+// Flatten the instant the daily loss breaker trips
+if closeOnHalt and dailyHalt and strategy.position_size != 0
+    strategy.close_all(comment = "Daily loss halt")
+
+// Flatten past the backtest end date
+if time > endTime and strategy.position_size != 0
+    strategy.close_all(comment = "End of range")
+
+// ───────────────────────────── RESET STATE WHEN FLAT ─────────────────────────────
+if strategy.position_size == 0 and inDir != 0
+    inDir     := 0
+    inStop    := na
+    atrStored := na
+
+// ───────────────────────────── ENTRY (submitted on confirmation close, fills next open) ─────────────────────────────
+if goLong
+    qtyL = f_qtyFromDist(atrMult * atrVal)
+    if qtyL > 0
+        atrStored := atrVal
+        strategy.entry("Long", strategy.long, qty = qtyL, comment = "MR Long")
+if goShort
+    qtyS = f_qtyFromDist(atrMult * atrVal)
+    if qtyS > 0
+        atrStored := atrVal
+        strategy.entry("Short", strategy.short, qty = qtyS, comment = "MR Short")
+
+// ───────────────────────────── VISUALS ─────────────────────────────
+// Bollinger Bands + fill
+pBU = plot(showBands ? bbUpper : na, "BB Upper", color = color.new(color.blue, 0))
+pBL = plot(showBands ? bbLower : na, "BB Lower", color = color.new(color.blue, 0))
+plot(showBands ? basis : na, "BB Basis (target)", color = color.new(color.orange, 0), linewidth = 1)
+fill(pBU, pBL, color = showBands ? color.new(color.blue, 95) : na, title = "BB fill")
+
+// Keltner Channel (optional)
+plot(showKc ? kcUpper : na, "KC Upper", color = color.new(color.gray, 30), style = plot.style_stepline)
+plot(showKc ? kcLower : na, "KC Lower", color = color.new(color.gray, 30), style = plot.style_stepline)
+
+// Trend EMA (optional)
+plot(showEma ? emaTr : na, "Trend EMA", color = color.new(color.fuchsia, 0), linewidth = 2)
+
+// Active stop / target while in a trade
+inPos    = strategy.position_size != 0
+tpActive = inDir == 1 ? math.max(basis, strategy.position_avg_price + syminfo.mintick) : inDir == -1 ? math.min(basis, strategy.position_avg_price - syminfo.mintick) : na
+plot(showLevels and inPos ? inStop   : na, "Stop",          color = color.new(color.red, 0),   style = plot.style_linebr, linewidth = 1)
+plot(showLevels and inPos ? tpActive : na, "Target (basis)", color = color.new(color.green, 0), style = plot.style_linebr, linewidth = 1)
+
+// Signal markers (closed-bar -> non-repainting)
+plotshape(goLong,  title = "Long signal",  style = shape.triangleup,   location = location.belowbar, color = color.new(color.green, 0), size = size.tiny)
+plotshape(goShort, title = "Short signal", style = shape.triangledown, location = location.abovebar, color = color.new(color.red, 0),   size = size.tiny)
+
+// Background: a valid extreme is forming and waiting for next-bar confirmation (90% transparent)
+bgcolor(showSetupBg and longSetup  ? color.new(color.green, 90) : na, title = "Long setup forming")
+bgcolor(showSetupBg and shortSetup ? color.new(color.red, 90)   : na, title = "Short setup forming")
+
+// Background: daily loss breaker active (more opaque, so it stands out)
+bgcolor(dailyHalt ? color.new(color.red, 80) : na, title = "Daily loss halt active")
+
+// Date-range / OOS shading: grey outside [Start, End]; faint blue over the in-range OOS period
+bgcolor(showDateViz and not inDateRange       ? color.new(color.gray, 92) : na, title = "Out of date range")
+bgcolor(showDateViz and inDateRange and isOOS ? color.new(color.blue, 90) : na, title = "Out-of-sample period")
+
+// Dashed vertical line + label at the first out-of-sample bar
+if showDateViz and isOOS and not oosDrawn
+    line.new(bar_index, low, bar_index, high, xloc = xloc.bar_index, extend = extend.both, color = color.new(color.blue, 20), style = line.style_dashed, width = 1)
+    label.new(bar_index, high, "OOS ►", style = label.style_label_down, color = color.new(color.blue, 20), textcolor = color.white, size = size.small)
+    oosDrawn := true
+
+// Timeframe reminder (this model is tuned for 5m–15m)
+if barstate.islast and (timeframe.in_seconds() < 300 or timeframe.in_seconds() > 900)
+    label.new(bar_index, high, "ℹ This strategy is tuned for the 5m–15m chart.\nThe current timeframe is outside that range.", style = label.style_label_down, color = color.new(color.orange, 0), textcolor = color.black, size = size.normal)
+
+// ───────────────────────────── WEEKDAY STATS TABLE ─────────────────────────────
+// Buckets CLOSED trades by their ENTRY weekday, filtered by the chosen Table scope.
+//   R is price-based: long R = (exit - entry)/(entry - initialStop); short mirrored.
+//   Net P&L is the realized profit reported by the strategy (net of commission when set).
+tblPos = tablePos == "Top Right" ? position.top_right : tablePos == "Bottom Left" ? position.bottom_left : tablePos == "Top Left" ? position.top_left : position.bottom_right
+tblTxt = tableSize == "Tiny" ? size.tiny : tableSize == "Small" ? size.small : tableSize == "Large" ? size.large : size.normal
+
+var table statTable = table.new(position = tblPos, columns = 5, rows = 7, frame_width = 1, frame_color = color.new(color.gray, 50), border_width = 1, border_color = color.new(color.gray, 70))
+
+if showTable and barstate.islast
+    nTr  = array.new_int(5, 0)        // index 0=Mon .. 4=Fri
+    nWin = array.new_int(5, 0)
+    pnl  = array.new_float(5, 0.0)
+    rsum = array.new_float(5, 0.0)
+
+    nClosed = strategy.closedtrades
+    if nClosed > 0
+        for k = 0 to nClosed - 1
+            et      = strategy.closedtrades.entry_time(k)
+            inScope = tableScope == "All" or (tableScope == "In-Sample" and et < oosStart) or (tableScope == "Out-of-Sample" and et >= oosStart)
+            idx     = dayofweek(et, tz) - 2   // Mon(2)->0 .. Fri(6)->4
+            if inScope and idx >= 0 and idx <= 4
+                prof   = strategy.closedtrades.profit(k)
+                entryP = strategy.closedtrades.entry_price(k)
+                exitP  = strategy.closedtrades.exit_price(k)
+                isLong = (k < array.size(dirArr) ? array.get(dirArr, k) : 1) == 1
+                stp    = k < array.size(stopArr) ? array.get(stopArr, k) : na
+                risk   = isLong ? (entryP - stp) : (stp - entryP)
+                rm     = (not na(stp) and risk > 0) ? (isLong ? (exitP - entryP) : (entryP - exitP)) / risk : na
+                array.set(nTr, idx, array.get(nTr, idx) + 1)
+                if prof > 0
+                    array.set(nWin, idx, array.get(nWin, idx) + 1)
+                array.set(pnl, idx, array.get(pnl, idx) + prof)
+                if not na(rm)
+                    array.set(rsum, idx, array.get(rsum, idx) + rm)
+
+    fg       = chart.fg_color
+    hdrBg    = color.new(color.gray, 65)
+    totBg    = color.new(color.gray, 80)
+    scopeTag = tableScope == "In-Sample" ? " · IS" : tableScope == "Out-of-Sample" ? " · OOS" : ""
+
+    // Header
+    table.cell(statTable, 0, 0, "Day" + scopeTag, text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
+    table.cell(statTable, 1, 0, "Trades",  text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
+    table.cell(statTable, 2, 0, "Win %",   text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
+    table.cell(statTable, 3, 0, "Net P&L", text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
+    table.cell(statTable, 4, 0, "Tot R",   text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
+
+    names = array.from("Mon", "Tue", "Wed", "Thu", "Fri")
+    tTr  = 0
+    tWin = 0
+    tPnl = 0.0
+    tR   = 0.0
+    for idx = 0 to 4
+        r   = idx + 1
+        tr  = array.get(nTr, idx)
+        win = array.get(nWin, idx)
+        pv  = array.get(pnl, idx)
+        rv  = array.get(rsum, idx)
+        tTr  += tr
+        tWin += win
+        tPnl += pv
+        tR   += rv
+        wpTxt = tr > 0 ? str.tostring(100.0 * win / tr, "#.0") + "%" : "—"
+        pvTxt = tr > 0 ? str.tostring(pv, "#") : "—"
+        rvTxt = tr > 0 ? str.tostring(rv, "#.#") : "—"
+        pvCol = pv > 0 ? color.new(color.green, 0) : pv < 0 ? color.new(color.red, 0) : fg
+        rvCol = rv > 0 ? color.new(color.green, 0) : rv < 0 ? color.new(color.red, 0) : fg
+        table.cell(statTable, 0, r, array.get(names, idx), text_color = fg,    text_size = tblTxt)
+        table.cell(statTable, 1, r, str.tostring(tr),      text_color = fg,    text_size = tblTxt)
+        table.cell(statTable, 2, r, wpTxt,                 text_color = fg,    text_size = tblTxt)
+        table.cell(statTable, 3, r, pvTxt,                 text_color = pvCol, text_size = tblTxt)
+        table.cell(statTable, 4, r, rvTxt,                 text_color = rvCol, text_size = tblTxt)
+
+    // Total row
+    twpTxt = tTr > 0 ? str.tostring(100.0 * tWin / tTr, "#.0") + "%" : "—"
+    tpvTxt = tTr > 0 ? str.tostring(tPnl, "#") : "—"
+    trvTxt = tTr > 0 ? str.tostring(tR, "#.#") : "—"
+    tpvCol = tPnl > 0 ? color.new(color.green, 0) : tPnl < 0 ? color.new(color.red, 0) : fg
+    trvCol = tR   > 0 ? color.new(color.green, 0) : tR   < 0 ? color.new(color.red, 0) : fg
+    table.cell(statTable, 0, 6, "All",            text_color = fg,     bgcolor = totBg, text_size = tblTxt)
+    table.cell(statTable, 1, 6, str.tostring(tTr), text_color = fg,    bgcolor = totBg, text_size = tblTxt)
+    table.cell(statTable, 2, 6, twpTxt,           text_color = fg,     bgcolor = totBg, text_size = tblTxt)
+    table.cell(statTable, 3, 6, tpvTxt,           text_color = tpvCol, bgcolor = totBg, text_size = tblTxt)
+    table.cell(statTable, 4, 6, trvTxt,           text_color = trvCol, bgcolor = totBg, text_size = tblTxt)

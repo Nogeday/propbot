@@ -1,0 +1,590 @@
+//@version=5
+// =====================================================================================
+//  MTF TREND CONTINUATION — 5m execution / 1H trend filter   (S&P 500: SPY / ES / SPX*)
+// -------------------------------------------------------------------------------------
+//  Run this on a 5-MINUTE chart. The 1-Hour trend bias is pulled with request.security
+//  using lookahead = barmerge.lookahead_off  =>  the higher-TF value only updates at the
+//  CLOSE of each 1H bar, so on history and in realtime the strategy sees the last CLOSED
+//  1H bar. Combined with calc_on_every_tick = false (closed-bar evaluation) and market
+//  orders that fill at the NEXT bar's open, the system is fully non-repainting.
+// -------------------------------------------------------------------------------------
+//  CORE LOGIC
+//   1. HTF TREND ALIGNMENT : 1H EMA20 > 1H EMA50  -> long bias ;  < -> short bias.
+//   2. VALUE-AREA PULLBACK : on the 5m chart price retraces into the band between the
+//      5m EMA21 and 5m EMA50 (the bar's range must intersect the band).
+//   3. VOLUME DRY-UP       : during that pullback bar, volume < its 20-period average
+//      (counter-trend pressure is fading). *SPX has no real volume — use SPY/ES or
+//      disable this filter.
+//   4. MOMENTUM TRIGGER    : once "armed" (steps 1-3 met), enter on the first strong
+//      candle that closes in the trend direction and beyond the prior bar's extreme
+//      (long: bullish close AND close > high[1] ; short mirrored).
+// -------------------------------------------------------------------------------------
+//  TRADE MANAGEMENT (prop-firm)
+//   • SIZING       : fixed % of equity risk -> qty = (equity*risk%) / (stopDist*pointValue)
+//   • INITIAL STOP : just beyond the recent 5m swing low/high (+ buffer).
+//   • SCALE-OUT    : close 50% (configurable) at 1.5R, then move the runner's stop to
+//                    BREAKEVEN, then trail it with a Chandelier Exit OR a 14-ATR stop.
+//   • PLAN B       : if integer sizing yields an ODD / 1-contract position (no clean
+//                    50/50 split for futures), the scale-out is skipped and the FULL
+//                    position is run as the runner (initial stop until 1.5R, then BE+trail).
+//   • CIRCUIT      : max trades/day, daily-loss halt, optional consecutive-loss halt,
+//                    optional session window + EOD flat, backtest date range + OOS split.
+//   • TABLE        : runner / strategy performance (TP1 reach %, runner win %, avg R...).
+//  DEFAULTS ARE TUNED FOR MES (Micro E-mini S&P 500):
+//    Commission = cash per contract, $0.50 / side  =>  $1.00 round-turn.
+//    Slippage   = 1 tick  (MES tick = 0.25 index points = $1.25 / contract).
+//  For other instruments, change these in the strategy's "Properties" tab
+//    (full-size ES -> higher cash per contract ; SPY -> % of value, & enable volume).
+// =====================================================================================
+
+strategy(
+     title              = "MTF Trend Continuation (5m / 1H)",
+     shorttitle         = "MTF Trend Cont.",
+     overlay            = true,
+     pyramiding         = 0,
+     initial_capital    = 10000,
+     default_qty_type   = strategy.fixed,
+     default_qty_value  = 1,
+     commission_type    = strategy.commission.cash_per_contract,
+     commission_value   = 0.50,   // MES default: $0.50 / side  =>  $1.00 round-turn (entry + exit)
+     slippage           = 1,      // 1 tick (MES tick = 0.25 index pts = $1.25 / contract)
+     calc_on_every_tick = false,
+     max_boxes_count    = 200,
+     max_lines_count    = 200,
+     max_labels_count   = 200)
+
+// =====================================================================================
+//  INPUTS
+// =====================================================================================
+g_mtf    = "1) MTF / Trend (HTF)"
+g_va     = "2) Value Area (LTF)"
+g_vol    = "3) Volume Filter"
+g_entry  = "4) Entry"
+g_risk   = "5) Risk & Position Sizing"
+g_scale  = "6) Scale-Out & Trailing"
+g_limit  = "7) Daily Limits & Circuit Breakers"
+g_sess   = "8) Session"
+g_dates  = "9) Backtest Date Range / OOS"
+g_vis    = "10) Visuals"
+g_tbl    = "11) Performance Table"
+
+tz = input.string("America/New_York", "Timezone", group = g_mtf, tooltip = "Used for day change, session window and weekday logic. Keep America/New_York for SPX/SPY/ES.")
+
+// HTF trend
+htfTf      = input.timeframe("60", "HTF timeframe", group = g_mtf, tooltip = "Higher timeframe for the trend filter. Default 60 = 1 Hour. Keep this STRICTLY above the chart timeframe.")
+htfFastLen = input.int(20, "HTF fast EMA", minval = 1, group = g_mtf)
+htfSlowLen = input.int(50, "HTF slow EMA", minval = 1, group = g_mtf)
+
+// Value Area (LTF)
+ltfFastLen = input.int(21, "5m fast EMA (Value Area top/bot)", minval = 1, group = g_va)
+ltfSlowLen = input.int(50, "5m slow EMA (Value Area top/bot)", minval = 1, group = g_va)
+
+// Volume
+useVolFilter = input.bool(true, "Require volume below average in the pullback", group = g_vol, tooltip = "Drying-up of counter-trend volume. Turn OFF on SPX (index has no real volume).")
+volLen       = input.int(20, "Volume average length", minval = 1, group = g_vol)
+
+// Entry
+allowLong       = input.bool(true,  "Allow longs",  group = g_entry)
+allowShort      = input.bool(true,  "Allow shorts", group = g_entry)
+armValidityBars = input.int(10, "Pullback validity (bars)", minval = 1, group = g_entry, tooltip = "After a valid pullback is detected, the momentum trigger must fire within this many 5m bars, or the setup expires.")
+
+// Risk & sizing
+riskPercent  = input.float(0.5, "Risk per trade (% of equity)", minval = 0.01, step = 0.1, group = g_risk, tooltip = "Fixed-fractional risk. qty = (equity * risk%) / (stopDistance * pointValue). 0.5% is a conservative prop-firm default.")
+swingLen     = input.int(10, "Swing lookback for initial stop (bars)", minval = 1, group = g_risk, tooltip = "Stop is placed beyond the lowest low / highest high of the last N bars (a proxy for the recent swing).")
+swingBufTick = input.int(4, "Stop buffer beyond swing (ticks)", minval = 0, group = g_risk)
+roundUnits   = input.bool(true, "Round position to whole units", group = g_risk, tooltip = "ON = integer contracts/shares. On futures (ES pointvalue 50) a small account can legitimately size to 0 contracts (correct, not a bug).")
+
+// Scale-out & trail
+tp1RR        = input.float(1.5, "TP1 reward : risk", minval = 0.1, step = 0.1, group = g_scale)
+scaleOutPct  = input.float(50, "Scale-out % at TP1", minval = 1, maxval = 99, step = 1, group = g_scale, tooltip = "Portion closed at TP1; the rest becomes the runner. NOTE: futures need an EVEN contract count to split cleanly (1 contract cannot be halved live).")
+trailType    = input.string("Chandelier Exit", "Runner trailing method", options = ["Chandelier Exit", "ATR Trailing"], group = g_scale)
+chLen        = input.int(22, "Chandelier length (highest + ATR)", minval = 1, group = g_scale)
+chMult       = input.float(3.0, "Chandelier ATR multiplier", minval = 0.1, step = 0.1, group = g_scale)
+atrTrailLen  = input.int(14, "ATR trailing length", minval = 1, group = g_scale)
+atrTrailMult = input.float(2.5, "ATR trailing multiplier", minval = 0.1, step = 0.1, group = g_scale)
+
+// Daily limits & circuit breakers
+maxTradesDay   = input.int(3, "Max trades per day", minval = 1, group = g_limit, tooltip = "Hard cap on new entries per NY calendar day to avoid overtrading chop.")
+useDailyLoss   = input.bool(true, "Daily-loss circuit breaker", group = g_limit)
+dailyLossPct   = input.float(2.0, "Max daily loss (% of day-start equity)", minval = 0.1, step = 0.1, group = g_limit)
+flatOnDailyLoss= input.bool(true, "Force flat when daily loss is hit", group = g_limit, tooltip = "Evaluated on bar close (no intrabar magnifier), so it approximates a real prop daily-loss breach.")
+useConsec      = input.bool(false, "Consecutive-loss halt (resets daily)", group = g_limit)
+maxConsec      = input.int(3, "Max consecutive losses", minval = 1, group = g_limit)
+
+// Session
+useSession = input.bool(true, "Restrict entries to a session window", group = g_sess)
+sessStartH = input.int(9,  "Session start hour (24h)",  minval = 0, maxval = 23, group = g_sess)
+sessStartM = input.int(30, "Session start minute",      minval = 0, maxval = 59, group = g_sess)
+sessEndH   = input.int(15, "Session end hour (24h)",    minval = 0, maxval = 23, group = g_sess)
+sessEndM   = input.int(55, "Session end minute",        minval = 0, maxval = 59, group = g_sess, tooltip = "No new entries at/after this time; if 'flat at end' is on, open trades are closed.")
+flatAtEnd  = input.bool(true, "Flat at session end", group = g_sess)
+
+// Backtest date range / OOS
+startDate   = input.time(timestamp("01 Jan 2024 00:00 +0000"), "Start date", group = g_dates, tooltip = "Trades begin on/after this date.")
+oosStart    = input.time(timestamp("01 Jan 2025 00:00 +0000"), "In-sample end / OOS start", group = g_dates, tooltip = "Boundary between optimization (IS) and unseen (OOS) data. The strategy keeps trading across it; it drives the chart marker and the table scope.")
+endDate     = input.time(timestamp("01 Jan 2030 00:00 +0000"), "End date", group = g_dates)
+showDateViz = input.bool(true, "Shade OOS / out-of-range region", group = g_dates)
+
+// Visuals
+showVA     = input.bool(true,  "Show 5m Value-Area band", group = g_vis)
+showHtf    = input.bool(true,  "Show 1H EMAs (stepped)",  group = g_vis)
+showLevels = input.bool(true,  "Show stop / TP lines",    group = g_vis)
+
+// Performance table
+showPerf  = input.bool(true, "Show performance table", group = g_tbl)
+tablePos  = input.string("Bottom Right", "Table position", options = ["Bottom Right", "Top Right", "Bottom Left", "Top Left"], group = g_tbl)
+tableSize = input.string("Small", "Table text size", options = ["Tiny", "Small", "Normal", "Large"], group = g_tbl)
+
+// =====================================================================================
+//  MTF DATA  (non-repainting — see header)
+// =====================================================================================
+// EMAs are computed INSIDE the request on true 1H closes, then merged with lookahead_off.
+[htfFast, htfSlow] = request.security(syminfo.tickerid, htfTf,
+     [ta.ema(close, htfFastLen), ta.ema(close, htfSlowLen)],
+     lookahead = barmerge.lookahead_off)
+
+htfBull = not na(htfFast) and not na(htfSlow) and htfFast > htfSlow
+htfBear = not na(htfFast) and not na(htfSlow) and htfFast < htfSlow
+
+// =====================================================================================
+//  LOGIC
+// =====================================================================================
+// ---- Time / date / day ----
+nyH    = hour(time, tz)
+nyM    = minute(time, tz)
+curMin = nyH * 60 + nyM
+sStart = sessStartH * 60 + sessStartM
+sEnd   = sessEndH   * 60 + sessEndM
+sessionOK = not useSession or (curMin >= sStart and curMin < sEnd)
+
+newDay = ta.change(dayofmonth(time, tz)) != 0
+
+inDateRange = time >= startDate and time <= endDate
+isOOS       = time >= oosStart
+
+// ---- LTF indicators (all ta.* at global scope for correct series) ----
+emaFast = ta.ema(close, ltfFastLen)
+emaSlow = ta.ema(close, ltfSlowLen)
+vaTop   = math.max(emaFast, emaSlow)
+vaBot   = math.min(emaFast, emaSlow)
+inVA    = low <= vaTop and high >= vaBot          // bar range intersects the EMA band
+
+volAvg  = ta.sma(volume, volLen)
+volOK   = useVolFilter ? (not na(volAvg) and volume < volAvg) : true
+
+swingLow  = ta.lowest(low,  swingLen)
+swingHigh = ta.highest(high, swingLen)
+buf       = swingBufTick * syminfo.mintick
+
+atrCh   = ta.atr(chLen)
+atrTr   = ta.atr(atrTrailLen)
+chLong  = ta.highest(high, chLen) - atrCh * chMult
+chShort = ta.lowest(low,  chLen)  + atrCh * chMult
+atrLong  = close - atrTr * atrTrailMult
+atrShort = close + atrTr * atrTrailMult
+trailLong  = trailType == "Chandelier Exit" ? chLong  : atrLong
+trailShort = trailType == "Chandelier Exit" ? chShort : atrShort
+
+// ---- Arm (pullback) + momentum trigger ----
+var int armDir = 0     // 0 none, 1 long-armed, -1 short-armed
+var int armBar = 0
+
+if newDay
+    armDir := 0        // do not carry an overnight setup into a new session
+
+longPullback  = htfBull and inVA and volOK and allowLong
+shortPullback = htfBear and inVA and volOK and allowShort
+
+if longPullback
+    armDir := 1
+    armBar := bar_index
+else if shortPullback
+    armDir := -1
+    armBar := bar_index
+
+// invalidate the arm: trend flipped or setup got stale
+if armDir == 1 and (not htfBull or (bar_index - armBar) > armValidityBars)
+    armDir := 0
+if armDir == -1 and (not htfBear or (bar_index - armBar) > armValidityBars)
+    armDir := 0
+
+bullTrigger = close > open and close > high[1]
+bearTrigger = close < open and close < low[1]
+longSignal  = armDir ==  1 and bullTrigger
+shortSignal = armDir == -1 and bearTrigger
+
+// =====================================================================================
+//  RISK MANAGEMENT  (state, circuit breakers, gates)
+// =====================================================================================
+// ---- Open-trade state ----
+var int   pendingDir     = 0      // direction of the order just submitted (pre-fill)
+var float pendingStop    = na     // stop price captured at signal time
+var float activeInitStop = na     // finalized initial stop on the fill bar
+var float activeTP1      = na     // TP1 price (scale-out)
+var float runnerStop     = na     // runner stop (initial -> BE -> trailed)
+var float entryQty       = na     // full filled qty (to detect the partial fill)
+var bool  tp1Filled      = false  // scaled: TP1 partial filled ; no-scale: 1.5R milestone reached
+var bool  noScaleTrade   = false  // Plan B: odd / 1-contract qty -> run the FULL position, no TP1
+
+// ---- Daily / streak state ----
+var int   tradesToday    = 0
+var int   totalEntries   = 0
+var int   tradeCount     = 0      // fully-closed trades (one per entry)
+var int   tradeWins      = 0
+var int   consecLosses   = 0
+// mode-split full-trade stats (S = scaled, B = Plan B)
+var int   nFullS         = 0
+var int   winFullS       = 0
+var float pnlFullS       = 0.0
+var int   nFullB         = 0
+var int   winFullB       = 0
+var float pnlFullB       = 0.0
+var bool  dailyLossHit   = false
+var bool  consecHaltHit  = false
+var float dayStartEquity = na
+var float eqAtEntry      = na
+
+// ---- Per-entry records (for the runner R column; matched by entry_time) ----
+var int[]   entryTimeArr = array.new_int()
+var float[] riskPtsArr   = array.new_float()
+var int[]   dirArr       = array.new_int()
+
+// ---- New-day reset ----
+if newDay or na(dayStartEquity)
+    dayStartEquity := strategy.equity
+    tradesToday    := 0
+    dailyLossHit   := false
+    consecHaltHit  := false
+    consecLosses   := 0
+
+// ---- Trade-outcome tracking (full trade = one entry, incl. its scale-out) ----
+enteredNow = strategy.position_size != 0 and strategy.position_size[1] == 0
+exitedNow  = strategy.position_size == 0 and strategy.position_size[1] != 0
+if enteredNow
+    eqAtEntry := strategy.equity
+if exitedNow and not na(eqAtEntry)
+    tradeNet = strategy.equity - eqAtEntry
+    tradeCount += 1
+    if tradeNet > 0
+        tradeWins += 1
+        consecLosses := 0
+    else
+        consecLosses += 1
+    // split the full-trade result by which mode managed it (noScaleTrade not yet reset)
+    if noScaleTrade
+        nFullB += 1
+        pnlFullB += tradeNet
+        if tradeNet > 0
+            winFullB += 1
+    else
+        nFullS += 1
+        pnlFullS += tradeNet
+        if tradeNet > 0
+            winFullS += 1
+    if useConsec and consecLosses >= maxConsec
+        consecHaltHit := true
+    eqAtEntry := na
+
+// ---- Daily-loss circuit breaker (bar-close equity, incl. open P&L) ----
+if useDailyLoss and not na(dayStartEquity)
+    if (dayStartEquity - strategy.equity) >= dayStartEquity * dailyLossPct / 100.0
+        dailyLossHit := true
+
+haltedToday  = dailyLossHit or (useConsec and consecHaltHit)
+canEnterBase = inDateRange and sessionOK and not haltedToday and tradesToday < maxTradesDay and strategy.position_size == 0
+
+// =====================================================================================
+//  EXECUTION
+// =====================================================================================
+// ---- Entries (with fixed-% sizing) ----
+if longSignal and canEnterBase
+    stopLvl  = math.min(swingLow - buf, close - syminfo.mintick)   // ensure stop sits below price
+    stopDist = close - stopLvl
+    if stopDist > 0
+        riskCash = strategy.equity * riskPercent / 100.0
+        rawQty   = riskCash / (stopDist * syminfo.pointvalue)
+        qty      = roundUnits ? math.floor(rawQty) : rawQty
+        if qty > 0
+            strategy.entry("Long", strategy.long, qty = qty, comment = "Long")
+            pendingDir  := 1
+            pendingStop := stopLvl
+            tradesToday  += 1
+            totalEntries += 1
+            armDir := 0            // require a fresh pullback for the next trade
+
+if shortSignal and canEnterBase
+    stopLvl  = math.max(swingHigh + buf, close + syminfo.mintick)
+    stopDist = stopLvl - close
+    if stopDist > 0
+        riskCash = strategy.equity * riskPercent / 100.0
+        rawQty   = riskCash / (stopDist * syminfo.pointvalue)
+        qty      = roundUnits ? math.floor(rawQty) : rawQty
+        if qty > 0
+            strategy.entry("Short", strategy.short, qty = qty, comment = "Short")
+            pendingDir  := -1
+            pendingStop := stopLvl
+            tradesToday  += 1
+            totalEntries += 1
+            armDir := 0
+
+// ---- Finalize stop / TP on the fill bar, then manage exits ----
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+
+// LONG
+if inLong
+    if na(activeTP1)                                   // first bar of the long -> finalize
+        avg = strategy.position_avg_price
+        activeInitStop := math.min(pendingStop, avg - syminfo.mintick)
+        riskPts := avg - activeInitStop
+        activeTP1 := avg + tp1RR * riskPts
+        runnerStop := activeInitStop
+        entryQty := math.abs(strategy.position_size)
+        // PLAN B: an odd / single-contract size cannot be split 50/50 into whole
+        // contracts -> skip the scale-out and run the FULL position as the runner.
+        noScaleTrade := roundUnits and (int(math.round(entryQty)) % 2 == 1)
+        tp1Filled := false
+        array.push(entryTimeArr, time)
+        array.push(riskPtsArr, riskPts)
+        array.push(dirArr, 1)
+    if noScaleTrade
+        // -- Plan B: full position runner. Initial stop until 1.5R, then BE + trail. --
+        if not tp1Filled and high >= activeTP1
+            tp1Filled := true                          // 1.5R reached (no contracts taken off)
+        if tp1Filled
+            be = strategy.position_avg_price
+            runnerStop := math.max(runnerStop, math.max(be, trailLong))
+        if not tp1Filled
+            strategy.exit("Stop", from_entry = "Long", stop = activeInitStop, comment = "Init stop")
+        else
+            strategy.cancel("Stop")
+            strategy.exit("RunB", from_entry = "Long", stop = runnerStop, comment = "Runner (Plan B)")
+    else
+        // -- Scaled: 50% off at 1.5R, move remainder to BE, then trail. --
+        if not tp1Filled and not na(entryQty) and math.abs(strategy.position_size) < entryQty * 0.95
+            tp1Filled := true                          // TP1 partial filled
+        if tp1Filled
+            be = strategy.position_avg_price
+            runnerStop := math.max(runnerStop, math.max(be, trailLong))
+        if not tp1Filled
+            strategy.exit("TP1",  from_entry = "Long", qty_percent = scaleOutPct,       stop = activeInitStop, limit = activeTP1, comment = "TP1")
+            strategy.exit("Init", from_entry = "Long", qty_percent = 100 - scaleOutPct, stop = activeInitStop, comment = "Init stop")
+        else
+            strategy.cancel("Init")
+            strategy.exit("Run", from_entry = "Long", stop = runnerStop, comment = "Runner")
+
+// SHORT
+if inShort
+    if na(activeTP1)
+        avg = strategy.position_avg_price
+        activeInitStop := math.max(pendingStop, avg + syminfo.mintick)
+        riskPts := activeInitStop - avg
+        activeTP1 := avg - tp1RR * riskPts
+        runnerStop := activeInitStop
+        entryQty := math.abs(strategy.position_size)
+        noScaleTrade := roundUnits and (int(math.round(entryQty)) % 2 == 1)
+        tp1Filled := false
+        array.push(entryTimeArr, time)
+        array.push(riskPtsArr, riskPts)
+        array.push(dirArr, -1)
+    if noScaleTrade
+        // -- Plan B: full position runner. Initial stop until 1.5R, then BE + trail. --
+        if not tp1Filled and low <= activeTP1
+            tp1Filled := true
+        if tp1Filled
+            be = strategy.position_avg_price
+            runnerStop := math.min(runnerStop, math.min(be, trailShort))
+        if not tp1Filled
+            strategy.exit("Stop", from_entry = "Short", stop = activeInitStop, comment = "Init stop")
+        else
+            strategy.cancel("Stop")
+            strategy.exit("RunB", from_entry = "Short", stop = runnerStop, comment = "Runner (Plan B)")
+    else
+        // -- Scaled: 50% off at 1.5R, move remainder to BE, then trail. --
+        if not tp1Filled and not na(entryQty) and math.abs(strategy.position_size) < entryQty * 0.95
+            tp1Filled := true
+        if tp1Filled
+            be = strategy.position_avg_price
+            runnerStop := math.min(runnerStop, math.min(be, trailShort))
+        if not tp1Filled
+            strategy.exit("TP1",  from_entry = "Short", qty_percent = scaleOutPct,       stop = activeInitStop, limit = activeTP1, comment = "TP1")
+            strategy.exit("Init", from_entry = "Short", qty_percent = 100 - scaleOutPct, stop = activeInitStop, comment = "Init stop")
+        else
+            strategy.cancel("Init")
+            strategy.exit("Run", from_entry = "Short", stop = runnerStop, comment = "Runner")
+
+// ---- Forced exits ----
+if useDailyLoss and flatOnDailyLoss and dailyLossHit and strategy.position_size != 0
+    strategy.close_all(comment = "Daily loss halt")
+
+if useSession and flatAtEnd and curMin >= sEnd and strategy.position_size != 0
+    strategy.close_all(comment = "Session end")
+
+if time > endDate and strategy.position_size != 0
+    strategy.close_all(comment = "End of test range")
+
+// ---- Reset state only when a trade actually CLOSES (not on the signal bar) ----
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    pendingDir     := 0
+    pendingStop    := na
+    activeInitStop := na
+    activeTP1      := na
+    runnerStop     := na
+    entryQty       := na
+    tp1Filled      := false
+    noScaleTrade   := false
+    strategy.cancel("TP1")
+    strategy.cancel("Init")
+    strategy.cancel("Run")
+    strategy.cancel("RunB")
+    strategy.cancel("Stop")
+
+// =====================================================================================
+//  VISUALS
+// =====================================================================================
+// Value-Area band
+pF = plot(showVA ? emaFast : na, "5m EMA fast", color = color.new(color.blue, 0),   linewidth = 1)
+pS = plot(showVA ? emaSlow : na, "5m EMA slow", color = color.new(color.purple, 0), linewidth = 1)
+fill(pF, pS, color = color.new(color.blue, 90), title = "Value Area")
+
+// 1H EMAs (stepped)
+plot(showHtf ? htfFast : na, "1H EMA fast", color = color.new(color.teal, 0),   linewidth = 2)
+plot(showHtf ? htfSlow : na, "1H EMA slow", color = color.new(color.orange, 0), linewidth = 2)
+
+// Stop / TP lines while in a position
+curStop = strategy.position_size != 0 ? (tp1Filled ? runnerStop : activeInitStop) : na
+plot(showLevels ? curStop : na, "Stop / Trail", color = color.new(color.red, 0), style = plot.style_linebr, linewidth = 1)
+plot(showLevels and strategy.position_size != 0 and not tp1Filled ? activeTP1 : na, "TP1", color = color.new(color.green, 0), style = plot.style_linebr, linewidth = 1)
+
+// Date-range / OOS shading
+bgcolor(showDateViz and not inDateRange       ? color.new(color.gray, 92) : na, title = "Out of date range")
+bgcolor(showDateViz and inDateRange and isOOS ? color.new(color.blue, 90) : na, title = "Out-of-sample period")
+
+var bool oosDrawn = false
+if showDateViz and isOOS and not oosDrawn
+    line.new(bar_index, low, bar_index, high, xloc = xloc.bar_index, extend = extend.both, color = color.new(color.blue, 20), style = line.style_dashed, width = 1)
+    label.new(bar_index, high, "OOS ►", style = label.style_label_down, color = color.new(color.blue, 20), textcolor = color.white, size = size.small)
+    oosDrawn := true
+
+// 5m reminder
+if barstate.islast and timeframe.period != "5"
+    label.new(bar_index, high, "⚠ This strategy is built for the 5-minute chart.\nSwitch the timeframe to 5m for correct results.", style = label.style_label_down, color = color.new(color.orange, 0), textcolor = color.black, size = size.normal)
+
+// =====================================================================================
+//  PERFORMANCE TABLE  (runner = a position managed in the BE/trail phase, exit id "Run")
+// -------------------------------------------------------------------------------------
+//   A "true runner" only exists once the 1.5R milestone was reached and the stop was
+//   moved to BE/trail (so it can only close at BE or in profit). In SCALED trades that
+//   half is 50% of the position; in PLAN B trades it is the FULL position. Trades stopped
+//   BEFORE 1.5R close via the "TP1"/"Init"/"Stop" ids and are excluded here. Runner R is
+//   measured from ENTRY: long R = (exit-entry)/initialRisk ; short mirrored.
+// =====================================================================================
+tblPos = tablePos == "Top Right" ? position.top_right : tablePos == "Bottom Left" ? position.bottom_left : tablePos == "Top Left" ? position.top_left : position.bottom_right
+tblTxt = tableSize == "Tiny" ? size.tiny : tableSize == "Normal" ? size.normal : tableSize == "Large" ? size.large : size.small
+
+var table perf = table.new(position = tblPos, columns = 3, rows = 8, frame_width = 1, frame_color = color.new(color.gray, 50), border_width = 1, border_color = color.new(color.gray, 70))
+
+if showPerf and barstate.islast
+    // Runner stats split by exit id: "Run" = scaled half ; "RunB" = Plan B full position
+    rTotS = 0
+    rWinS = 0
+    rRS   = 0.0
+    rPnlS = 0.0
+    rTotB = 0
+    rWinB = 0
+    rRB   = 0.0
+    rPnlB = 0.0
+    nC = strategy.closedtrades
+    if nC > 0
+        for k = 0 to nC - 1
+            xid = strategy.closedtrades.exit_id(k)
+            isS = xid == "Run"
+            isB = xid == "RunB"
+            if isS or isB
+                p      = strategy.closedtrades.profit(k)
+                eTime  = strategy.closedtrades.entry_time(k)
+                entryP = strategy.closedtrades.entry_price(k)
+                exitP  = strategy.closedtrades.exit_price(k)
+                idx = -1
+                if array.size(entryTimeArr) > 0
+                    for j = 0 to array.size(entryTimeArr) - 1
+                        if array.get(entryTimeArr, j) == eTime
+                            idx := j
+                            break
+                float rval = na
+                if idx >= 0
+                    rp = array.get(riskPtsArr, idx)
+                    dr = array.get(dirArr, idx)
+                    if rp > 0
+                        rval := dr == 1 ? (exitP - entryP) / rp : (entryP - exitP) / rp
+                if isS
+                    rTotS += 1
+                    rPnlS += p
+                    if p > 0
+                        rWinS += 1
+                    if not na(rval)
+                        rRS += rval
+                else
+                    rTotB += 1
+                    rPnlB += p
+                    if p > 0
+                        rWinB += 1
+                    if not na(rval)
+                        rRB += rval
+
+    fg    = chart.fg_color
+    hdrBg = color.new(color.gray, 60)
+    posC  = color.new(color.green, 0)
+    negC  = color.new(color.red, 0)
+
+    // ---- Scaled column text ----
+    sFull  = str.tostring(nFullS)
+    sTwin  = nFullS > 0 ? str.tostring(100.0 * winFullS / nFullS, "#.0") + "%" : "—"
+    sPnl   = str.tostring(pnlFullS, "#.#")
+    sReach = str.tostring(rTotS)
+    sRwin  = rTotS > 0 ? str.tostring(100.0 * rWinS / rTotS, "#.0") + "%" : "—"
+    sRavg  = rTotS > 0 ? str.tostring(rRS / rTotS, "#.##") + "R" : "—"
+    sRpnl  = str.tostring(rPnlS, "#.#")
+    // ---- Plan B column text ----
+    bFull  = str.tostring(nFullB)
+    bTwin  = nFullB > 0 ? str.tostring(100.0 * winFullB / nFullB, "#.0") + "%" : "—"
+    bPnl   = str.tostring(pnlFullB, "#.#")
+    bReach = str.tostring(rTotB)
+    bRwin  = rTotB > 0 ? str.tostring(100.0 * rWinB / rTotB, "#.0") + "%" : "—"
+    bRavg  = rTotB > 0 ? str.tostring(rRB / rTotB, "#.##") + "R" : "—"
+    bRpnl  = str.tostring(rPnlB, "#.#")
+
+    // ---- Header (top-left shows the active trail method) ----
+    table.cell(perf, 0, 0, trailType == "Chandelier Exit" ? "Chand." : "ATR", text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
+    table.cell(perf, 1, 0, "Scaled", text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
+    table.cell(perf, 2, 0, "Plan B", text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
+
+    // ---- Full-trade rows ----
+    table.cell(perf, 0, 1, "Full trades", text_color = fg, text_size = tblTxt)
+    table.cell(perf, 1, 1, sFull, text_color = fg, text_size = tblTxt)
+    table.cell(perf, 2, 1, bFull, text_color = fg, text_size = tblTxt)
+
+    table.cell(perf, 0, 2, "Trade win %", text_color = fg, text_size = tblTxt)
+    table.cell(perf, 1, 2, sTwin, text_color = fg, text_size = tblTxt)
+    table.cell(perf, 2, 2, bTwin, text_color = fg, text_size = tblTxt)
+
+    table.cell(perf, 0, 3, "Net P&L", text_color = fg, text_size = tblTxt)
+    table.cell(perf, 1, 3, sPnl, text_color = pnlFullS > 0 ? posC : pnlFullS < 0 ? negC : fg, text_size = tblTxt)
+    table.cell(perf, 2, 3, bPnl, text_color = pnlFullB > 0 ? posC : pnlFullB < 0 ? negC : fg, text_size = tblTxt)
+
+    // ---- Runner-phase rows ----
+    table.cell(perf, 0, 4, "Reached 1.5R", text_color = fg, text_size = tblTxt)
+    table.cell(perf, 1, 4, sReach, text_color = fg, text_size = tblTxt)
+    table.cell(perf, 2, 4, bReach, text_color = fg, text_size = tblTxt)
+
+    table.cell(perf, 0, 5, "Runner win %", text_color = fg, text_size = tblTxt)
+    table.cell(perf, 1, 5, sRwin, text_color = rWinS > 0 ? posC : fg, text_size = tblTxt)
+    table.cell(perf, 2, 5, bRwin, text_color = rWinB > 0 ? posC : fg, text_size = tblTxt)
+
+    table.cell(perf, 0, 6, "Avg runner R", text_color = fg, text_size = tblTxt)
+    table.cell(perf, 1, 6, sRavg, text_color = rRS > 0 ? posC : rRS < 0 ? negC : fg, text_size = tblTxt)
+    table.cell(perf, 2, 6, bRavg, text_color = rRB > 0 ? posC : rRB < 0 ? negC : fg, text_size = tblTxt)
+
+    table.cell(perf, 0, 7, "Runner P&L", text_color = fg, text_size = tblTxt)
+    table.cell(perf, 1, 7, sRpnl, text_color = rPnlS > 0 ? posC : rPnlS < 0 ? negC : fg, text_size = tblTxt)
+    table.cell(perf, 2, 7, bRpnl, text_color = rPnlB > 0 ? posC : rPnlB < 0 ? negC : fg, text_size = tblTxt)

@@ -1,0 +1,809 @@
+//@version=5
+// =====================================================================================
+//  MASTER PROP FIRM PORTFOLIO   (S&P 500: SPY / SPX)   ·   1-MINUTE chart only
+//  Merges two non-correlated edges into ONE script so a single GLOBAL risk shield can
+//  govern both (TradingView sandboxes are isolated — merging is the only way to get
+//  true portfolio-level daily risk management).
+//    • S1 — NY OPEN ORB + FVG/IFVG      (momentum / breakout, with trailing stop)
+//    • S2 — ASIAN RANGE SWEEP & REVERSAL (mean-reversion / liquidity fade, fixed 1:2)
+// -------------------------------------------------------------------------------------
+//  WHAT THIS SCRIPT ADDS OVER THE TWO STANDALONE VERSIONS
+//   1. GLOBAL CIRCUIT BREAKERS (the shield): one combined daily realized-loss tracker and
+//      one combined consecutive-loss counter across BOTH engines. Tripping either halts
+//      ALL new entries (S1 AND S2) for the rest of the NY day; resets next day.
+//   2. INDEPENDENT TOGGLES: enable / disable S1 and S2 separately for testing.
+//   3. CONFLICT RESOLUTION: every variable is prefixed s1_ / s2_ so the two engines never
+//      overwrite each other. Concurrent open risk is capped (default 1.0%).
+//   4. UNIFIED STATS TABLE: per-strategy P&L + COMBINED portfolio P&L (Trades/Win%/P&L/R),
+//      with an All / In-Sample / Out-of-Sample scope toggle, plus a weekday breakdown that
+//      can be sliced by NY-only / Asian-only / Combined.
+// -------------------------------------------------------------------------------------
+//  IMPORTANT PINE CONSTRAINT (read this):
+//   A single Pine strategy has ONE net position — it CANNOT hold a long and a short at the
+//   same time. So:
+//     • Same-direction overlap (both long, or both short) IS supported via pyramiding = 2;
+//       each leg is exited independently by its own entry id.
+//     • Opposite-direction overlap is IMPOSSIBLE here. If one engine is already open, a new
+//       entry in the OPPOSITE direction is BLOCKED (a reversal would corrupt the open leg).
+//   This is a sandbox limitation, not a design choice. For truly independent long+short legs
+//   you would run two separate accounts/algos with a broker-side daily-loss limit.
+//
+//   Each leg's stop & 1:2 target are FIXED at the signal-bar close (estimated fill), because
+//   strategy.position_avg_price is the BLENDED average of both legs and cannot size each leg
+//   individually. Realized risk per leg is ~exact for the ATR stop and carries one bar of
+//   drift for the FVG-buffer stop (inherent to market orders).
+//
+//   Commission/Slippage are pre-filled with realistic defaults; confirm them for your symbol.
+// =====================================================================================
+
+strategy(title              = "Master Prop Firm Portfolio (S1 ORB + S2 Sweep)",
+         shorttitle         = "MASTER PORTFOLIO",
+         overlay            = true,
+         pyramiding         = 2,                // allow S1 + S2 open at once (same direction only)
+         initial_capital    = 10000,
+         default_qty_type   = strategy.fixed,   // fallback only; every entry passes an explicit qty
+         default_qty_value  = 1,
+         commission_type    = strategy.commission.percent,
+         commission_value   = 0.01,             // 0.01% PER SIDE (≈0.02% round turn). Realistic for SPY/SPX.
+         slippage           = 1,                // 1 tick of slippage per fill. Test 2–3 for fast/news bars.
+         max_boxes_count    = 500,
+         max_lines_count    = 500,
+         max_labels_count   = 500)
+
+// ───────────────────────────── INPUT GROUPS ─────────────────────────────
+grpMaster   = "Master — Toggles & Global Risk"
+grpBrk      = "Global Circuit Breakers (Daily Lockout)"
+grpDates    = "Backtest Date Range"
+grpS1       = "S1 · NY Breakout — Session & Entry"
+grpS1risk   = "S1 · NY Breakout — Risk & Stop"
+grpS1trail  = "S1 · NY Breakout — Trailing Stop"
+grpS1dow    = "S1 · NY Breakout — Day Filter"
+grpS2       = "S2 · Asian Sweep — Sessions & Entry"
+grpS2risk   = "S2 · Asian Sweep — Risk & Stop"
+grpS2dow    = "S2 · Asian Sweep — Day Filter"
+grpTable    = "Unified Stats Table"
+grpVis      = "Visuals"
+
+// ── Master / global ──
+s1_enable           = input.bool(true,  "Enable NY Breakout (S1)",  group = grpMaster)
+s2_enable           = input.bool(true,  "Enable Asian Sweep (S2)",  group = grpMaster)
+riskPct             = input.float(0.5, "Risk Per Trade (%) — both engines", minval = 0.1, step = 0.1, group = grpMaster, tooltip = "TRUE fixed-fractional risk applied to every entry from BOTH engines. Position size = (equity × this%) / (stop distance × point value). Keep ≤ 0.5% for prop-firm challenges.")
+rr                  = input.float(2.0, "Reward : Risk — both engines", minval = 0.1, step = 0.1, group = grpMaster)
+maxConcurrentRiskPct= input.float(1.0, "Max concurrent open risk (%)", minval = 0.1, step = 0.1, group = grpMaster, tooltip = "If one engine is already open and the other fires, the new entry is blocked unless total OPEN risk stays ≤ this. With 0.5% per trade, 1.0% permits exactly two concurrent positions (same direction only — see header).")
+tz                  = input.string("America/New_York", "Exchange timezone", group = grpMaster, tooltip = "Keep as America/New_York for SPX/SPY. All session times are in this zone.")
+
+// ── Global circuit breakers ──
+useBreakers   = input.bool(true, "Enable global daily circuit breakers", group = grpBrk, tooltip = "When ON, the engine blocks ALL new entries (S1 AND S2) for the rest of the NY day once a combined daily limit is breached, then resets next day. Detection/visuals keep running so skipped setups are still drawn.")
+dailyDDPct    = input.float(2.0, "Combined daily max realized loss (%)", minval = 0.1, step = 0.1, group = grpBrk, tooltip = "Halts everything once the COMBINED realized net loss for the day (S1+S2, incl. commission) reaches this % of the day's starting equity (capped at initial capital = the more conservative $ limit). Keep well under the firm's hard daily wall.")
+maxConsecLoss = input.int(2, "Combined consecutive losses to halt", minval = 1, group = grpBrk, tooltip = "Halts everything after this many losing trades in a row on the same day, counted ACROSS both engines in close order (toxic-regime guard).")
+
+// ── Backtest date range / OOS splitter (shared) ──
+startDate   = input.time(timestamp("01 Jan 2024 00:00 +0000"), "Start date", group = grpDates, tooltip = "Trades only begin on/after this date.")
+oosStart    = input.time(timestamp("01 Jan 2025 00:00 +0000"), "In-sample end / OOS start", group = grpDates, tooltip = "Boundary between in-sample (optimization) and out-of-sample (unseen) data. The portfolio keeps trading across it; it drives the chart marker and the table scope.")
+endDate     = input.time(timestamp("01 Jan 2030 00:00 +0000"), "End date", group = grpDates, tooltip = "No new trades after this date; any open trade is closed.")
+showDateViz = input.bool(true, "Shade OOS / out-of-range region", group = grpDates)
+
+// ── S1 session / entry ──
+s1_orStartHour = input.int(9,  "OR start hour (24h)",  minval = 0, maxval = 23, group = grpS1)
+s1_orStartMin  = input.int(30, "OR start minute",      minval = 0, maxval = 59, group = grpS1)
+s1_orMinutes   = input.int(5,  "OR length (minutes)",  minval = 1, maxval = 60, group = grpS1, tooltip = "1m candles forming the range. 5 = 09:30–09:35.")
+s1_sessEndHour = input.int(15, "Trading end hour (24h)", minval = 0, maxval = 23, group = grpS1)
+s1_sessEndMin  = input.int(59, "Trading end minute",   minval = 0, maxval = 59, group = grpS1)
+s1_closeAtEnd  = input.bool(true, "Close S1 trade at session end", group = grpS1, tooltip = "Keep ON for an intraday model (prevents overnight carry).")
+s1_breakConfirm= input.string("Close", "Breakout confirmation", options = ["Close", "Wick"], group = grpS1)
+s1_allowLong   = input.bool(true, "S1 allow longs",  group = grpS1)
+s1_allowShort  = input.bool(true, "S1 allow shorts", group = grpS1)
+s1_useFVG      = input.bool(true,  "S1 use FVG",  group = grpS1)
+s1_useIFVG     = input.bool(true,  "S1 use IFVG", group = grpS1)
+s1_minFvgTicks = input.int(0, "S1 minimum FVG size (ticks)", minval = 0, group = grpS1)
+
+// ── S1 risk / stop ──
+s1_stopMethod  = input.string("FVG Buffer", "S1 initial stop method", options = ["FVG Buffer", "ATR Based"], group = grpS1risk)
+s1_slBuf       = input.int(2, "S1 FVG stop buffer (ticks)", minval = 0, group = grpS1risk)
+s1_atrLenInit  = input.int(14, "S1 initial-stop ATR length", minval = 1, group = grpS1risk)
+s1_atrMultInit = input.float(1.5, "S1 initial-stop ATR multiplier", minval = 0.1, step = 0.1, group = grpS1risk)
+
+// ── S1 trailing ──
+s1_useTrail  = input.bool(true, "S1 enable trailing stop", group = grpS1trail)
+s1_trailMode = input.string("Swing (1m structure)", "S1 trailing method", options = ["Swing (1m structure)", "ATR step", "Percent step"], group = grpS1trail)
+s1_swingLen  = input.int(5, "S1 swing lookback (bars)", minval = 1, group = grpS1trail)
+s1_atrLenT   = input.int(14, "S1 trailing ATR length", minval = 1, group = grpS1trail)
+s1_atrMultT  = input.float(1.5, "S1 trailing ATR multiplier", minval = 0.1, step = 0.1, group = grpS1trail)
+s1_trailPct  = input.float(0.3, "S1 trail distance %", minval = 0.01, step = 0.01, group = grpS1trail)
+s1_trailActR = input.float(1.0, "S1 start trailing after (R)", minval = 0.0, step = 0.1, group = grpS1trail)
+
+// ── S1 day filter ──
+s1_tradeMon = input.bool(true, "S1 Monday",    group = grpS1dow)
+s1_tradeTue = input.bool(true, "S1 Tuesday",   group = grpS1dow)
+s1_tradeWed = input.bool(true, "S1 Wednesday", group = grpS1dow)
+s1_tradeThu = input.bool(true, "S1 Thursday",  group = grpS1dow)
+s1_tradeFri = input.bool(true, "S1 Friday",    group = grpS1dow)
+
+// ── S2 sessions / entry ──
+s2_asianStartHour = input.int(20, "Asian start hour (24h)",  minval = 0, maxval = 23, group = grpS2)
+s2_asianStartMin  = input.int(0,  "Asian start minute",      minval = 0, maxval = 59, group = grpS2)
+s2_asianEndHour   = input.int(0,  "Asian end hour (24h)",    minval = 0, maxval = 23, group = grpS2, tooltip = "00:00 = midnight. Range may span midnight (e.g. 20:00 → 00:00).")
+s2_asianEndMin    = input.int(0,  "Asian end minute",        minval = 0, maxval = 59, group = grpS2)
+s2_activeStartHour= input.int(3,  "Active start hour (24h)", minval = 0, maxval = 23, group = grpS2)
+s2_activeStartMin = input.int(0,  "Active start minute",     minval = 0, maxval = 59, group = grpS2)
+s2_activeEndHour  = input.int(11, "Active end hour (24h)",   minval = 0, maxval = 23, group = grpS2)
+s2_activeEndMin   = input.int(0,  "Active end minute",       minval = 0, maxval = 59, group = grpS2)
+s2_closeAtEnd     = input.bool(true, "Close S2 trade at active session end", group = grpS2)
+s2_maxBars     = input.int(15, "S2 max bars from sweep to FVG", minval = 1, group = grpS2)
+s2_minFvgTicks = input.int(0, "S2 minimum FVG size (ticks)", minval = 0, group = grpS2)
+s2_allowLong   = input.bool(true, "S2 allow longs (sweep of Low)",   group = grpS2)
+s2_allowShort  = input.bool(true, "S2 allow shorts (sweep of High)", group = grpS2)
+
+// ── S2 risk / stop ──
+s2_stopMethod  = input.string("FVG Buffer", "S2 initial stop method", options = ["FVG Buffer", "ATR Based"], group = grpS2risk)
+s2_slBuf       = input.int(2, "S2 FVG stop buffer (ticks)", minval = 0, group = grpS2risk)
+s2_atrLenInit  = input.int(14, "S2 initial-stop ATR length", minval = 1, group = grpS2risk)
+s2_atrMultInit = input.float(1.5, "S2 initial-stop ATR multiplier", minval = 0.1, step = 0.1, group = grpS2risk)
+
+// ── S2 day filter ──
+s2_tradeMon = input.bool(true, "S2 Monday",    group = grpS2dow)
+s2_tradeTue = input.bool(true, "S2 Tuesday",   group = grpS2dow)
+s2_tradeWed = input.bool(true, "S2 Wednesday", group = grpS2dow)
+s2_tradeThu = input.bool(true, "S2 Thursday",  group = grpS2dow)
+s2_tradeFri = input.bool(true, "S2 Friday",    group = grpS2dow)
+
+// ── Stats table ──
+showTable   = input.bool(true, "Show unified stats table", group = grpTable)
+tableScope  = input.string("All", "Table scope", options = ["All", "In-Sample", "Out-of-Sample"], group = grpTable, tooltip = "Filter every figure to in-sample or out-of-sample trades to check the edge survives on unseen data.")
+statsSource = input.string("Combined", "Weekday breakdown source", options = ["Combined", "NY Breakout", "Asian Sweep"], group = grpTable, tooltip = "Which engine the WEEKDAY rows reflect. The summary rows always show NY, Asian and Combined.")
+tablePos    = input.string("Bottom Right", "Table position", options = ["Bottom Right", "Top Right", "Bottom Left", "Top Left"], group = grpTable)
+tableSize   = input.string("Small", "Table text size", options = ["Tiny", "Small", "Normal", "Large"], group = grpTable)
+
+// ── Visuals ──
+s1_showAllFVG = input.bool(false, "S1 show all detected FVGs", group = grpVis)
+s1_boxProj    = input.int(40, "S1 entry box projection (bars)", minval = 1, group = grpVis)
+s1_fvgProj    = input.int(20, "S1 FVG box projection (bars)",   minval = 1, group = grpVis)
+s2_showRange  = input.bool(true, "S2 draw Asian range lines", group = grpVis)
+s2_rangeProj  = input.int(720, "S2 range line length (bars)", minval = 60, group = grpVis)
+s2_showZones  = input.bool(true, "S2 highlight sweep + FVG zone", group = grpVis)
+s2_boxProj    = input.int(40, "S2 entry zone box projection (bars)", minval = 1, group = grpVis)
+
+// ═════════════════════════════ STATE ═════════════════════════════
+// S1 state
+var float s1_orHigh = na
+var float s1_orLow  = na
+var bool  s1_orReady     = false
+var bool  s1_tradedToday = false
+var int   s1_bias        = 0
+var float[] s1_aTop     = array.new_float()
+var float[] s1_aBot     = array.new_float()
+var int[]   s1_aType    = array.new_int()
+var int[]   s1_aState   = array.new_int()
+var int[]   s1_aFormBar = array.new_int()
+var int[]   s1_aFlipBar = array.new_int()
+var int   s1_inDir         = 0
+var float s1_entryEst      = na
+var float s1_inInitialStop = na
+var float s1_inTakeProfit  = na
+var float s1_inTrailStop   = na
+var int   s1_entryBar      = na
+var float[] s1_stopQueue   = array.new_float()   // initial stop of each S1 trade, in entry order
+
+// S2 state
+var float s2_asianHigh   = na
+var float s2_asianLow    = na
+var bool  s2_asianReady  = false
+var int   s2_asianStartIdx = na
+var line  s2_hiLine      = na
+var line  s2_loLine      = na
+var bool  s2_tradedToday = false
+var int   s2_sweepHiBar  = -1
+var int   s2_sweepLoBar  = -1
+var float s2_sweepHiLvl  = na
+var float s2_sweepLoLvl  = na
+var int   s2_armDir = 0
+var float s2_armTop = na
+var float s2_armBot = na
+var int   s2_armBar = na
+var int   s2_inDir         = 0
+var float s2_entryEst      = na
+var float s2_inInitialStop = na
+var float s2_inTakeProfit  = na
+var int   s2_entryBar      = na
+var float[] s2_stopQueue   = array.new_float()
+
+// Global breaker / shared state
+var bool  oosDrawn         = false
+var float g_dayStartEquity = na
+var float g_dayStartNet     = na
+var int   g_consecLoss      = 0
+var int   g_lastClosed      = 0
+var bool  g_haltedDD        = false
+var bool  g_haltedStreak    = false
+
+// ───────────────────────────── TIME / DATE / DAY (shared) ─────────────────────────────
+nyH = hour(time, tz)
+nyM = minute(time, tz)
+curMin = nyH * 60 + nyM
+inDateRange = time >= startDate and time <= endDate
+isOOS       = time >= oosStart
+dow         = dayofweek(time, tz)
+newDay      = ta.change(dayofmonth(time, tz)) != 0
+
+// S1 session math
+s1_orStart  = s1_orStartHour * 60 + s1_orStartMin
+s1_orEnd    = s1_orStart + s1_orMinutes
+s1_sessEnd  = s1_sessEndHour * 60 + s1_sessEndMin
+s1_isInOR       = curMin >= s1_orStart and curMin < s1_orEnd
+s1_atSessionEnd = curMin == s1_sessEnd
+s1_dayOK = (dow == dayofweek.monday and s1_tradeMon) or (dow == dayofweek.tuesday and s1_tradeTue) or (dow == dayofweek.wednesday and s1_tradeWed) or (dow == dayofweek.thursday and s1_tradeThu) or (dow == dayofweek.friday and s1_tradeFri)
+
+// S2 session math (supports windows that wrap past midnight)
+s2_asianStartM  = s2_asianStartHour  * 60 + s2_asianStartMin
+s2_asianEndM    = s2_asianEndHour    * 60 + s2_asianEndMin
+s2_activeStartM = s2_activeStartHour * 60 + s2_activeStartMin
+s2_activeEndM   = s2_activeEndHour   * 60 + s2_activeEndMin
+s2_asianNow  = s2_asianEndM  > s2_asianStartM  ? (curMin >= s2_asianStartM  and curMin < s2_asianEndM)  : (curMin >= s2_asianStartM  or curMin < s2_asianEndM)
+s2_activeNow = s2_activeEndM > s2_activeStartM ? (curMin >= s2_activeStartM and curMin < s2_activeEndM) : (curMin >= s2_activeStartM or curMin < s2_activeEndM)
+s2_asianStartBar = s2_asianNow and not s2_asianNow[1]
+s2_asianEndBar   = not s2_asianNow and s2_asianNow[1]
+s2_activeFirst   = s2_activeNow and not s2_activeNow[1]
+s2_dayOK = (dow == dayofweek.monday and s2_tradeMon) or (dow == dayofweek.tuesday and s2_tradeTue) or (dow == dayofweek.wednesday and s2_tradeWed) or (dow == dayofweek.thursday and s2_tradeThu) or (dow == dayofweek.friday and s2_tradeFri)
+
+// ───────────────────────────── DAILY / CYCLE RESETS ─────────────────────────────
+// S1 daily reset (NY calendar day)
+if newDay
+    s1_orHigh := na
+    s1_orLow  := na
+    s1_orReady := false
+    s1_tradedToday := false
+    s1_bias := 0
+    array.clear(s1_aTop)
+    array.clear(s1_aBot)
+    array.clear(s1_aType)
+    array.clear(s1_aState)
+    array.clear(s1_aFormBar)
+    array.clear(s1_aFlipBar)
+
+// S2 cycle reset (Asian session open)
+if s2_asianStartBar
+    s2_asianHigh := high
+    s2_asianLow  := low
+    s2_asianStartIdx := bar_index
+    s2_asianReady := false
+    s2_tradedToday := false
+    s2_sweepHiBar := -1
+    s2_sweepLoBar := -1
+    s2_armDir := 0
+
+// ───────────────────────────── BUILD RANGES ─────────────────────────────
+if s1_isInOR
+    s1_orHigh := na(s1_orHigh) ? high : math.max(s1_orHigh, high)
+    s1_orLow  := na(s1_orLow)  ? low  : math.min(s1_orLow, low)
+if not s1_orReady and not na(s1_orHigh) and curMin >= s1_orEnd and curMin <= s1_sessEnd
+    s1_orReady := true
+
+if s2_asianNow
+    s2_asianHigh := na(s2_asianHigh) ? high : math.max(s2_asianHigh, high)
+    s2_asianLow  := na(s2_asianLow)  ? low  : math.min(s2_asianLow, low)
+    if na(s2_asianStartIdx)
+        s2_asianStartIdx := bar_index
+if s2_asianEndBar and not na(s2_asianHigh)
+    s2_asianReady := true
+    if s2_showRange and inDateRange and not na(s2_asianStartIdx)
+        if not na(s2_hiLine)
+            line.delete(s2_hiLine)
+        if not na(s2_loLine)
+            line.delete(s2_loLine)
+        s2_hiLine := line.new(s2_asianStartIdx, s2_asianHigh, bar_index + s2_rangeProj, s2_asianHigh, color = color.new(color.teal, 0), width = 1)
+        s2_loLine := line.new(s2_asianStartIdx, s2_asianLow,  bar_index + s2_rangeProj, s2_asianLow,  color = color.new(color.red, 0),  width = 1)
+
+// ───────────────────────────── INDICATORS ─────────────────────────────
+s1_buffer  = s1_slBuf * syminfo.mintick
+s2_buffer  = s2_slBuf * syminfo.mintick
+s1_atrT    = ta.atr(s1_atrLenT)
+s1_atrInit = ta.atr(s1_atrLenInit)
+s2_atrInit = ta.atr(s2_atrLenInit)
+s1_swLow   = ta.lowest(low,  s1_swingLen)
+s1_swHigh  = ta.highest(high, s1_swingLen)
+
+// ───────────────────────────── POSITION SIZING (true fixed-fractional risk) ─────────────────────────────
+f_qty(float estEntry, float estStop, float risk, float eq) =>
+    riskAmt = eq * (risk / 100.0)
+    dist    = math.max(math.abs(estEntry - estStop), syminfo.mintick)
+    perUnit = dist * syminfo.pointvalue
+    perUnit > 0 ? riskAmt / perUnit : 0.0
+
+// Color helper for P&L / R cells. MUST be global — Pine functions cannot be declared in a local block.
+f_pcol(float v) => v > 0 ? color.new(color.green, 0) : v < 0 ? color.new(color.red, 0) : chart.fg_color
+
+// ───────────────────────────── OPEN-STATE SCAN + PER-LEG CLOSE DETECTION ─────────────────────────────
+// Because S1 and S2 can be open at once, we cannot use strategy.position_size to know which
+// leg is open. We scan open trades by their entry id, then clear a leg's state once it has
+// actually left the book (with a 1-bar guard for the entry-fill lag).
+s1_isOpen = false
+s2_isOpen = false
+if strategy.opentrades > 0
+    for oi = 0 to strategy.opentrades - 1
+        oid = strategy.opentrades.entry_id(oi)
+        if str.startswith(oid, "S1")
+            s1_isOpen := true
+        else if str.startswith(oid, "S2")
+            s2_isOpen := true
+
+if s1_inDir != 0 and bar_index > s1_entryBar and not s1_isOpen
+    s1_inDir := 0
+    s1_entryEst      := na
+    s1_inInitialStop := na
+    s1_inTakeProfit  := na
+    s1_inTrailStop   := na
+if s2_inDir != 0 and bar_index > s2_entryBar and not s2_isOpen
+    s2_inDir := 0
+    s2_entryEst      := na
+    s2_inInitialStop := na
+    s2_inTakeProfit  := na
+
+// ───────────────────────────── GLOBAL CIRCUIT BREAKERS ─────────────────────────────
+// strategy.netprofit / strategy.closedtrades already aggregate BOTH engines, so the combined
+// daily realized loss and the combined loss streak come for free. Reset on the NY day change.
+if newDay
+    g_dayStartEquity := strategy.equity
+    g_dayStartNet    := strategy.netprofit
+    g_consecLoss     := 0
+    g_haltedDD       := false
+    g_haltedStreak   := false
+
+if strategy.closedtrades > g_lastClosed
+    for j = g_lastClosed to strategy.closedtrades - 1
+        if strategy.closedtrades.profit(j) < 0
+            g_consecLoss += 1
+        else
+            g_consecLoss := 0
+    g_lastClosed := strategy.closedtrades
+
+g_baseEq    = na(g_dayStartEquity) ? strategy.initial_capital : math.min(g_dayStartEquity, strategy.initial_capital)
+g_lossCap   = g_baseEq * (dailyDDPct / 100.0)
+g_realPnL   = na(g_dayStartNet) ? 0.0 : strategy.netprofit - g_dayStartNet
+if g_realPnL <= -g_lossCap
+    g_haltedDD := true
+if g_consecLoss >= maxConsecLoss
+    g_haltedStreak := true
+halted = useBreakers and (g_haltedDD or g_haltedStreak)
+
+// Opposite-direction overlap is blocked using the per-leg direction flags (s1_inDir / s2_inDir),
+// which are same-bar accurate — unlike strategy.position_size, which lags a same-bar fill. The
+// engine that runs first (S1) therefore wins any same-bar direction conflict.
+
+// ═════════════════════════════ S1 · NY BREAKOUT ENGINE ═════════════════════════════
+s1_canScan = s1_enable and s1_orReady and s1_dayOK and inDateRange and curMin >= s1_orEnd and curMin < s1_sessEnd
+
+// Breakout → bias
+if s1_canScan and s1_bias == 0
+    s1_brokeUp = s1_breakConfirm == "Close" ? close > s1_orHigh : high > s1_orHigh
+    s1_brokeDn = s1_breakConfirm == "Close" ? close < s1_orLow  : low  < s1_orLow
+    if s1_brokeUp and s1_allowLong
+        s1_bias := 1
+    else if s1_brokeDn and s1_allowShort
+        s1_bias := -1
+
+// Detect FVGs after the breakout
+if s1_canScan and s1_bias != 0
+    s1_minSize = s1_minFvgTicks * syminfo.mintick
+    if low > high[2] and (low - high[2]) >= s1_minSize
+        array.push(s1_aTop, low)
+        array.push(s1_aBot, high[2])
+        array.push(s1_aType, 1)
+        array.push(s1_aState, 0)
+        array.push(s1_aFormBar, bar_index)
+        array.push(s1_aFlipBar, -1)
+        if s1_showAllFVG
+            box.new(bar_index - 1, low, bar_index + s1_fvgProj, high[2], border_color = color.new(color.teal, 70), bgcolor = color.new(color.teal, 90))
+    if high < low[2] and (low[2] - high) >= s1_minSize
+        array.push(s1_aTop, low[2])
+        array.push(s1_aBot, high)
+        array.push(s1_aType, -1)
+        array.push(s1_aState, 0)
+        array.push(s1_aFormBar, bar_index)
+        array.push(s1_aFlipBar, -1)
+        if s1_showAllFVG
+            box.new(bar_index - 1, low[2], bar_index + s1_fvgProj, high, border_color = color.new(color.red, 70), bgcolor = color.new(color.red, 90))
+    if array.size(s1_aTop) > 60
+        array.shift(s1_aTop)
+        array.shift(s1_aBot)
+        array.shift(s1_aType)
+        array.shift(s1_aState)
+        array.shift(s1_aFormBar)
+        array.shift(s1_aFlipBar)
+
+// Update inversions / deaths
+if s1_canScan and array.size(s1_aTop) > 0
+    for i = 0 to array.size(s1_aTop) - 1
+        st = array.get(s1_aState, i)
+        if st != 2
+            ty = array.get(s1_aType, i)
+            t  = array.get(s1_aTop, i)
+            b  = array.get(s1_aBot, i)
+            if ty == 1
+                if st == 0 and close < b
+                    array.set(s1_aState, i, 1)
+                    array.set(s1_aFlipBar, i, bar_index)
+                else if st == 1 and close > t
+                    array.set(s1_aState, i, 2)
+            else
+                if st == 0 and close > t
+                    array.set(s1_aState, i, 1)
+                    array.set(s1_aFlipBar, i, bar_index)
+                else if st == 1 and close < b
+                    array.set(s1_aState, i, 2)
+
+// S1 entry gates (global halt + concurrency cap + opposite-direction block)
+s1_committedOther = s2_inDir != 0 ? riskPct : 0.0
+s1_riskOK = (s1_committedOther + riskPct) <= maxConcurrentRiskPct + 0.000001
+s1_dirOK  = s2_inDir == 0 or s2_inDir == s1_bias
+s1_canEnter = s1_canScan and not s1_tradedToday and not halted and s1_inDir == 0 and s1_riskOK and s1_dirOK and s1_bias != 0 and array.size(s1_aTop) > 0
+
+if s1_canEnter
+    if s1_bias == 1
+        for i = array.size(s1_aTop) - 1 to 0
+            st = array.get(s1_aState, i)
+            ty = array.get(s1_aType, i)
+            if st != 2
+                longZone = (ty == 1 and st == 0 and s1_useFVG) or (ty == -1 and st == 1 and s1_useIFVG)
+                if longZone
+                    t = array.get(s1_aTop, i)
+                    b = array.get(s1_aBot, i)
+                    actBar = st == 1 ? array.get(s1_aFlipBar, i) : array.get(s1_aFormBar, i)
+                    if bar_index > actBar and low <= t
+                        estEntry = close
+                        estStop  = (s1_stopMethod == "ATR Based" and not na(s1_atrInit)) ? estEntry - s1_atrInit * s1_atrMultInit : b - s1_buffer
+                        estStop := math.min(estStop, estEntry - syminfo.mintick)
+                        s1_risk  = math.max(estEntry - estStop, syminfo.mintick)
+                        qty      = f_qty(estEntry, estStop, riskPct, strategy.equity)
+                        if qty > 0
+                            strategy.entry("S1 Long", strategy.long, qty = qty, comment = "S1 Long")
+                            s1_inDir := 1
+                            s1_entryEst      := estEntry
+                            s1_inInitialStop := estStop
+                            s1_inTrailStop   := estStop
+                            s1_inTakeProfit  := estEntry + rr * s1_risk
+                            s1_entryBar      := bar_index
+                            array.push(s1_stopQueue, estStop)
+                            s1_tradedToday := true
+                            box.new(array.get(s1_aFormBar, i), t, bar_index + s1_boxProj, b, border_color = color.new(color.yellow, 0), bgcolor = color.new(color.yellow, 80))
+                            label.new(bar_index, b, st == 1 ? "S1 IFVG ▲" : "S1 FVG ▲", style = label.style_label_up, color = color.new(color.green, 0), textcolor = color.white, size = size.small)
+                        break
+    else if s1_bias == -1
+        for i = array.size(s1_aTop) - 1 to 0
+            st = array.get(s1_aState, i)
+            ty = array.get(s1_aType, i)
+            if st != 2
+                shortZone = (ty == -1 and st == 0 and s1_useFVG) or (ty == 1 and st == 1 and s1_useIFVG)
+                if shortZone
+                    t = array.get(s1_aTop, i)
+                    b = array.get(s1_aBot, i)
+                    actBar = st == 1 ? array.get(s1_aFlipBar, i) : array.get(s1_aFormBar, i)
+                    if bar_index > actBar and high >= b
+                        estEntry = close
+                        estStop  = (s1_stopMethod == "ATR Based" and not na(s1_atrInit)) ? estEntry + s1_atrInit * s1_atrMultInit : t + s1_buffer
+                        estStop := math.max(estStop, estEntry + syminfo.mintick)
+                        s1_risk  = math.max(estStop - estEntry, syminfo.mintick)
+                        qty      = f_qty(estEntry, estStop, riskPct, strategy.equity)
+                        if qty > 0
+                            strategy.entry("S1 Short", strategy.short, qty = qty, comment = "S1 Short")
+                            s1_inDir := -1
+                            s1_entryEst      := estEntry
+                            s1_inInitialStop := estStop
+                            s1_inTrailStop   := estStop
+                            s1_inTakeProfit  := estEntry - rr * s1_risk
+                            s1_entryBar      := bar_index
+                            array.push(s1_stopQueue, estStop)
+                            s1_tradedToday := true
+                            box.new(array.get(s1_aFormBar, i), t, bar_index + s1_boxProj, b, border_color = color.new(color.yellow, 0), bgcolor = color.new(color.yellow, 80))
+                            label.new(bar_index, t, st == 1 ? "S1 IFVG ▼" : "S1 FVG ▼", style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.small)
+                        break
+
+// S1 trade management (initial stop fixed at entry + 1:2 TP + optional trailing)
+if s1_inDir == 1
+    riskL = math.max(s1_entryEst - s1_inInitialStop, syminfo.mintick)
+    if s1_useTrail
+        cand = s1_trailMode == "Swing (1m structure)" ? s1_swLow - s1_buffer : s1_trailMode == "ATR step" ? close - s1_atrT * s1_atrMultT : close * (1 - s1_trailPct / 100)
+        if (close - s1_entryEst) >= s1_trailActR * riskL
+            s1_inTrailStop := math.max(s1_inTrailStop, cand)
+    strategy.exit("S1 ExitL", from_entry = "S1 Long", stop = s1_inTrailStop, limit = s1_inTakeProfit)
+else if s1_inDir == -1
+    riskS = math.max(s1_inInitialStop - s1_entryEst, syminfo.mintick)
+    if s1_useTrail
+        cand = s1_trailMode == "Swing (1m structure)" ? s1_swHigh + s1_buffer : s1_trailMode == "ATR step" ? close + s1_atrT * s1_atrMultT : close * (1 + s1_trailPct / 100)
+        if (s1_entryEst - close) >= s1_trailActR * riskS
+            s1_inTrailStop := math.min(s1_inTrailStop, cand)
+    strategy.exit("S1 ExitS", from_entry = "S1 Short", stop = s1_inTrailStop, limit = s1_inTakeProfit)
+
+// S1 force flat at its session end
+if s1_closeAtEnd and s1_atSessionEnd and s1_inDir != 0
+    strategy.close(s1_inDir == 1 ? "S1 Long" : "S1 Short", comment = "S1 EOD")
+
+// ═════════════════════════════ S2 · ASIAN SWEEP ENGINE ═════════════════════════════
+s2_canTrade = s2_enable and s2_asianReady and s2_dayOK and inDateRange and s2_activeNow
+
+// Sweep confirmation (arming) — runs before detection so the FVG references an earlier sweep
+if s2_canTrade
+    s2_minSize = s2_minFvgTicks * syminfo.mintick
+    if s2_allowShort and s2_sweepHiBar >= 0 and (bar_index - s2_sweepHiBar) <= s2_maxBars
+        if high < low[2] and close < s2_asianHigh and (low[2] - high) >= s2_minSize
+            s2_armDir := -1
+            s2_armTop := low[2]
+            s2_armBot := high
+            s2_armBar := bar_index
+            sb = s2_sweepHiBar
+            sl = s2_sweepHiLvl
+            s2_sweepHiBar := -1
+            if s2_showZones and inDateRange
+                box.new(bar_index - 1, s2_armTop, bar_index + s2_boxProj, s2_armBot, border_color = color.new(color.red, 35), bgcolor = color.new(color.red, 82))
+                label.new(bar_index, s2_armTop, "S2 Bear FVG ▼", style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.small)
+                if not na(sl)
+                    label.new(sb, sl, "Sweep ⚡", style = label.style_label_down, color = color.new(color.gray, 20), textcolor = color.white, size = size.tiny)
+    if s2_allowLong and s2_sweepLoBar >= 0 and (bar_index - s2_sweepLoBar) <= s2_maxBars
+        if low > high[2] and close > s2_asianLow and (low - high[2]) >= s2_minSize
+            s2_armDir := 1
+            s2_armTop := low
+            s2_armBot := high[2]
+            s2_armBar := bar_index
+            sb = s2_sweepLoBar
+            sl = s2_sweepLoLvl
+            s2_sweepLoBar := -1
+            if s2_showZones and inDateRange
+                box.new(bar_index - 1, s2_armTop, bar_index + s2_boxProj, s2_armBot, border_color = color.new(color.green, 35), bgcolor = color.new(color.green, 82))
+                label.new(bar_index, s2_armBot, "S2 Bull FVG ▲", style = label.style_label_up, color = color.new(color.green, 0), textcolor = color.white, size = size.small)
+                if not na(sl)
+                    label.new(sb, sl, "Sweep ⚡", style = label.style_label_up, color = color.new(color.gray, 20), textcolor = color.white, size = size.tiny)
+
+// Sweep detection (mark sweeps for future bars)
+if s2_canTrade
+    crossedUp = high > s2_asianHigh and high[1] <= s2_asianHigh
+    if crossedUp or (s2_activeFirst and high > s2_asianHigh)
+        s2_sweepHiBar := bar_index
+        s2_sweepHiLvl := high
+    crossedDn = low < s2_asianLow and low[1] >= s2_asianLow
+    if crossedDn or (s2_activeFirst and low < s2_asianLow)
+        s2_sweepLoBar := bar_index
+        s2_sweepLoLvl := low
+
+// Invalidate a stale arm if price has closed through the gap (independent of entry gates)
+if s2_canTrade and s2_armDir == 1 and close < s2_armBot
+    s2_armDir := 0
+if s2_canTrade and s2_armDir == -1 and close > s2_armTop
+    s2_armDir := 0
+
+// S2 entry gates (mirror of S1)
+s2_committedOther = s1_inDir != 0 ? riskPct : 0.0
+s2_riskOK = (s2_committedOther + riskPct) <= maxConcurrentRiskPct + 0.000001
+s2_dirOK  = s1_inDir == 0 or s1_inDir == s2_armDir
+s2_canEnter = s2_canTrade and not s2_tradedToday and not halted and s2_inDir == 0 and s2_armDir != 0 and s2_riskOK and s2_dirOK
+
+if s2_canEnter
+    if s2_armDir == 1 and bar_index > s2_armBar and low <= s2_armTop
+        estEntry = close
+        estStop  = (s2_stopMethod == "ATR Based" and not na(s2_atrInit)) ? estEntry - s2_atrInit * s2_atrMultInit : s2_armBot - s2_buffer
+        estStop := math.min(estStop, estEntry - syminfo.mintick)
+        s2_risk  = math.max(estEntry - estStop, syminfo.mintick)
+        qty      = f_qty(estEntry, estStop, riskPct, strategy.equity)
+        if qty > 0
+            strategy.entry("S2 Long", strategy.long, qty = qty, comment = "S2 Long")
+            s2_inDir := 1
+            s2_entryEst      := estEntry
+            s2_inInitialStop := estStop
+            s2_inTakeProfit  := estEntry + rr * s2_risk
+            s2_entryBar      := bar_index
+            array.push(s2_stopQueue, estStop)
+            s2_tradedToday := true
+            s2_armDir := 0
+            if s2_showZones and inDateRange
+                label.new(bar_index, s2_armTop, "S2 ▲", style = label.style_label_up, color = color.new(color.green, 0), textcolor = color.white, size = size.tiny)
+    else if s2_armDir == -1 and bar_index > s2_armBar and high >= s2_armBot
+        estEntry = close
+        estStop  = (s2_stopMethod == "ATR Based" and not na(s2_atrInit)) ? estEntry + s2_atrInit * s2_atrMultInit : s2_armTop + s2_buffer
+        estStop := math.max(estStop, estEntry + syminfo.mintick)
+        s2_risk  = math.max(estStop - estEntry, syminfo.mintick)
+        qty      = f_qty(estEntry, estStop, riskPct, strategy.equity)
+        if qty > 0
+            strategy.entry("S2 Short", strategy.short, qty = qty, comment = "S2 Short")
+            s2_inDir := -1
+            s2_entryEst      := estEntry
+            s2_inInitialStop := estStop
+            s2_inTakeProfit  := estEntry - rr * s2_risk
+            s2_entryBar      := bar_index
+            array.push(s2_stopQueue, estStop)
+            s2_tradedToday := true
+            s2_armDir := 0
+            if s2_showZones and inDateRange
+                label.new(bar_index, s2_armBot, "S2 ▼", style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.tiny)
+
+// S2 trade management (initial stop fixed at entry + fixed 1:2 TP; no trailing)
+if s2_inDir == 1
+    strategy.exit("S2 ExitL", from_entry = "S2 Long", stop = s2_inInitialStop, limit = s2_inTakeProfit)
+else if s2_inDir == -1
+    strategy.exit("S2 ExitS", from_entry = "S2 Short", stop = s2_inInitialStop, limit = s2_inTakeProfit)
+
+// S2 force flat at its active session end
+if s2_closeAtEnd and not s2_activeNow and s2_activeNow[1] and s2_inDir != 0
+    strategy.close(s2_inDir == 1 ? "S2 Long" : "S2 Short", comment = "S2 session end")
+
+// ───────────────────────────── END OF TEST RANGE ─────────────────────────────
+if time > endDate and strategy.position_size != 0
+    strategy.close_all(comment = "End of test range")
+
+// ───────────────────────────── DATE-RANGE / OOS VISUALS ─────────────────────────────
+bgcolor(showDateViz and not inDateRange       ? color.new(color.gray, 92) : na, title = "Out of date range")
+bgcolor(showDateViz and inDateRange and isOOS ? color.new(color.blue, 90) : na, title = "Out-of-sample period")
+if showDateViz and isOOS and not oosDrawn
+    line.new(bar_index, low, bar_index, high, xloc = xloc.bar_index, extend = extend.both, color = color.new(color.blue, 20), style = line.style_dashed, width = 1)
+    label.new(bar_index, high, "OOS ►", style = label.style_label_down, color = color.new(color.blue, 20), textcolor = color.white, size = size.small)
+    oosDrawn := true
+
+// ───────────────────────────── GLOBAL CIRCUIT-BREAKER VISUALS ─────────────────────────────
+bgcolor(halted ? color.new(color.red, 85) : na, title = "Portfolio halted (global circuit breaker)")
+if halted and not halted[1]
+    rTxt = g_haltedDD and g_haltedStreak ? "DAILY LOSS + LOSS STREAK" : g_haltedDD ? "−" + str.tostring(dailyDDPct, "#.#") + "% COMBINED DAILY LOSS" : str.tostring(maxConsecLoss) + " CONSECUTIVE LOSSES"
+    label.new(bar_index, low, "🛑 DAILY LIMIT REACHED — TRADING HALTED\n(" + rTxt + ")", yloc = yloc.belowbar, style = label.style_label_up, color = color.new(color.red, 0), textcolor = color.white, size = size.small)
+var table haltTable = table.new(position.bottom_center, 1, 1, frame_width = 1, frame_color = color.new(color.red, 0))
+if barstate.islast
+    if halted
+        lr = g_haltedDD and g_haltedStreak ? "daily loss + loss streak" : g_haltedDD ? "combined daily " + str.tostring(dailyDDPct, "#.#") + "% loss" : str.tostring(maxConsecLoss) + " consecutive losses"
+        table.cell(haltTable, 0, 0, "🛑 DAILY LIMIT REACHED — TRADING HALTED  ·  " + lr, text_color = color.white, bgcolor = color.new(color.red, 0), text_size = size.normal)
+    else
+        table.cell(haltTable, 0, 0, "", bgcolor = color.new(color.gray, 100))
+
+// ───────────────────────────── TRADE VISUALS ─────────────────────────────
+s1_showOR = s1_enable and s1_orReady and s1_dayOK and inDateRange and curMin >= s1_orEnd and curMin <= s1_sessEnd
+plot(s1_showOR ? s1_orHigh : na, "S1 OR High", color = color.new(color.teal, 0), linewidth = 2, style = plot.style_linebr)
+plot(s1_showOR ? s1_orLow  : na, "S1 OR Low",  color = color.new(color.red, 0),  linewidth = 2, style = plot.style_linebr)
+plot(s1_inDir != 0 ? s1_inTrailStop : na, "S1 Stop/Trail", color = color.new(color.orange, 0), linewidth = 1, style = plot.style_linebr)
+plot(s1_inDir != 0 and not na(s1_inTakeProfit) ? s1_inTakeProfit : na, "S1 TP", color = color.new(color.green, 0), linewidth = 1, style = plot.style_linebr)
+plot(s2_inDir != 0 ? s2_inInitialStop : na, "S2 Stop", color = color.new(color.fuchsia, 0), linewidth = 1, style = plot.style_linebr)
+plot(s2_inDir != 0 and not na(s2_inTakeProfit) ? s2_inTakeProfit : na, "S2 TP", color = color.new(color.lime, 0), linewidth = 1, style = plot.style_linebr)
+
+if barstate.islast and timeframe.period != "1"
+    label.new(bar_index, high, "⚠ This portfolio is built for the 1-minute chart.\nSwitch the timeframe to 1m for correct results.", style = label.style_label_down, color = color.new(color.orange, 0), textcolor = color.black, size = size.normal)
+
+// ───────────────────────────── UNIFIED STATS TABLE ─────────────────────────────
+// Per-strategy + COMBINED summary, plus a weekday breakdown for the selected source.
+//   R uses each leg's stop (FIFO-matched per engine, so it stays correct even when S1 and
+//   S2 close out of entry order). Net P&L is realized (net of commission/slippage).
+tblPos = tablePos == "Top Right" ? position.top_right : tablePos == "Bottom Left" ? position.bottom_left : tablePos == "Top Left" ? position.top_left : position.bottom_right
+tblTxt = tableSize == "Tiny" ? size.tiny : tableSize == "Small" ? size.small : tableSize == "Large" ? size.large : size.normal
+
+var table mt = table.new(position = tblPos, columns = 5, rows = 11, frame_width = 1, frame_color = color.new(color.gray, 50), border_width = 1, border_color = color.new(color.gray, 70))
+
+if showTable and barstate.islast
+    n1 = 0
+    w1 = 0
+    p1 = 0.0
+    r1 = 0.0
+    n2 = 0
+    w2 = 0
+    p2 = 0.0
+    r2 = 0.0
+    wdN = array.new_int(5, 0)
+    wdW = array.new_int(5, 0)
+    wdP = array.new_float(5, 0.0)
+    wdR = array.new_float(5, 0.0)
+    s1_pop = 0
+    s2_pop = 0
+
+    nClosed = strategy.closedtrades
+    if nClosed > 0
+        for k = 0 to nClosed - 1
+            eid    = strategy.closedtrades.entry_id(k)
+            isS1   = str.startswith(eid, "S1")
+            isLong = str.contains(eid, "Long")
+            et     = strategy.closedtrades.entry_time(k)
+            prof   = strategy.closedtrades.profit(k)
+            entryP = strategy.closedtrades.entry_price(k)
+            exitP  = strategy.closedtrades.exit_price(k)
+            // FIFO-match this trade's initial stop from its engine's queue (pop ALWAYS, to stay aligned)
+            stp = float(na)
+            if isS1
+                if s1_pop < array.size(s1_stopQueue)
+                    stp := array.get(s1_stopQueue, s1_pop)
+                s1_pop += 1
+            else
+                if s2_pop < array.size(s2_stopQueue)
+                    stp := array.get(s2_stopQueue, s2_pop)
+                s2_pop += 1
+            risk = isLong ? (entryP - stp) : (stp - entryP)
+            rm   = (not na(stp) and risk > 0) ? (isLong ? (exitP - entryP) : (entryP - exitP)) / risk : na
+            inScope = tableScope == "All" or (tableScope == "In-Sample" and et < oosStart) or (tableScope == "Out-of-Sample" and et >= oosStart)
+            if inScope
+                if isS1
+                    n1 += 1
+                    w1 += prof > 0 ? 1 : 0
+                    p1 += prof
+                    r1 += na(rm) ? 0.0 : rm
+                else
+                    n2 += 1
+                    w2 += prof > 0 ? 1 : 0
+                    p2 += prof
+                    r2 += na(rm) ? 0.0 : rm
+                srcMatch = statsSource == "Combined" or (statsSource == "NY Breakout" and isS1) or (statsSource == "Asian Sweep" and not isS1)
+                idx = dayofweek(et, tz) - 2
+                if srcMatch and idx >= 0 and idx <= 4
+                    array.set(wdN, idx, array.get(wdN, idx) + 1)
+                    if prof > 0
+                        array.set(wdW, idx, array.get(wdW, idx) + 1)
+                    array.set(wdP, idx, array.get(wdP, idx) + prof)
+                    if not na(rm)
+                        array.set(wdR, idx, array.get(wdR, idx) + rm)
+
+    fg       = chart.fg_color
+    hdrBg    = color.new(color.gray, 60)
+    combBg   = color.new(color.blue, 65)
+    totBg    = color.new(color.gray, 80)
+    scopeTag = tableScope == "In-Sample" ? " · IS" : tableScope == "Out-of-Sample" ? " · OOS" : ""
+
+    // Summary header
+    table.cell(mt, 0, 0, "Strategy" + scopeTag, text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
+    table.cell(mt, 1, 0, "Trades",  text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
+    table.cell(mt, 2, 0, "Win %",   text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
+    table.cell(mt, 3, 0, "Net P&L", text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
+    table.cell(mt, 4, 0, "Tot R",   text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
+
+    // NY row
+    w1Txt = n1 > 0 ? str.tostring(100.0 * w1 / n1, "#.0") + "%" : "—"
+    table.cell(mt, 0, 1, "NY Breakout", text_color = fg, text_size = tblTxt)
+    table.cell(mt, 1, 1, str.tostring(n1), text_color = fg, text_size = tblTxt)
+    table.cell(mt, 2, 1, w1Txt, text_color = fg, text_size = tblTxt)
+    table.cell(mt, 3, 1, n1 > 0 ? str.tostring(p1, "#") : "—", text_color = f_pcol(p1), text_size = tblTxt)
+    table.cell(mt, 4, 1, n1 > 0 ? str.tostring(r1, "#.#") : "—", text_color = f_pcol(r1), text_size = tblTxt)
+
+    // Asian row
+    w2Txt = n2 > 0 ? str.tostring(100.0 * w2 / n2, "#.0") + "%" : "—"
+    table.cell(mt, 0, 2, "Asian Sweep", text_color = fg, text_size = tblTxt)
+    table.cell(mt, 1, 2, str.tostring(n2), text_color = fg, text_size = tblTxt)
+    table.cell(mt, 2, 2, w2Txt, text_color = fg, text_size = tblTxt)
+    table.cell(mt, 3, 2, n2 > 0 ? str.tostring(p2, "#") : "—", text_color = f_pcol(p2), text_size = tblTxt)
+    table.cell(mt, 4, 2, n2 > 0 ? str.tostring(r2, "#.#") : "—", text_color = f_pcol(r2), text_size = tblTxt)
+
+    // Combined row
+    nC = n1 + n2
+    wC = w1 + w2
+    pC = p1 + p2
+    rC = r1 + r2
+    wCTxt = nC > 0 ? str.tostring(100.0 * wC / nC, "#.0") + "%" : "—"
+    table.cell(mt, 0, 3, "COMBINED", text_color = fg, bgcolor = combBg, text_size = tblTxt)
+    table.cell(mt, 1, 3, str.tostring(nC), text_color = fg, bgcolor = combBg, text_size = tblTxt)
+    table.cell(mt, 2, 3, wCTxt, text_color = fg, bgcolor = combBg, text_size = tblTxt)
+    table.cell(mt, 3, 3, nC > 0 ? str.tostring(pC, "#") : "—", text_color = f_pcol(pC), bgcolor = combBg, text_size = tblTxt)
+    table.cell(mt, 4, 3, nC > 0 ? str.tostring(rC, "#.#") : "—", text_color = f_pcol(rC), bgcolor = combBg, text_size = tblTxt)
+
+    // Weekday sub-header
+    srcTag = statsSource == "NY Breakout" ? "NY" : statsSource == "Asian Sweep" ? "Asian" : "All"
+    table.cell(mt, 0, 4, "Weekday · " + srcTag, text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
+    table.cell(mt, 1, 4, "Trades",  text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
+    table.cell(mt, 2, 4, "Win %",   text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
+    table.cell(mt, 3, 4, "Net P&L", text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
+    table.cell(mt, 4, 4, "Tot R",   text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
+
+    names = array.from("Mon", "Tue", "Wed", "Thu", "Fri")
+    tTr  = 0
+    tWin = 0
+    tPnl = 0.0
+    tR   = 0.0
+    for idx = 0 to 4
+        rRow = idx + 5
+        tr   = array.get(wdN, idx)
+        win  = array.get(wdW, idx)
+        pv   = array.get(wdP, idx)
+        rv   = array.get(wdR, idx)
+        tTr  += tr
+        tWin += win
+        tPnl += pv
+        tR   += rv
+        wpTxt = tr > 0 ? str.tostring(100.0 * win / tr, "#.0") + "%" : "—"
+        table.cell(mt, 0, rRow, array.get(names, idx), text_color = fg, text_size = tblTxt)
+        table.cell(mt, 1, rRow, str.tostring(tr),      text_color = fg, text_size = tblTxt)
+        table.cell(mt, 2, rRow, wpTxt,                 text_color = fg, text_size = tblTxt)
+        table.cell(mt, 3, rRow, tr > 0 ? str.tostring(pv, "#") : "—", text_color = f_pcol(pv), text_size = tblTxt)
+        table.cell(mt, 4, rRow, tr > 0 ? str.tostring(rv, "#.#") : "—", text_color = f_pcol(rv), text_size = tblTxt)
+
+    // Weekday total row
+    twpTxt = tTr > 0 ? str.tostring(100.0 * tWin / tTr, "#.0") + "%" : "—"
+    table.cell(mt, 0, 10, "All",            text_color = fg, bgcolor = totBg, text_size = tblTxt)
+    table.cell(mt, 1, 10, str.tostring(tTr), text_color = fg, bgcolor = totBg, text_size = tblTxt)
+    table.cell(mt, 2, 10, twpTxt,           text_color = fg, bgcolor = totBg, text_size = tblTxt)
+    table.cell(mt, 3, 10, tTr > 0 ? str.tostring(tPnl, "#") : "—", text_color = f_pcol(tPnl), bgcolor = totBg, text_size = tblTxt)
+    table.cell(mt, 4, 10, tTr > 0 ? str.tostring(tR, "#.#") : "—", text_color = f_pcol(tR), bgcolor = totBg, text_size = tblTxt)

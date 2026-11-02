@@ -1,0 +1,510 @@
+//@version=5
+// =====================================================================================
+//  ICT SILVER BULLET — Sweep -> MSS -> FVG   (S&P 500: ES / SPX / SPY)
+//  Built for the 1-MINUTE or 5-MINUTE chart. Switch the chart to 1m or 5m before testing.
+// -------------------------------------------------------------------------------------
+//  MODEL  (state machine: IDLE -> SWEPT -> MSS -> ARMED -> IN-TRADE)
+//   1. SILVER BULLET WINDOWS (New York time): 10:00-11:00 and 14:00-15:00 (adjustable).
+//      Setups are hunted and orders are placed ONLY inside these windows.
+//   2. LIQUIDITY SWEEP: price trades beyond a recent CONFIRMED pivot:
+//        - sweep of a pivot HIGH -> short bias
+//        - sweep of a pivot LOW  -> long  bias
+//   3. MARKET STRUCTURE SHIFT (MSS): after the sweep, a CLOSE breaks the opposing pivot
+//      (close < prior pivot low for shorts; close > prior pivot high for longs).
+//   4. FAIR VALUE GAP (FVG): the displacement that drove the MSS leaves a 3-candle FVG.
+//   5. ENTRY: a LIMIT order at the FVG (proximal edge / 50% CE / distal edge — input).
+//      If the gap is not tapped before the window closes, the order is CANCELLED.
+//   6. STOP: 1 tick beyond the sweep extreme (the liquidity that was taken).
+//      TARGET: fixed R:R (default 1:2) OR the next opposing liquidity pool (toggle).
+// -------------------------------------------------------------------------------------
+//  PROP-FIRM RISK ARCHITECTURE
+//   - TRUE fixed-fractional sizing: qty solved from (risk% x balance)/(stop distance x
+//     point value). Risk per trade is constant in CASH, not a nominal % of equity.
+//   - HARD DAILY LOSS LIMIT: equity X% below the day's start -> halt for the day
+//     (optionally flatten the open position).
+//   - MAX CONSECUTIVE LOSSES: a losing streak halts new trades for the day.
+//   - OVERALL DRAWDOWN LIMIT: a peak-to-equity drop past Y% stops the strategy entirely.
+//   - Realistic friction defaults (commission + slippage). CALIBRATE to your instrument.
+// -------------------------------------------------------------------------------------
+//  NON-REPAINTING NOTES
+//   - All decisions are taken on CLOSED bars (calc_on_every_tick stays OFF) and no
+//     request.security / lookahead is used -> historical signals do NOT repaint.
+//   - Pivots confirm "pivotLen" bars AFTER they form (an unavoidable, known latency).
+//   - Intrabar fills on the chart timeframe use TradingView's standard OHLC assumption.
+//     For honest fill simulation enable the Bar Magnifier (Premium).
+// =====================================================================================
+
+strategy(title              = "ICT Silver Bullet (Sweep+MSS+FVG)",
+         shorttitle         = "ICT SB",
+         overlay            = true,
+         pyramiding         = 0,
+         initial_capital    = 10000,
+         default_qty_type   = strategy.fixed,
+         default_qty_value  = 1,
+         commission_type    = strategy.commission.cash_per_contract,
+         commission_value   = 2.0,        // <-- CALIBRATE: round-turn commission per contract
+         slippage           = 2,          // <-- CALIBRATE: slippage in TICKS per fill
+         calc_on_every_tick = false,
+         process_orders_on_close = false,
+         max_boxes_count    = 500,
+         max_lines_count    = 500,
+         max_labels_count   = 500)
+
+// ───────────────────────────── INPUT GROUPS ─────────────────────────────
+grpWin   = "1) Silver Bullet Windows (New York time)"
+grpStr   = "2) Sweep & Market Structure"
+grpFvg   = "3) FVG / Entry"
+grpRisk  = "4) Risk & Position Sizing"
+grpTgt   = "5) Targets"
+grpGuard = "6) Prop-Firm Guards"
+grpDates = "7) Backtest Date Range & OOS"
+grpDow   = "8) Day of Week Filter"
+grpDash  = "9) Dashboard"
+grpVis   = "10) Visuals"
+
+// ── 1) Windows
+tz        = input.string("America/New_York", "Exchange timezone", group = grpWin, tooltip = "All session times are in this timezone. Keep America/New_York for ES/SPX/SPY.")
+enableAM  = input.bool(true, "Enable AM window", group = grpWin)
+amStartH  = input.int(10, "AM start hour",   minval = 0, maxval = 23, group = grpWin)
+amStartM  = input.int(0,  "AM start minute", minval = 0, maxval = 59, group = grpWin)
+amEndH    = input.int(11, "AM end hour",     minval = 0, maxval = 23, group = grpWin)
+amEndM    = input.int(0,  "AM end minute",   minval = 0, maxval = 59, group = grpWin)
+enablePM  = input.bool(true, "Enable PM window", group = grpWin)
+pmStartH  = input.int(14, "PM start hour",   minval = 0, maxval = 23, group = grpWin)
+pmStartM  = input.int(0,  "PM start minute", minval = 0, maxval = 59, group = grpWin)
+pmEndH    = input.int(15, "PM end hour",     minval = 0, maxval = 23, group = grpWin)
+pmEndM    = input.int(0,  "PM end minute",   minval = 0, maxval = 59, group = grpWin)
+
+// ── 2) Sweep & structure
+pivotLen        = input.int(5, "Pivot length (left = right)", minval = 1, group = grpStr, tooltip = "ta.pivothigh/low(len,len). Pivots confirm 'len' bars later. 5 is the classic ICT value.")
+maxBarsSweepMSS = input.int(10, "Max bars: sweep -> MSS", minval = 1, group = grpStr, tooltip = "The MSS close must arrive within this many bars of the sweep, or the setup is voided.")
+maxBarsMSSFvg   = input.int(5,  "Max bars: MSS -> FVG",  minval = 1, group = grpStr, tooltip = "The displacement FVG must appear within this many bars of the MSS, or the setup is voided.")
+allowLong       = input.bool(true, "Allow longs (sweep of Low)",   group = grpStr)
+allowShort      = input.bool(true, "Allow shorts (sweep of High)", group = grpStr)
+
+// ── 3) FVG / entry
+minFvgTicks   = input.int(0, "Minimum FVG size (ticks)", minval = 0, group = grpFvg, tooltip = "Ignore gaps smaller than this. 0 = accept any gap. Raising this filters weak displacement.")
+entryFill     = input.string("50% (Consequent Encroachment)", "FVG entry level", options = ["Proximal (first touch)", "50% (Consequent Encroachment)", "Distal (full gap fill)"], group = grpFvg, tooltip = "Proximal = highest fill rate / worst price. CE = ICT-canonical midpoint. Distal = best price / lowest fill rate.")
+maxBarsToFill = input.int(20, "Max bars for limit to fill", minval = 1, group = grpFvg, tooltip = "Safety cap. The order is also cancelled the moment the window closes.")
+
+// ── 4) Risk & sizing
+riskPct     = input.float(1.0, "Risk per trade (%)", minval = 0.01, step = 0.05, group = grpRisk, tooltip = "Cash risked per trade as a % of the chosen balance. Position size is SOLVED from this and the stop distance.")
+riskBase    = input.string("Account Equity", "Risk base", options = ["Account Equity", "Fixed Balance"], group = grpRisk, tooltip = "Account Equity compounds. Fixed Balance mirrors most prop rules (fixed % of starting balance).")
+fixedBal    = input.float(10000, "Fixed balance ($)", minval = 1, group = grpRisk, tooltip = "Used only when Risk base = Fixed Balance.")
+tickOffset  = input.int(1, "Stop offset beyond sweep (ticks)", minval = 0, group = grpRisk, tooltip = "Stop = sweep extreme +/- this many ticks. 1 = exactly one tick past the swept liquidity.")
+roundToInt  = input.bool(true, "Round quantity to whole contracts", group = grpRisk, tooltip = "ON for futures (ES/MES). If the risk-correct size is < 1 contract, the trade is SKIPPED (account too small for this risk).")
+
+// ── 5) Targets
+tpMode    = input.string("Fixed R:R", "Take-profit method", options = ["Fixed R:R", "Next opposing liquidity"], group = grpTgt)
+rr        = input.float(2.0, "Reward : Risk", minval = 0.1, step = 0.1, group = grpTgt, tooltip = "Fixed method, and the fallback when no valid liquidity target exists.")
+minRRliq  = input.float(1.0, "Min R:R for a liquidity target", minval = 0.1, step = 0.1, group = grpTgt, tooltip = "Liquidity method: if the nearest pool is closer than this R multiple, fall back to Fixed R:R.")
+liqBuf    = input.int(2, "Liquidity target buffer (ticks)", minval = 0, group = grpTgt, tooltip = "Exit this many ticks IN FRONT of the liquidity pool (don't wait for the exact level).")
+
+// ── 6) Prop-firm guards
+useDailyDD     = input.bool(true, "Use daily loss limit", group = grpGuard)
+maxDailyDDPct  = input.float(4.0, "Daily loss limit (%)", minval = 0.1, step = 0.1, group = grpGuard, tooltip = "Halt for the day when equity drops this % below the day's starting equity. Set BELOW your firm's hard limit (e.g. 4% under a 5% rule) as a safety buffer.")
+flattenBreach  = input.bool(true, "Flatten open trade on breach", group = grpGuard, tooltip = "On a daily/overall limit breach, close any open position immediately.")
+maxConsec      = input.int(3, "Max consecutive losses", minval = 1, group = grpGuard, tooltip = "A losing streak of this length halts NEW trades for the day.")
+resetConsecDay = input.bool(true, "Reset the streak each new day", group = grpGuard, tooltip = "ON = 'consecutive losses within a day'. OFF = the streak carries across days.")
+maxTrWindow    = input.int(1, "Max trades per window", minval = 1, group = grpGuard, tooltip = "1 = one A+ setup per Silver Bullet window (recommended).")
+maxTrDay       = input.int(2, "Max trades per day", minval = 1, group = grpGuard)
+useOverallDD   = input.bool(true, "Use overall drawdown limit", group = grpGuard)
+maxOverallPct  = input.float(8.0, "Overall drawdown limit (%)", minval = 0.1, step = 0.1, group = grpGuard, tooltip = "Peak-to-equity drop past this % STOPS the strategy entirely. Keep below your firm's max overall DD.")
+closeAtDayEnd  = input.bool(true, "Flatten before the cash close", group = grpGuard)
+dayEndH        = input.int(15, "Force-flat hour (NY)",   minval = 0, maxval = 23, group = grpGuard)
+dayEndM        = input.int(55, "Force-flat minute (NY)", minval = 0, maxval = 59, group = grpGuard)
+
+// ── 7) Date range / OOS
+startDate   = input.time(timestamp("01 Jan 2024 00:00 +0000"), "Start date", group = grpDates)
+oosStart    = input.time(timestamp("01 Jan 2025 00:00 +0000"), "In-sample end / OOS start", group = grpDates, tooltip = "Strategy keeps trading across this line; it drives the chart marker and the table scope.")
+endDate     = input.time(timestamp("01 Jan 2030 00:00 +0000"), "End date", group = grpDates)
+showDateViz = input.bool(true, "Shade OOS / out-of-range region", group = grpDates)
+
+// ── 8) Day of week
+tradeMon = input.bool(true, "Trade Monday",    group = grpDow)
+tradeTue = input.bool(true, "Trade Tuesday",   group = grpDow)
+tradeWed = input.bool(true, "Trade Wednesday", group = grpDow)
+tradeThu = input.bool(true, "Trade Thursday",  group = grpDow)
+tradeFri = input.bool(true, "Trade Friday",    group = grpDow)
+
+// ── 9) Dashboard
+showDash = input.bool(true, "Show dashboard", group = grpDash)
+dashPos  = input.string("Top Right", "Dashboard position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group = grpDash)
+dashSize = input.string("Normal", "Dashboard text size", options = ["Tiny", "Small", "Normal", "Large"], group = grpDash)
+
+// ── 10) Visuals
+showVis  = input.bool(true, "Draw sweeps / MSS / FVG", group = grpVis)
+boxProj  = input.int(30, "FVG box projection (bars)", minval = 1, group = grpVis)
+
+// ───────────────────────────── STATE ─────────────────────────────
+var int   phase        = 0      // 0 idle, 1 swept (awaiting MSS/FVG), 2 armed (limit), 3 in-trade
+var int   dir          = 0      // 1 long, -1 short for the current hunt
+var bool  mssDone      = false
+var int   sweepBar     = na
+var int   mssBar       = na
+var float sweepExtreme = na     // sweep high (short) / sweep low (long) -> stop reference
+var float mssLevel     = na     // opposing pivot that must be broken by close
+
+var float entryLevel = na
+var float stopLevel  = na
+var float tpLevel    = na
+var int   armBar     = na
+
+// Latest FVGs (updated every in-window bar)
+var float bullFvgTop = na
+var float bullFvgBot = na
+var int   bullFvgBar = na
+var float bearFvgTop = na
+var float bearFvgBot = na
+var int   bearFvgBar = na
+
+// Confirmed pivot pools (for MSS reference & liquidity targets)
+var float[] phArr = array.new_float()
+var float[] plArr = array.new_float()
+var float   lastPH = na
+var float   lastPL = na
+
+// Risk / guard bookkeeping
+var float dayStartEq = na
+var float peakEq     = na
+var int   tradesToday   = 0
+var int   tradesWindow  = 0
+var int   consecLosses  = 0
+var bool  haltedToday   = false
+var bool  haltedPerma   = false
+var string haltReason   = ""
+var bool  oosDrawn      = false
+
+// Per-trade records for the weekday-agnostic R math (index aligns with closedtrades)
+var float[] stopArr = array.new_float()
+var int[]   dirArr  = array.new_int()
+
+// ───────────────────────────── TIME / DATE / DAY ─────────────────────────────
+nyH    = hour(time, tz)
+nyM    = minute(time, tz)
+curMin = nyH * 60 + nyM
+
+amStart = amStartH * 60 + amStartM
+amEnd   = amEndH   * 60 + amEndM
+pmStart = pmStartH * 60 + pmStartM
+pmEnd   = pmEndH   * 60 + pmEndM
+flatMin = dayEndH  * 60 + dayEndM
+
+inAM      = enableAM and curMin >= amStart and curMin < amEnd
+inPM      = enablePM and curMin >= pmStart and curMin < pmEnd
+inWindow  = inAM or inPM
+windowId  = inAM ? 1 : inPM ? 2 : 0
+newWindow = windowId != 0 and windowId != nz(windowId[1], 0)
+
+inDateRange = time >= startDate and time <= endDate
+isOOS       = time >= oosStart
+
+dow   = dayofweek(time, tz)
+dayOK = (dow == dayofweek.monday and tradeMon) or (dow == dayofweek.tuesday and tradeTue) or (dow == dayofweek.wednesday and tradeWed) or (dow == dayofweek.thursday and tradeThu) or (dow == dayofweek.friday and tradeFri)
+
+// ───────────────────────────── HELPERS ─────────────────────────────
+// True fixed-fractional contract sizing (accounts for instrument point value).
+f_qty(_entry, _stop) =>
+    _riskPerContract = math.abs(_entry - _stop) * syminfo.pointvalue
+    _cap = (riskBase == "Fixed Balance" ? fixedBal : strategy.equity) * riskPct / 100.0
+    _raw = _riskPerContract > 0 ? _cap / _riskPerContract : 0.0
+    roundToInt ? math.floor(_raw) : _raw
+
+// Target price: fixed R:R, or the nearest opposing liquidity pool (with min-R fallback).
+f_target(_dir, _entry, _risk) =>
+    _tp = _dir == 1 ? _entry + rr * _risk : _entry - rr * _risk   // default = fixed
+    if tpMode == "Next opposing liquidity"
+        _best = float(na)
+        if _dir == 1 and array.size(phArr) > 0
+            for i = 0 to array.size(phArr) - 1
+                _v = array.get(phArr, i)
+                if _v > _entry
+                    _best := na(_best) ? _v : math.min(_best, _v)   // nearest high ABOVE entry
+            _cand = na(_best) ? na : _best - liqBuf * syminfo.mintick
+            _tp := (not na(_cand) and (_cand - _entry) >= minRRliq * _risk) ? _cand : _tp
+        else if _dir == -1 and array.size(plArr) > 0
+            for i = 0 to array.size(plArr) - 1
+                _v = array.get(plArr, i)
+                if _v < _entry
+                    _best := na(_best) ? _v : math.max(_best, _v)   // nearest low BELOW entry
+            _cand = na(_best) ? na : _best + liqBuf * syminfo.mintick
+            _tp := (not na(_cand) and (_entry - _cand) >= minRRliq * _risk) ? _cand : _tp
+    _tp
+
+// ───────────────────────────── PIVOTS / LIQUIDITY POOLS ─────────────────────────────
+ph = ta.pivothigh(pivotLen, pivotLen)
+pl = ta.pivotlow(pivotLen, pivotLen)
+if not na(ph)
+    lastPH := ph
+    array.push(phArr, ph)
+    if array.size(phArr) > 25
+        array.shift(phArr)
+if not na(pl)
+    lastPL := pl
+    array.push(plArr, pl)
+    if array.size(plArr) > 25
+        array.shift(plArr)
+
+// ───────────────────────────── DAILY / WINDOW RESETS ─────────────────────────────
+if na(dayStartEq)
+    dayStartEq := strategy.equity
+if na(peakEq)
+    peakEq := strategy.equity
+
+newDay = ta.change(dayofmonth(time, tz)) != 0
+if newDay
+    dayStartEq   := strategy.equity
+    tradesToday  := 0
+    haltedToday  := false
+    haltReason   := haltedPerma ? haltReason : ""
+    if resetConsecDay
+        consecLosses := 0
+    if strategy.position_size == 0
+        phase   := 0
+        dir     := 0
+        mssDone := false
+
+if newWindow
+    tradesWindow := 0
+    bearFvgBar   := na      // do not arm off a stale gap from a previous window
+    bullFvgBar   := na
+    if strategy.position_size == 0 and phase != 3
+        phase   := 0
+        dir     := 0
+        mssDone := false
+
+// ───────────────────────────── FVG TRACKERS (in-window) ─────────────────────────────
+if inWindow
+    minSize = minFvgTicks * syminfo.mintick
+    // Bullish FVG: gap between high[2] (bottom) and current low (top)
+    if low > high[2] and (low - high[2]) >= minSize
+        bullFvgTop := low
+        bullFvgBot := high[2]
+        bullFvgBar := bar_index
+    // Bearish FVG: gap between current high (bottom) and low[2] (top)
+    if high < low[2] and (low[2] - high) >= minSize
+        bearFvgTop := low[2]
+        bearFvgBot := high
+        bearFvgBar := bar_index
+
+// ───────────────────────────── ELIGIBILITY ─────────────────────────────
+eligible     = inWindow and inDateRange and dayOK and not haltedToday and not haltedPerma and strategy.position_size == 0
+startNewHunt = eligible and phase == 0 and tradesWindow < maxTrWindow and tradesToday < maxTrDay
+
+// ───────────────────────────── 1) SWEEP -> SET BIAS ─────────────────────────────
+if startNewHunt
+    if allowShort and not na(lastPH) and not na(lastPL) and high > lastPH
+        phase        := 1
+        dir          := -1
+        sweepBar     := bar_index
+        sweepExtreme := high
+        mssLevel     := lastPL           // bearish MSS = close below this pivot low
+        mssDone      := false
+        if showVis and inDateRange
+            label.new(bar_index, high, "Sweep ⚡", style = label.style_label_down, color = color.new(color.gray, 25), textcolor = color.white, size = size.tiny)
+    else if allowLong and not na(lastPL) and not na(lastPH) and low < lastPL
+        phase        := 1
+        dir          := 1
+        sweepBar     := bar_index
+        sweepExtreme := low
+        mssLevel     := lastPH           // bullish MSS = close above this pivot high
+        mssDone      := false
+        if showVis and inDateRange
+            label.new(bar_index, low, "Sweep ⚡", style = label.style_label_up, color = color.new(color.gray, 25), textcolor = color.white, size = size.tiny)
+
+// ───────────────────────────── 2) MSS + 3) FVG -> ARM LIMIT ─────────────────────────────
+if phase == 1 and inWindow
+    // Track the running sweep extreme so the stop sits beyond the furthest poke.
+    sweepExtreme := dir == -1 ? math.max(sweepExtreme, high) : math.min(sweepExtreme, low)
+
+    // Void if the MSS never arrives in time.
+    if not mssDone and (bar_index - sweepBar) > maxBarsSweepMSS
+        phase := 0
+        dir   := 0
+    else
+        // Confirm MSS (close-based break of the opposing pivot).
+        if not mssDone
+            if (dir == -1 and close < mssLevel) or (dir == 1 and close > mssLevel)
+                mssDone := true
+                mssBar  := bar_index
+                if showVis and inDateRange
+                    line.new(bar_index - 1, mssLevel, bar_index + boxProj, mssLevel, color = color.new(color.orange, 0), width = 1, style = line.style_dotted)
+                    label.new(bar_index, mssLevel, "MSS", style = dir == -1 ? label.style_label_up : label.style_label_down, color = color.new(color.orange, 0), textcolor = color.white, size = size.tiny)
+
+        // After MSS, arm on a fresh directional FVG from the displacement.
+        if mssDone and phase == 1
+            if (bar_index - mssBar) > maxBarsMSSFvg
+                phase := 0          // displacement FVG never appeared -> void
+                dir   := 0
+                mssDone := false
+            else
+                fvgOK = dir == -1 ? (not na(bearFvgBar) and bearFvgBar >= sweepBar) : (not na(bullFvgBar) and bullFvgBar >= sweepBar)
+                if fvgOK
+                    fT  = dir == -1 ? bearFvgTop : bullFvgTop
+                    fB  = dir == -1 ? bearFvgBot : bullFvgBot
+                    ent = entryFill == "Distal (full gap fill)" ? (dir == -1 ? fT : fB) : entryFill == "Proximal (first touch)" ? (dir == -1 ? fB : fT) : (fT + fB) / 2.0
+                    stp = dir == -1 ? sweepExtreme + tickOffset * syminfo.mintick : sweepExtreme - tickOffset * syminfo.mintick
+                    rsk = dir == -1 ? stp - ent : ent - stp
+                    if rsk > 0
+                        q = f_qty(ent, stp)
+                        if q > 0
+                            entryLevel := ent
+                            stopLevel  := stp
+                            tpLevel    := f_target(dir, ent, rsk)
+                            armBar     := bar_index
+                            if dir == -1
+                                strategy.entry("Short", strategy.short, qty = q, limit = ent)
+                            else
+                                strategy.entry("Long", strategy.long, qty = q, limit = ent)
+                            phase := 2
+                            if showVis and inDateRange
+                                box.new(math.max(bar_index - 2, sweepBar), fT, bar_index + boxProj, fB, border_color = color.new(dir == -1 ? color.red : color.green, 25), bgcolor = color.new(dir == -1 ? color.red : color.green, 82))
+
+// ───────────────────────────── 4) CANCEL / INVALIDATE (armed, unfilled) ─────────────────────────────
+if phase == 2 and strategy.position_size == 0
+    brokeStop = (dir == -1 and close > stopLevel) or (dir == 1 and close < stopLevel)
+    expired   = not inWindow or (bar_index - armBar) > maxBarsToFill
+    if brokeStop or expired
+        strategy.cancel("Long")
+        strategy.cancel("Short")
+        phase   := 0
+        dir     := 0
+        mssDone := false
+
+// ───────────────────────────── 5) FILL DETECTION ─────────────────────────────
+justEntered = strategy.position_size != 0 and nz(strategy.position_size[1], 0) == 0
+if justEntered
+    phase        := 3
+    tradesWindow += 1
+    tradesToday  += 1
+    array.push(stopArr, stopLevel)
+    array.push(dirArr, dir)
+
+// ───────────────────────────── TRADE MANAGEMENT (fixed stop + target) ─────────────────────────────
+if strategy.position_size > 0
+    strategy.exit("Exit L", from_entry = "Long",  stop = stopLevel, limit = tpLevel)
+if strategy.position_size < 0
+    strategy.exit("Exit S", from_entry = "Short", stop = stopLevel, limit = tpLevel)
+
+// ───────────────────────────── CLOSE DETECTION -> consecutive-loss guard ─────────────────────────────
+justClosed = strategy.closedtrades != nz(strategy.closedtrades[1], 0)
+if justClosed and strategy.closedtrades > 0
+    lp = strategy.closedtrades.profit(strategy.closedtrades - 1)
+    if lp < 0
+        consecLosses += 1
+    else if lp > 0
+        consecLosses := 0
+    if consecLosses >= maxConsec
+        haltedToday := true
+        haltReason  := "Max consec losses"
+
+// Reset the hunt once flat after a trade.
+if strategy.position_size == 0 and phase == 3
+    phase   := 0
+    dir     := 0
+    mssDone := false
+
+// ───────────────────────────── DRAWDOWN GUARDS ─────────────────────────────
+dailyPnL    = strategy.equity - dayStartEq
+dailyPnLPct = dayStartEq > 0 ? dailyPnL / dayStartEq * 100.0 : 0.0
+
+if useDailyDD and not haltedToday and dailyPnLPct <= -maxDailyDDPct
+    haltedToday := true
+    haltReason  := "Daily DD limit"
+    if flattenBreach and strategy.position_size != 0
+        strategy.close_all(comment = "Daily DD halt")
+    strategy.cancel("Long")
+    strategy.cancel("Short")
+    if phase != 3
+        phase := 0
+
+peakEq := math.max(peakEq, strategy.equity)
+ddPeakPct = peakEq > 0 ? (strategy.equity - peakEq) / peakEq * 100.0 : 0.0
+if useOverallDD and not haltedPerma and ddPeakPct <= -maxOverallPct
+    haltedPerma := true
+    haltReason  := "Overall DD limit"
+    if flattenBreach and strategy.position_size != 0
+        strategy.close_all(comment = "Overall DD halt")
+    strategy.cancel("Long")
+    strategy.cancel("Short")
+
+// ───────────────────────────── INTRADAY / END-OF-RANGE FLATTEN ─────────────────────────────
+if closeAtDayEnd and strategy.position_size != 0 and curMin >= flatMin
+    strategy.close_all(comment = "EOD flat")
+
+if time > endDate and strategy.position_size != 0
+    strategy.close_all(comment = "End of range")
+
+// ───────────────────────────── DATE-RANGE / OOS VISUALS ─────────────────────────────
+bgcolor(showDateViz and not inDateRange       ? color.new(color.gray, 92) : na, title = "Out of date range")
+bgcolor(showDateViz and inDateRange and isOOS ? color.new(color.blue, 90) : na, title = "Out-of-sample period")
+if showDateViz and isOOS and not oosDrawn
+    line.new(bar_index, low, bar_index, high, xloc = xloc.bar_index, extend = extend.both, color = color.new(color.blue, 20), style = line.style_dashed, width = 1)
+    label.new(bar_index, high, "OOS ►", style = label.style_label_down, color = color.new(color.blue, 20), textcolor = color.white, size = size.small)
+    oosDrawn := true
+
+// ───────────────────────────── TRADE LEVEL PLOTS ─────────────────────────────
+inPos = strategy.position_size != 0
+plot(inPos ? stopLevel : na, "Stop",   color = color.new(color.red, 0),   linewidth = 1, style = plot.style_linebr)
+plot(inPos ? tpLevel   : na, "Target", color = color.new(color.green, 0), linewidth = 1, style = plot.style_linebr)
+
+// Window shading (subtle) so the active hunt window is obvious
+bgcolor(inWindow and inDateRange ? color.new(color.teal, 94) : na, title = "Silver Bullet window")
+
+// Timeframe reminder
+if barstate.islast and timeframe.period != "1" and timeframe.period != "5"
+    label.new(bar_index, high, "⚠ Built for the 1m or 5m chart.\nSwitch the timeframe for correct results.", style = label.style_label_down, color = color.new(color.orange, 0), textcolor = color.black, size = size.normal)
+
+// ───────────────────────────── DASHBOARD ─────────────────────────────
+dPos = dashPos == "Top Left" ? position.top_left : dashPos == "Bottom Right" ? position.bottom_right : dashPos == "Bottom Left" ? position.bottom_left : position.top_right
+dTxt = dashSize == "Tiny" ? size.tiny : dashSize == "Small" ? size.small : dashSize == "Large" ? size.large : size.normal
+
+var table dash = table.new(position = dPos, columns = 2, rows = 11, frame_width = 1, frame_color = color.new(color.gray, 50), border_width = 1, border_color = color.new(color.gray, 70))
+
+if showDash and barstate.islast
+    fg    = chart.fg_color
+    hdrBg = color.new(color.gray, 60)
+    posClr = color.new(color.green, 0)
+    negClr = color.new(color.red, 0)
+
+    nClosed = strategy.closedtrades
+    nWins   = strategy.wintrades
+    winRate = nClosed > 0 ? 100.0 * nWins / nClosed : 0.0
+
+    stateTxt = haltedPerma ? "⛔ HALTED (overall)" : haltedToday ? "⛔ HALTED (" + haltReason + ")" : phase == 0 ? "Idle / hunting" : phase == 1 ? (mssDone ? "MSS ✓ — awaiting FVG" : "Swept — awaiting MSS") : phase == 2 ? "Armed (limit resting)" : "In trade"
+    winTxt   = inAM ? "AM (10–11)" : inPM ? "PM (14–15)" : "— closed —"
+    pnlClr   = dailyPnL > 0 ? posClr : dailyPnL < 0 ? negClr : fg
+    ddNear   = useDailyDD and dailyPnLPct <= -(maxDailyDDPct * 0.75)
+
+    table.cell(dash, 0, 0, "ICT Silver Bullet", text_color = fg, bgcolor = hdrBg, text_size = dTxt)
+    table.cell(dash, 1, 0, syminfo.ticker,      text_color = fg, bgcolor = hdrBg, text_size = dTxt)
+
+    table.cell(dash, 0, 1, "State",   text_color = fg, text_size = dTxt)
+    table.cell(dash, 1, 1, stateTxt,  text_color = (haltedToday or haltedPerma) ? negClr : fg, text_size = dTxt)
+
+    table.cell(dash, 0, 2, "Window",  text_color = fg, text_size = dTxt)
+    table.cell(dash, 1, 2, winTxt,    text_color = inWindow ? posClr : fg, text_size = dTxt)
+
+    table.cell(dash, 0, 3, "Daily P&L", text_color = fg, text_size = dTxt)
+    table.cell(dash, 1, 3, str.tostring(dailyPnL, "#.##") + "  (" + str.tostring(dailyPnLPct, "#.##") + "%)", text_color = pnlClr, text_size = dTxt)
+
+    table.cell(dash, 0, 4, "Daily DD / limit", text_color = fg, text_size = dTxt)
+    table.cell(dash, 1, 4, str.tostring(math.min(dailyPnLPct, 0.0), "#.##") + "% / " + str.tostring(-maxDailyDDPct, "#.##") + "%", text_color = ddNear ? negClr : fg, text_size = dTxt)
+
+    table.cell(dash, 0, 5, "Max DD (peak)", text_color = fg, text_size = dTxt)
+    table.cell(dash, 1, 5, str.tostring(ddPeakPct, "#.##") + "%", text_color = ddPeakPct < 0 ? negClr : fg, text_size = dTxt)
+
+    table.cell(dash, 0, 6, "Win rate", text_color = fg, text_size = dTxt)
+    table.cell(dash, 1, 6, str.tostring(winRate, "#.#") + "%", text_color = fg, text_size = dTxt)
+
+    table.cell(dash, 0, 7, "Total trades (W/L)", text_color = fg, text_size = dTxt)
+    table.cell(dash, 1, 7, str.tostring(nClosed) + " (" + str.tostring(nWins) + "/" + str.tostring(nClosed - nWins) + ")", text_color = fg, text_size = dTxt)
+
+    table.cell(dash, 0, 8, "Trades today", text_color = fg, text_size = dTxt)
+    table.cell(dash, 1, 8, str.tostring(tradesToday) + " / " + str.tostring(maxTrDay), text_color = tradesToday >= maxTrDay ? negClr : fg, text_size = dTxt)
+
+    table.cell(dash, 0, 9, "Consec losses", text_color = fg, text_size = dTxt)
+    table.cell(dash, 1, 9, str.tostring(consecLosses) + " / " + str.tostring(maxConsec), text_color = consecLosses >= maxConsec ? negClr : fg, text_size = dTxt)
+
+    table.cell(dash, 0, 10, "Equity", text_color = fg, text_size = dTxt)
+    table.cell(dash, 1, 10, str.tostring(strategy.equity, "#.##"), text_color = fg, text_size = dTxt)
