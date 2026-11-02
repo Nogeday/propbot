@@ -2,11 +2,13 @@
 // =====================================================================================
 //  MTF TREND CONTINUATION — 5m execution / 1H trend filter   (S&P 500: SPY / ES / SPX*)
 // -------------------------------------------------------------------------------------
-//  Run this on a 5-MINUTE chart. The 1-Hour trend bias is pulled with request.security
-//  using lookahead = barmerge.lookahead_off  =>  the higher-TF value only updates at the
-//  CLOSE of each 1H bar, so on history and in realtime the strategy sees the last CLOSED
-//  1H bar. Combined with calc_on_every_tick = false (closed-bar evaluation) and market
-//  orders that fill at the NEXT bar's open, the system is fully non-repainting.
+//  Run this on a 5-MINUTE chart. The 1-Hour trend bias is pulled with request.security on
+//  the PREVIOUS 1H bar ([1]) with lookahead = barmerge.lookahead_on => history AND realtime
+//  both see only the last CLOSED 1H bar. (lookahead_off without [1] returns the still-forming
+//  1H value on realtime bars, so live signals would differ from the backtest.) Expected side
+//  effect: the HTF filter lags by one 1H bar. Combined with calc_on_every_tick = false
+//  (closed-bar evaluation) and market orders that fill at the NEXT bar's open, the system
+//  is non-repainting.
 // -------------------------------------------------------------------------------------
 //  CORE LOGIC
 //   1. HTF TREND ALIGNMENT : 1H EMA20 > 1H EMA50  -> long bias ;  < -> short bias.
@@ -35,6 +37,11 @@
 //    Slippage   = 1 tick  (MES tick = 0.25 index points = $1.25 / contract).
 //  For other instruments, change these in the strategy's "Properties" tab
 //    (full-size ES -> higher cash per contract ; SPY -> % of value, & enable volume).
+//    TradingView charges commission on EACH fill (entry and exit separately) and adds
+//    slippage only to market and stop fills (never to limit fills such as TP1).
+//    US500 CFD : Commission 0 unless the broker charges one · slippage = (spread / 2 +
+//                expected slip) in ticks of the chart symbol (a round trip pays two fills).
+//  WEBHOOK ALERTS: JSON via alert() (create the alert with "alert() function calls only").
 // =====================================================================================
 
 strategy(
@@ -67,6 +74,7 @@ g_sess   = "8) Session"
 g_dates  = "9) Backtest Date Range / OOS"
 g_vis    = "10) Visuals"
 g_tbl    = "11) Performance Table"
+g_alert  = "12) Alerts (webhook)"
 
 tz = input.string("America/New_York", "Timezone", group = g_mtf, tooltip = "Used for day change, session window and weekday logic. Keep America/New_York for SPX/SPY/ES.")
 
@@ -135,13 +143,18 @@ showPerf  = input.bool(true, "Show performance table", group = g_tbl)
 tablePos  = input.string("Bottom Right", "Table position", options = ["Bottom Right", "Top Right", "Bottom Left", "Top Left"], group = g_tbl)
 tableSize = input.string("Small", "Table text size", options = ["Tiny", "Small", "Normal", "Large"], group = g_tbl)
 
+// Alerts
+alertToken = input.string("", "Webhook token", group = g_alert, tooltip = "Webhook-only random value (NOT a login or API key). Must match the receiver. Create ONE alert: condition = this strategy, 'alert() function calls only', webhook URL = receiver. Re-create the alert after changing any input.")
+
 // =====================================================================================
 //  MTF DATA  (non-repainting — see header)
 // =====================================================================================
-// EMAs are computed INSIDE the request on true 1H closes, then merged with lookahead_off.
+// EMAs are computed INSIDE the request on true 1H closes. [1] + lookahead_on = the last CLOSED
+// 1H bar on history and realtime alike. The two go together: lookahead_on without [1] reads
+// the future on history.
 [htfFast, htfSlow] = request.security(syminfo.tickerid, htfTf,
-     [ta.ema(close, htfFastLen), ta.ema(close, htfSlowLen)],
-     lookahead = barmerge.lookahead_off)
+     [ta.ema(close, htfFastLen)[1], ta.ema(close, htfSlowLen)[1]],
+     lookahead = barmerge.lookahead_on)
 
 htfBull = not na(htfFast) and not na(htfSlow) and htfFast > htfSlow
 htfBear = not na(htfFast) and not na(htfSlow) and htfFast < htfSlow
@@ -213,12 +226,26 @@ bearTrigger = close < open and close < low[1]
 longSignal  = armDir ==  1 and bullTrigger
 shortSignal = armDir == -1 and bearTrigger
 
+// ---- Webhook alert (JSON, schema v1 — docs/SPEC.md §5.1) ----
+f_num(float x) => na(x) ? "null" : str.tostring(x, format.mintick)
+
+f_alert(string action, string side, float estEntry, float stop, float tp) =>
+    string j = '{"v":1,"token":"' + alertToken + '","strategy_id":"mtf_trend_cont"'
+    j := j + ',"symbol":"' + syminfo.tickerid + '","tf":"' + timeframe.period + '","bar_time":' + str.tostring(time, "#")
+    j := j + ',"action":"' + action + '","side":"' + side + '","setup":"MTF_PULLBACK","order_type":"market"'
+    j := j + ',"est_entry":' + f_num(estEntry) + ',"stop":' + f_num(stop) + ',"tp":' + f_num(tp)
+    j := j + ',"stop_dist_pts":' + f_num(math.abs(estEntry - stop)) + ',"rr":' + str.tostring(tp1RR) + '}'
+    alert(j, alert.freq_once_per_bar_close)
+
 // =====================================================================================
 //  RISK MANAGEMENT  (state, circuit breakers, gates)
 // =====================================================================================
 // ---- Open-trade state ----
 var int   pendingDir     = 0      // direction of the order just submitted (pre-fill)
 var float pendingStop    = na     // stop price captured at signal time
+var float pendingQty     = na     // qty submitted at signal time (market order -> filled in full)
+var int   pendingBar     = na     // bar the entry was submitted on
+var bool  pendingNoScale = false  // Plan B decided from the submitted qty (same rule as noScaleTrade)
 var float activeInitStop = na     // finalized initial stop on the fill bar
 var float activeTP1      = na     // TP1 price (scale-out)
 var float runnerStop     = na     // runner stop (initial -> BE -> trailed)
@@ -258,32 +285,56 @@ if newDay or na(dayStartEquity)
     consecLosses   := 0
 
 // ---- Trade-outcome tracking (full trade = one entry, incl. its scale-out) ----
-enteredNow = strategy.position_size != 0 and strategy.position_size[1] == 0
-exitedNow  = strategy.position_size == 0 and strategy.position_size[1] != 0
-if enteredNow
-    eqAtEntry := strategy.equity
-if exitedNow and not na(eqAtEntry)
-    tradeNet = strategy.equity - eqAtEntry
-    tradeCount += 1
-    if tradeNet > 0
-        tradeWins += 1
-        consecLosses := 0
-    else
-        consecLosses += 1
-    // split the full-trade result by which mode managed it (noScaleTrade not yet reset)
-    if noScaleTrade
-        nFullB += 1
-        pnlFullB += tradeNet
+// A full trade is over once the book is flat and closedtrades grew since the last count. This
+// is count-based rather than a position_size transition, so a trade that fills AND exits on its
+// fill bar (possible now that the bracket is placed on the signal bar) is still counted.
+// eqAtEntry is captured on the signal bar (flat equity before the trade).
+var int closedSeen = 0
+if strategy.position_size == 0 and strategy.closedtrades > closedSeen
+    closedSeen := strategy.closedtrades
+    if not na(eqAtEntry)
+        tradeNet = strategy.equity - eqAtEntry
+        tradeCount += 1
         if tradeNet > 0
-            winFullB += 1
-    else
-        nFullS += 1
-        pnlFullS += tradeNet
-        if tradeNet > 0
-            winFullS += 1
-    if useConsec and consecLosses >= maxConsec
-        consecHaltHit := true
-    eqAtEntry := na
+            tradeWins += 1
+            consecLosses := 0
+        else
+            consecLosses += 1
+        // split the full-trade result by which mode managed it (decided from the submitted qty)
+        if pendingNoScale
+            nFullB += 1
+            pnlFullB += tradeNet
+            if tradeNet > 0
+                winFullB += 1
+        else
+            nFullS += 1
+            pnlFullS += tradeNet
+            if tradeNet > 0
+                winFullS += 1
+        if useConsec and consecLosses >= maxConsec
+            consecHaltHit := true
+        eqAtEntry := na
+
+// ---- Reset state once the previous trade is over (BEFORE new entries) ----
+// Runs ahead of the entry block so a new signal on the same bar keeps its own state and bracket.
+// "Over" = flat and either a finalized trade existed, or the submitted entry filled and closed
+// within its own fill bar (finalize never ran, activeTP1 still na).
+tradeOver = strategy.position_size == 0 and (not na(activeTP1) or (pendingDir != 0 and bar_index > pendingBar))
+if tradeOver
+    pendingDir     := 0
+    pendingStop    := na
+    pendingQty     := na
+    activeInitStop := na
+    activeTP1      := na
+    runnerStop     := na
+    entryQty       := na
+    tp1Filled      := false
+    noScaleTrade   := false
+    strategy.cancel("TP1")
+    strategy.cancel("Init")
+    strategy.cancel("Run")
+    strategy.cancel("RunB")
+    strategy.cancel("Stop")
 
 // ---- Daily-loss circuit breaker (bar-close equity, incl. open P&L) ----
 if useDailyLoss and not na(dayStartEquity)
@@ -305,12 +356,25 @@ if longSignal and canEnterBase
         rawQty   = riskCash / (stopDist * syminfo.pointvalue)
         qty      = roundUnits ? math.floor(rawQty) : rawQty
         if qty > 0
+            estTP1 = close + tp1RR * stopDist
             strategy.entry("Long", strategy.long, qty = qty, comment = "Long")
+            // Bracket in the SAME bar as the entry so the fill bar is protected; the fill-bar
+            // block below re-prices it from the real fill (same order ids -> modified in place).
+            pendingNoScale := roundUnits and (int(math.round(qty)) % 2 == 1)
+            if pendingNoScale
+                strategy.exit("Stop", from_entry = "Long", stop = stopLvl, comment = "Init stop")
+            else
+                strategy.exit("TP1",  from_entry = "Long", qty_percent = scaleOutPct,       stop = stopLvl, limit = estTP1, comment = "TP1")
+                strategy.exit("Init", from_entry = "Long", qty_percent = 100 - scaleOutPct, stop = stopLvl, comment = "Init stop")
             pendingDir  := 1
             pendingStop := stopLvl
+            pendingQty  := qty
+            pendingBar  := bar_index
+            eqAtEntry   := strategy.equity
             tradesToday  += 1
             totalEntries += 1
             armDir := 0            // require a fresh pullback for the next trade
+            f_alert("entry", "long", close, stopLvl, estTP1)
 
 if shortSignal and canEnterBase
     stopLvl  = math.max(swingHigh + buf, close + syminfo.mintick)
@@ -320,12 +384,23 @@ if shortSignal and canEnterBase
         rawQty   = riskCash / (stopDist * syminfo.pointvalue)
         qty      = roundUnits ? math.floor(rawQty) : rawQty
         if qty > 0
+            estTP1 = close - tp1RR * stopDist
             strategy.entry("Short", strategy.short, qty = qty, comment = "Short")
+            pendingNoScale := roundUnits and (int(math.round(qty)) % 2 == 1)
+            if pendingNoScale
+                strategy.exit("Stop", from_entry = "Short", stop = stopLvl, comment = "Init stop")
+            else
+                strategy.exit("TP1",  from_entry = "Short", qty_percent = scaleOutPct,       stop = stopLvl, limit = estTP1, comment = "TP1")
+                strategy.exit("Init", from_entry = "Short", qty_percent = 100 - scaleOutPct, stop = stopLvl, comment = "Init stop")
             pendingDir  := -1
             pendingStop := stopLvl
+            pendingQty  := qty
+            pendingBar  := bar_index
+            eqAtEntry   := strategy.equity
             tradesToday  += 1
             totalEntries += 1
             armDir := 0
+            f_alert("entry", "short", close, stopLvl, estTP1)
 
 // ---- Finalize stop / TP on the fill bar, then manage exits ----
 inLong  = strategy.position_size > 0
@@ -339,7 +414,8 @@ if inLong
         riskPts := avg - activeInitStop
         activeTP1 := avg + tp1RR * riskPts
         runnerStop := activeInitStop
-        entryQty := math.abs(strategy.position_size)
+        // Submitted qty, not the current position: TP1 may already have filled on this bar.
+        entryQty := pendingQty
         // PLAN B: an odd / single-contract size cannot be split 50/50 into whole
         // contracts -> skip the scale-out and run the FULL position as the runner.
         noScaleTrade := roundUnits and (int(math.round(entryQty)) % 2 == 1)
@@ -347,6 +423,7 @@ if inLong
         array.push(entryTimeArr, time)
         array.push(riskPtsArr, riskPts)
         array.push(dirArr, 1)
+    prevStopL = tp1Filled ? runnerStop : activeInitStop
     if noScaleTrade
         // -- Plan B: full position runner. Initial stop until 1.5R, then BE + trail. --
         if not tp1Filled and high >= activeTP1
@@ -372,6 +449,9 @@ if inLong
         else
             strategy.cancel("Init")
             strategy.exit("Run", from_entry = "Long", stop = runnerStop, comment = "Runner")
+    curStopL = tp1Filled ? runnerStop : activeInitStop
+    if curStopL != prevStopL
+        f_alert("stop_update", "long", strategy.position_avg_price, curStopL, tp1Filled ? na : activeTP1)
 
 // SHORT
 if inShort
@@ -381,12 +461,13 @@ if inShort
         riskPts := activeInitStop - avg
         activeTP1 := avg - tp1RR * riskPts
         runnerStop := activeInitStop
-        entryQty := math.abs(strategy.position_size)
+        entryQty := pendingQty
         noScaleTrade := roundUnits and (int(math.round(entryQty)) % 2 == 1)
         tp1Filled := false
         array.push(entryTimeArr, time)
         array.push(riskPtsArr, riskPts)
         array.push(dirArr, -1)
+    prevStopS = tp1Filled ? runnerStop : activeInitStop
     if noScaleTrade
         // -- Plan B: full position runner. Initial stop until 1.5R, then BE + trail. --
         if not tp1Filled and low <= activeTP1
@@ -412,32 +493,25 @@ if inShort
         else
             strategy.cancel("Init")
             strategy.exit("Run", from_entry = "Short", stop = runnerStop, comment = "Runner")
+    curStopS = tp1Filled ? runnerStop : activeInitStop
+    if curStopS != prevStopS
+        f_alert("stop_update", "short", strategy.position_avg_price, curStopS, tp1Filled ? na : activeTP1)
 
 // ---- Forced exits ----
 if useDailyLoss and flatOnDailyLoss and dailyLossHit and strategy.position_size != 0
     strategy.close_all(comment = "Daily loss halt")
 
-if useSession and flatAtEnd and curMin >= sEnd and strategy.position_size != 0
-    strategy.close_all(comment = "Session end")
+// session.islastbar also covers half days; immediately = fill at this bar's close (on an
+// RTH-only chart the next open would be the next session)
+if flatAtEnd and ((useSession and curMin >= sEnd) or session.islastbar) and strategy.position_size != 0
+    f_alert("exit", strategy.position_size > 0 ? "long" : "short", close, na, na)
+    strategy.close_all(comment = "Session end", immediately = true)
 
 if time > endDate and strategy.position_size != 0
     strategy.close_all(comment = "End of test range")
 
-// ---- Reset state only when a trade actually CLOSES (not on the signal bar) ----
-if strategy.position_size == 0 and strategy.position_size[1] != 0
-    pendingDir     := 0
-    pendingStop    := na
-    activeInitStop := na
-    activeTP1      := na
-    runnerStop     := na
-    entryQty       := na
-    tp1Filled      := false
-    noScaleTrade   := false
-    strategy.cancel("TP1")
-    strategy.cancel("Init")
-    strategy.cancel("Run")
-    strategy.cancel("RunB")
-    strategy.cancel("Stop")
+// (State reset after a closed trade now runs BEFORE the entry block — see "Reset state once
+// the previous trade is over".)
 
 // =====================================================================================
 //  VISUALS
