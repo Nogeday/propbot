@@ -37,6 +37,8 @@
 //       confirmation close. Flipping this to TRUE would fill entries at the confirmation
 //       close BUT would also make the stop close-based (no intrabar stop) — not advised.
 //   • Every condition references confirmed bars only. No request.security, no lookahead.
+//   • backtest_fill_limits_assumption = 1 → the basis TARGET (a limit order) fills only after
+//       price trades 1 tick THROUGH it; a mere touch is not counted as a fill.
 //   • Background shading on the realtime (forming) bar may flicker until that bar closes;
 //       this is cosmetic only and never alters a historical signal or trade.
 //   • Set realistic Commission / Slippage in the strategy "Properties" tab to match broker.
@@ -68,6 +70,7 @@ strategy(title                   = "Mean Reversion BB/KC + RSI(2) Fade",
          commission_type         = strategy.commission.cash_per_contract,
          commission_value        = 0.50,    // MES profile: $0.50 per contract PER SIDE ($1.00 round turn) — see COSTS in the header
          slippage                = 1,       // MES profile: 1 tick per market/stop fill (MES tick = 0.25 pt = $1.25)
+         backtest_fill_limits_assumption = 1,   // the basis TARGET (a limit) fills only after price trades 1 tick THROUGH it
          calc_on_every_tick      = false,   // no intrabar recalculation -> no signal repaint
          calc_on_order_fills     = false,   // no intrabar recalculation after a fill
          process_orders_on_close = false,   // entries fill next open; stops/limits stay intrabar

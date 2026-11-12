@@ -43,7 +43,8 @@
 //        slippage only to market and stop fills (never to limit fills).
 //  EXECUTION MODEL (non-repainting): every decision is taken on a CLOSED bar — calc_on_every_tick and
 //        calc_on_order_fills are OFF (keep both "Recalculate" boxes in Properties unticked); market
-//        entries fill at the NEXT bar's open; stops fill intrabar.
+//        entries fill at the NEXT bar's open; stops fill intrabar; TP limits fill only
+//        after price trades 1 tick THROUGH the level (a touch is not a fill).
 //  QUANTITY ROUNDING: "Auto" = whole contracts on futures; a size < 1 skips the trade.
 //  WEBHOOK ALERTS: JSON via alert() (create the alert with "alert() function calls only").
 //  NOTE: keep the Asian and Active windows non-overlapping.
@@ -61,6 +62,7 @@ strategy(title              = "Asian Range Liquidity Sweep & Reversal",
          commission_type    = strategy.commission.cash_per_contract,
          commission_value   = 0.50,             // MES profile: $0.50 per contract PER SIDE ($1.00 round turn) — see COSTS in the header
          slippage           = 1,                // ticks per market/stop fill (MES tick = 0.25 pt = $1.25). Test 2–3 for fast/news bars.
+         backtest_fill_limits_assumption = 1,   // TP limit fills only after price trades 1 tick THROUGH the level (a touch is not a fill)
          calc_on_every_tick = false,            // decisions on CLOSED bars only — keep both "Recalculate" boxes in Properties unticked
          calc_on_order_fills = false,           // no intrabar recalculation after a fill
          process_orders_on_close = false,       // market entries fill at the NEXT bar's open

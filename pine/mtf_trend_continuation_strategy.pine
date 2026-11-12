@@ -41,6 +41,8 @@
 //    (full-size ES -> higher cash per contract ; SPY -> % of value, & enable volume).
 //    TradingView charges commission on EACH fill (entry and exit separately) and adds
 //    slippage only to market and stop fills (never to limit fills such as TP1).
+//    TP1 is a LIMIT order: it fills only after price trades 1 tick THROUGH the level
+//    (backtest_fill_limits_assumption = 1); a mere touch is not counted as a fill.
 //    US500 CFD : Commission 0 unless the broker charges one · slippage = (spread / 2 +
 //                expected slip) in ticks of the chart symbol (a round trip pays two fills).
 //  WEBHOOK ALERTS: JSON via alert() (create the alert with "alert() function calls only").
@@ -59,6 +61,7 @@ strategy(
      commission_type    = strategy.commission.cash_per_contract,
      commission_value   = 0.50,   // MES default: $0.50 / side  =>  $1.00 round-turn (entry + exit)
      slippage           = 1,      // 1 tick (MES tick = 0.25 index pts = $1.25 / contract)
+     backtest_fill_limits_assumption = 1,   // TP1 (a limit) fills only after price trades 1 tick THROUGH the level
      calc_on_every_tick = false,
      calc_on_order_fills = false,
      process_orders_on_close = false,   // market entries fill at the NEXT bar's open
