@@ -60,6 +60,8 @@ strategy(
      commission_value   = 0.50,   // MES default: $0.50 / side  =>  $1.00 round-turn (entry + exit)
      slippage           = 1,      // 1 tick (MES tick = 0.25 index pts = $1.25 / contract)
      calc_on_every_tick = false,
+     calc_on_order_fills = false,
+     process_orders_on_close = false,   // market entries fill at the NEXT bar's open
      max_boxes_count    = 200,
      max_lines_count    = 200,
      max_labels_count   = 200)

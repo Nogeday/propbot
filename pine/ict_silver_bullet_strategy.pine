@@ -66,6 +66,7 @@ strategy(title              = "ICT Silver Bullet (Sweep+MSS+FVG)",
          slippage           = 1,          // MES profile: 1 tick per market/stop fill — CALIBRATE for other instruments
          backtest_fill_limits_assumption = 1,   // limit entry fills only after trading 1 tick through the level
          calc_on_every_tick = false,
+         calc_on_order_fills = false,
          process_orders_on_close = false,
          max_boxes_count    = 500,
          max_lines_count    = 500,

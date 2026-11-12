@@ -50,6 +50,9 @@
 //                   default would charge $0.50 PER SHARE, so it MUST be changed on SPY.
 //     TradingView charges commission on EACH fill (entry and exit separately) and adds
 //     slippage only to market and stop fills (never to limit fills).
+//   EXECUTION MODEL (non-repainting): every decision is taken on a CLOSED bar — calc_on_every_tick
+//     and calc_on_order_fills are OFF (keep both "Recalculate" boxes in Properties unticked);
+//     market entries fill at the NEXT bar's open; stops fill intrabar.
 //   RISK BASE: every entry is sized from "Risk Per Trade (%)" of the Risk base — Initial Capital
 //     by default (fixed cash risk off the STARTING balance, the prop rule); Account Equity compounds.
 //   QUANTITY ROUNDING: "Auto" = whole contracts on futures; a size < 1 skips the trade.
@@ -69,6 +72,9 @@ strategy(title              = "Master Prop Firm Portfolio (S1 ORB + S2 Sweep)",
          commission_type    = strategy.commission.cash_per_contract,
          commission_value   = 0.50,             // MES profile: $0.50 per contract PER SIDE ($1.00 round turn) — see COSTS in the header
          slippage           = 1,                // ticks per market/stop fill (MES tick = 0.25 pt = $1.25). Test 2–3 for fast/news bars.
+         calc_on_every_tick = false,            // decisions on CLOSED bars only — keep both "Recalculate" boxes in Properties unticked
+         calc_on_order_fills = false,           // no intrabar recalculation after a fill
+         process_orders_on_close = false,       // market entries fill at the NEXT bar's open
          max_boxes_count    = 500,
          max_lines_count    = 500,
          max_labels_count   = 500)

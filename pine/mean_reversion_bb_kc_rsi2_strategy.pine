@@ -69,6 +69,7 @@ strategy(title                   = "Mean Reversion BB/KC + RSI(2) Fade",
          commission_value        = 0.50,    // MES profile: $0.50 per contract PER SIDE ($1.00 round turn) — see COSTS in the header
          slippage                = 1,       // MES profile: 1 tick per market/stop fill (MES tick = 0.25 pt = $1.25)
          calc_on_every_tick      = false,   // no intrabar recalculation -> no signal repaint
+         calc_on_order_fills     = false,   // no intrabar recalculation after a fill
          process_orders_on_close = false,   // entries fill next open; stops/limits stay intrabar
          max_lines_count         = 500,
          max_labels_count        = 500,
