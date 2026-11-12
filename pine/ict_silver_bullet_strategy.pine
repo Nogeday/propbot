@@ -39,6 +39,8 @@
 //       SPY / ETF : Commission "% of value" per side · slippage 1 tick
 //   - WEBHOOK ALERTS: JSON via alert() (create the alert with "alert() function calls only").
 //     The entry alert is a LIMIT order (order_type "limit"); a "cancel" alert withdraws it.
+//   - DASHBOARD: live state + trade statistics (win rate, trades, Tot R) with an All / In-Sample /
+//     Out-of-Sample scope.
 // -------------------------------------------------------------------------------------
 //  NON-REPAINTING NOTES
 //   - All decisions are taken on CLOSED bars (calc_on_every_tick stays OFF) and no
@@ -145,6 +147,7 @@ tradeFri = input.bool(true, "Trade Friday",    group = grpDow)
 
 // ── 9) Dashboard
 showDash = input.bool(true, "Show dashboard", group = grpDash)
+tableScope = input.string("All", "Table scope", options = ["All", "In-Sample", "Out-of-Sample"], group = grpDash, tooltip = "Filters the trade-statistics rows (win rate, total trades, Tot R) to in-sample or out-of-sample trades by entry time. The live rows (state, daily P&L, drawdown, equity) are not affected.")
 dashPos  = input.string("Top Right", "Dashboard position", options = ["Top Right", "Top Left", "Bottom Right", "Bottom Left"], group = grpDash)
 dashSize = input.string("Normal", "Dashboard text size", options = ["Tiny", "Small", "Normal", "Large"], group = grpDash)
 
@@ -194,7 +197,7 @@ var bool  haltedPerma   = false
 var string haltReason   = ""
 var bool  oosDrawn      = false
 
-// Per-trade records for the weekday-agnostic R math (index aligns with closedtrades)
+// Per-trade records for the dashboard's R math (index aligns with closedtrades)
 var float[] stopArr = array.new_float()
 var int[]   dirArr  = array.new_int()
 
@@ -533,7 +536,7 @@ if barstate.islast and timeframe.period != "1" and timeframe.period != "5"
 dPos = dashPos == "Top Left" ? position.top_left : dashPos == "Bottom Right" ? position.bottom_right : dashPos == "Bottom Left" ? position.bottom_left : position.top_right
 dTxt = dashSize == "Tiny" ? size.tiny : dashSize == "Small" ? size.small : dashSize == "Large" ? size.large : size.normal
 
-var table dash = table.new(position = dPos, columns = 2, rows = 11, frame_width = 1, frame_color = color.new(color.gray, 50), border_width = 1, border_color = color.new(color.gray, 70))
+var table dash = table.new(position = dPos, columns = 2, rows = 12, frame_width = 1, frame_color = color.new(color.gray, 50), border_width = 1, border_color = color.new(color.gray, 70))
 
 if showDash and barstate.islast
     fg    = chart.fg_color
@@ -541,16 +544,36 @@ if showDash and barstate.islast
     posClr = color.new(color.green, 0)
     negClr = color.new(color.red, 0)
 
-    nClosed = strategy.closedtrades
-    nWins   = strategy.wintrades
-    winRate = nClosed > 0 ? 100.0 * nWins / nClosed : 0.0
+    // Trade statistics for the chosen Table scope (by entry time). R is price-based, from the
+    // per-trade records: long R = (exit - entry) / (entry - initialStop); short mirrored.
+    nClosed = 0
+    nWins   = 0
+    totR    = 0.0
+    if strategy.closedtrades > 0
+        for k = 0 to strategy.closedtrades - 1
+            et      = strategy.closedtrades.entry_time(k)
+            inScope = tableScope == "All" or (tableScope == "In-Sample" and et < oosStart) or (tableScope == "Out-of-Sample" and et >= oosStart)
+            if inScope
+                entryP = strategy.closedtrades.entry_price(k)
+                exitP  = strategy.closedtrades.exit_price(k)
+                isLong = (k < array.size(dirArr) ? array.get(dirArr, k) : 1) == 1
+                stp    = k < array.size(stopArr) ? array.get(stopArr, k) : na
+                risk   = isLong ? (entryP - stp) : (stp - entryP)
+                rm     = (not na(stp) and risk > 0) ? (isLong ? (exitP - entryP) : (entryP - exitP)) / risk : na
+                nClosed += 1
+                if strategy.closedtrades.profit(k) > 0
+                    nWins += 1
+                if not na(rm)
+                    totR += rm
+    winRate  = nClosed > 0 ? 100.0 * nWins / nClosed : 0.0
+    scopeTag = tableScope == "In-Sample" ? " · IS" : tableScope == "Out-of-Sample" ? " · OOS" : ""
 
     stateTxt = haltedPerma ? "⛔ HALTED (overall)" : haltedToday ? "⛔ HALTED (" + haltReason + ")" : phase == 0 ? "Idle / hunting" : phase == 1 ? (mssDone ? "MSS ✓ — awaiting FVG" : "Swept — awaiting MSS") : phase == 2 ? "Armed (limit resting)" : "In trade"
     winTxt   = inAM ? "AM (10–11)" : inPM ? "PM (14–15)" : "— closed —"
     pnlClr   = dailyPnL > 0 ? posClr : dailyPnL < 0 ? negClr : fg
     ddNear   = useDailyDD and dailyPnLPct <= -(maxDailyDDPct * 0.75)
 
-    table.cell(dash, 0, 0, "ICT Silver Bullet", text_color = fg, bgcolor = hdrBg, text_size = dTxt)
+    table.cell(dash, 0, 0, "ICT Silver Bullet" + scopeTag, text_color = fg, bgcolor = hdrBg, text_size = dTxt)
     table.cell(dash, 1, 0, syminfo.ticker,      text_color = fg, bgcolor = hdrBg, text_size = dTxt)
 
     table.cell(dash, 0, 1, "State",   text_color = fg, text_size = dTxt)
@@ -574,11 +597,14 @@ if showDash and barstate.islast
     table.cell(dash, 0, 7, "Total trades (W/L)", text_color = fg, text_size = dTxt)
     table.cell(dash, 1, 7, str.tostring(nClosed) + " (" + str.tostring(nWins) + "/" + str.tostring(nClosed - nWins) + ")", text_color = fg, text_size = dTxt)
 
-    table.cell(dash, 0, 8, "Trades today", text_color = fg, text_size = dTxt)
-    table.cell(dash, 1, 8, str.tostring(tradesToday) + " / " + str.tostring(maxTrDay), text_color = tradesToday >= maxTrDay ? negClr : fg, text_size = dTxt)
+    table.cell(dash, 0, 8, "Tot R", text_color = fg, text_size = dTxt)
+    table.cell(dash, 1, 8, nClosed > 0 ? str.tostring(totR, "#.##") + "R" : "—", text_color = totR > 0 ? posClr : totR < 0 ? negClr : fg, text_size = dTxt)
 
-    table.cell(dash, 0, 9, "Consec losses", text_color = fg, text_size = dTxt)
-    table.cell(dash, 1, 9, str.tostring(consecLosses) + " / " + str.tostring(maxConsec), text_color = consecLosses >= maxConsec ? negClr : fg, text_size = dTxt)
+    table.cell(dash, 0, 9, "Trades today", text_color = fg, text_size = dTxt)
+    table.cell(dash, 1, 9, str.tostring(tradesToday) + " / " + str.tostring(maxTrDay), text_color = tradesToday >= maxTrDay ? negClr : fg, text_size = dTxt)
 
-    table.cell(dash, 0, 10, "Equity", text_color = fg, text_size = dTxt)
-    table.cell(dash, 1, 10, str.tostring(strategy.equity, "#.##"), text_color = fg, text_size = dTxt)
+    table.cell(dash, 0, 10, "Consec losses", text_color = fg, text_size = dTxt)
+    table.cell(dash, 1, 10, str.tostring(consecLosses) + " / " + str.tostring(maxConsec), text_color = consecLosses >= maxConsec ? negClr : fg, text_size = dTxt)
+
+    table.cell(dash, 0, 11, "Equity", text_color = fg, text_size = dTxt)
+    table.cell(dash, 1, 11, str.tostring(strategy.equity, "#.##"), text_color = fg, text_size = dTxt)

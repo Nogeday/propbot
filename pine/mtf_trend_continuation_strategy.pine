@@ -32,7 +32,8 @@
 //                    position is run as the runner (initial stop until 1.5R, then BE+trail).
 //   • CIRCUIT      : max trades/day, daily-loss halt, optional consecutive-loss halt,
 //                    optional session window + EOD flat, backtest date range + OOS split.
-//   • TABLE        : runner / strategy performance (TP1 reach %, runner win %, avg R...).
+//   • TABLE        : runner / strategy performance (TP1 reach %, runner win %, avg R...),
+//                    with an All / In-Sample / Out-of-Sample scope.
 //  DEFAULTS ARE TUNED FOR MES (Micro E-mini S&P 500):
 //    Commission = cash per contract, $0.50 / side  =>  $1.00 round-turn.
 //    Slippage   = 1 tick  (MES tick = 0.25 index points = $1.25 / contract).
@@ -144,6 +145,7 @@ showLevels = input.bool(true,  "Show stop / TP lines",    group = g_vis)
 
 // Performance table
 showPerf  = input.bool(true, "Show performance table", group = g_tbl)
+tableScope = input.string("All", "Table scope", options = ["All", "In-Sample", "Out-of-Sample"], group = g_tbl, tooltip = "Filter every figure in the table to in-sample or out-of-sample trades (by entry time vs. 'In-sample end / OOS start') to check whether the edge survives on unseen data.")
 tablePos  = input.string("Bottom Right", "Table position", options = ["Bottom Right", "Top Right", "Bottom Left", "Top Left"], group = g_tbl)
 tableSize = input.string("Small", "Table text size", options = ["Tiny", "Small", "Normal", "Large"], group = g_tbl)
 
@@ -269,13 +271,10 @@ var int   totalEntries   = 0
 var int   tradeCount     = 0      // fully-closed trades (one per entry)
 var int   tradeWins      = 0
 var int   consecLosses   = 0
-// mode-split full-trade stats (S = scaled, B = Plan B)
-var int   nFullS         = 0
-var int   winFullS       = 0
-var float pnlFullS       = 0.0
-var int   nFullB         = 0
-var int   winFullB       = 0
-var float pnlFullB       = 0.0
+// full-trade stats, bucketed by mode and sample: index = (Plan B ? 2 : 0) + (OOS ? 1 : 0)
+var int[]   fullN        = array.new_int(4, 0)
+var int[]   fullWin      = array.new_int(4, 0)
+var float[] fullPnl      = array.new_float(4, 0.0)
 var bool  dailyLossHit   = false
 var bool  consecHaltHit  = false
 var float dayStartEquity = na
@@ -310,17 +309,13 @@ if strategy.position_size == 0 and strategy.closedtrades > closedSeen
             consecLosses := 0
         else
             consecLosses += 1
-        // split the full-trade result by which mode managed it (decided from the submitted qty)
-        if pendingNoScale
-            nFullB += 1
-            pnlFullB += tradeNet
-            if tradeNet > 0
-                winFullB += 1
-        else
-            nFullS += 1
-            pnlFullS += tradeNet
-            if tradeNet > 0
-                winFullS += 1
+        // bucket the full-trade result by the mode that managed it (decided from the submitted
+        // qty) and by IS / OOS (entry time of the trade that just closed)
+        bIdx = (pendingNoScale ? 2 : 0) + (strategy.closedtrades.entry_time(strategy.closedtrades - 1) >= oosStart ? 1 : 0)
+        array.set(fullN,   bIdx, array.get(fullN,   bIdx) + 1)
+        array.set(fullPnl, bIdx, array.get(fullPnl, bIdx) + tradeNet)
+        if tradeNet > 0
+            array.set(fullWin, bIdx, array.get(fullWin, bIdx) + 1)
         if useConsec and consecLosses >= maxConsec
             consecHaltHit := true
         eqAtEntry := na
@@ -580,6 +575,7 @@ if barstate.islast and timeframe.period != "5"
 //   half is 50% of the position; in PLAN B trades it is the FULL position. Trades stopped
 //   BEFORE 1.5R close via the "TP1"/"Init"/"Stop" ids and are excluded here. Runner R is
 //   measured from ENTRY: long R = (exit-entry)/initialRisk ; short mirrored.
+//   "Table scope" filters every figure to All / In-Sample / Out-of-Sample trades (by entry time).
 // =====================================================================================
 tblPos = tablePos == "Top Right" ? position.top_right : tablePos == "Bottom Left" ? position.bottom_left : tablePos == "Top Left" ? position.top_left : position.bottom_right
 tblTxt = tableSize == "Tiny" ? size.tiny : tableSize == "Normal" ? size.normal : tableSize == "Large" ? size.large : size.small
@@ -587,6 +583,17 @@ tblTxt = tableSize == "Tiny" ? size.tiny : tableSize == "Normal" ? size.normal :
 var table perf = table.new(position = tblPos, columns = 3, rows = 8, frame_width = 1, frame_color = color.new(color.gray, 50), border_width = 1, border_color = color.new(color.gray, 70))
 
 if showPerf and barstate.islast
+    // Table scope: which sample(s) feed every figure below
+    useIS    = tableScope != "Out-of-Sample"
+    useOOS   = tableScope != "In-Sample"
+    scopeTag = tableScope == "In-Sample" ? " · IS" : tableScope == "Out-of-Sample" ? " · OOS" : ""
+    nFullS   = (useIS ? array.get(fullN,   0) : 0)   + (useOOS ? array.get(fullN,   1) : 0)
+    winFullS = (useIS ? array.get(fullWin, 0) : 0)   + (useOOS ? array.get(fullWin, 1) : 0)
+    pnlFullS = (useIS ? array.get(fullPnl, 0) : 0.0) + (useOOS ? array.get(fullPnl, 1) : 0.0)
+    nFullB   = (useIS ? array.get(fullN,   2) : 0)   + (useOOS ? array.get(fullN,   3) : 0)
+    winFullB = (useIS ? array.get(fullWin, 2) : 0)   + (useOOS ? array.get(fullWin, 3) : 0)
+    pnlFullB = (useIS ? array.get(fullPnl, 2) : 0.0) + (useOOS ? array.get(fullPnl, 3) : 0.0)
+
     // Runner stats split by exit id: "Run" = scaled half ; "RunB" = Plan B full position
     rTotS = 0
     rWinS = 0
@@ -599,12 +606,13 @@ if showPerf and barstate.islast
     nC = strategy.closedtrades
     if nC > 0
         for k = 0 to nC - 1
-            xid = strategy.closedtrades.exit_id(k)
-            isS = xid == "Run"
-            isB = xid == "RunB"
+            xid     = strategy.closedtrades.exit_id(k)
+            eTime   = strategy.closedtrades.entry_time(k)
+            inScope = (useIS and eTime < oosStart) or (useOOS and eTime >= oosStart)
+            isS = xid == "Run"  and inScope
+            isB = xid == "RunB" and inScope
             if isS or isB
                 p      = strategy.closedtrades.profit(k)
-                eTime  = strategy.closedtrades.entry_time(k)
                 entryP = strategy.closedtrades.entry_price(k)
                 exitP  = strategy.closedtrades.exit_price(k)
                 idx = -1
@@ -657,7 +665,7 @@ if showPerf and barstate.islast
     bRpnl  = str.tostring(rPnlB, "#.#")
 
     // ---- Header (top-left shows the active trail method) ----
-    table.cell(perf, 0, 0, trailType == "Chandelier Exit" ? "Chand." : "ATR", text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
+    table.cell(perf, 0, 0, (trailType == "Chandelier Exit" ? "Chand." : "ATR") + scopeTag, text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
     table.cell(perf, 1, 0, "Scaled", text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
     table.cell(perf, 2, 0, "Plan B", text_color = fg, bgcolor = hdrBg, text_size = tblTxt)
 
