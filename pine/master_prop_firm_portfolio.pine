@@ -273,6 +273,16 @@ s2_activeFirst   = s2_activeNow and not s2_activeNow[1]
 s2_activeExit    = (not s2_activeNow and s2_activeNow[1]) or (s2_activeNow and session.islastbar)
 s2_dayOK = (dow == dayofweek.monday and s2_tradeMon) or (dow == dayofweek.tuesday and s2_tradeTue) or (dow == dayofweek.wednesday and s2_tradeWed) or (dow == dayofweek.thursday and s2_tradeThu) or (dow == dayofweek.friday and s2_tradeFri)
 
+// Entry-time gates (both engines): a market entry fills at the NEXT bar's open, so the signal
+// bar must not be the chart session's last bar (the fill would land in the next session) and
+// the fill bar must still be inside the engine's own window — S1: before the session end
+// (curMin < s1_sessEnd - 1 on the 1m chart); S2: inside the active window.
+barMin         = math.max(1, int(timeframe.in_seconds() / 60))    // chart bar length in minutes
+s1_entryTimeOK = not session.islastbar and curMin + barMin < s1_sessEnd
+s2_nextMin     = (curMin + barMin) % 1440
+s2_nextActive  = s2_activeEndM > s2_activeStartM ? (s2_nextMin >= s2_activeStartM and s2_nextMin < s2_activeEndM) : (s2_nextMin >= s2_activeStartM or s2_nextMin < s2_activeEndM)
+s2_entryTimeOK = s2_nextActive and not session.islastbar
+
 // ───────────────────────────── DAILY / CYCLE RESETS ─────────────────────────────
 // S1 daily reset (NY calendar day)
 if newDay
@@ -518,11 +528,11 @@ if s1_canScan and array.size(s1_aTop) > 0
                 else if st == 1 and close < b
                     array.set(s1_aState, i, 2)
 
-// S1 entry gates (global halt + concurrency cap + opposite-direction block)
+// S1 entry gates (entry-time gate + global halt + concurrency cap + opposite-direction block)
 s1_committedOther = s2_inDir != 0 ? riskPct : 0.0
 s1_riskOK = (s1_committedOther + riskPct) <= maxConcurrentRiskPct + 0.000001
 s1_dirOK  = s2_inDir == 0 or s2_inDir == s1_bias
-s1_canEnter = s1_canScan and not s1_tradedToday and not halted and s1_inDir == 0 and s1_riskOK and s1_dirOK and s1_bias != 0 and array.size(s1_aTop) > 0
+s1_canEnter = s1_canScan and s1_entryTimeOK and not s1_tradedToday and not halted and s1_inDir == 0 and s1_riskOK and s1_dirOK and s1_bias != 0 and array.size(s1_aTop) > 0
 
 if s1_canEnter
     if s1_bias == 1
@@ -675,7 +685,7 @@ if s2_canTrade and s2_armDir == -1 and close > s2_armTop
 s2_committedOther = s1_inDir != 0 ? riskPct : 0.0
 s2_riskOK = (s2_committedOther + riskPct) <= maxConcurrentRiskPct + 0.000001
 s2_dirOK  = s1_inDir == 0 or s1_inDir == s2_armDir
-s2_canEnter = s2_canTrade and not s2_tradedToday and not halted and s2_inDir == 0 and s2_armDir != 0 and s2_riskOK and s2_dirOK
+s2_canEnter = s2_canTrade and s2_entryTimeOK and not s2_tradedToday and not halted and s2_inDir == 0 and s2_armDir != 0 and s2_riskOK and s2_dirOK
 
 if s2_canEnter
     if s2_armDir == 1 and bar_index > s2_armBar and low <= s2_armTop

@@ -14,6 +14,9 @@
 //   4. FAIR VALUE GAP (FVG): the displacement that drove the MSS leaves a 3-candle FVG.
 //   5. ENTRY: a LIMIT order at the FVG (proximal edge / 50% CE / distal edge — input).
 //      If the gap is not tapped before the window closes, the order is CANCELLED.
+//      Hunts start and orders are armed only while the NEXT bar is still inside the window; an
+//      unfilled order is cancelled at the close of the window's last bar (or the session's), so
+//      it can never fill after the window or in the next session.
 //   6. STOP: 1 tick beyond the sweep extreme (the liquidity that was taken).
 //      TARGET: fixed R:R (default 1:2) OR the next opposing liquidity pool (toggle).
 // -------------------------------------------------------------------------------------
@@ -212,6 +215,14 @@ inWindow  = inAM or inPM
 windowId  = inAM ? 1 : inPM ? 2 : 0
 newWindow = windowId != 0 and windowId != nz(windowId[1], 0)
 
+// Order-placement gate: hunts start and limit orders are armed only while the NEXT bar is still
+// inside the current window and this is not the chart session's last bar. The same test expires
+// a resting limit at the close of the window's last bar, so it can never fill after the window
+// (or in the next session).
+barMin      = math.max(1, int(timeframe.in_seconds() / 60))    // chart bar length in minutes
+winEnd      = inAM ? amEnd : pmEnd
+entryTimeOK = inWindow and not session.islastbar and curMin + barMin < winEnd
+
 inDateRange = time >= startDate and time <= endDate
 isOOS       = time >= oosStart
 
@@ -320,7 +331,7 @@ if inWindow
         bearFvgBar := bar_index
 
 // ───────────────────────────── ELIGIBILITY ─────────────────────────────
-eligible     = inWindow and inDateRange and dayOK and not haltedToday and not haltedPerma and strategy.position_size == 0
+eligible     = entryTimeOK and inDateRange and dayOK and not haltedToday and not haltedPerma and strategy.position_size == 0
 startNewHunt = eligible and phase == 0 and tradesWindow < maxTrWindow and tradesToday < maxTrDay
 
 // ───────────────────────────── 1) SWEEP -> SET BIAS ─────────────────────────────
@@ -370,7 +381,7 @@ if phase == 1 and inWindow
                 dir   := 0
                 mssDone := false
             else
-                fvgOK = dir == -1 ? (not na(bearFvgBar) and bearFvgBar >= sweepBar) : (not na(bullFvgBar) and bullFvgBar >= sweepBar)
+                fvgOK = entryTimeOK and (dir == -1 ? (not na(bearFvgBar) and bearFvgBar >= sweepBar) : (not na(bullFvgBar) and bullFvgBar >= sweepBar))
                 if fvgOK
                     fT  = dir == -1 ? bearFvgTop : bullFvgTop
                     fB  = dir == -1 ? bearFvgBot : bullFvgBot
@@ -405,7 +416,8 @@ justEntered = strategy.opentrades + strategy.closedtrades > nz(strategy.opentrad
 // ───────────────────────────── 4) CANCEL / INVALIDATE (armed, unfilled) ─────────────────────────────
 if phase == 2 and strategy.position_size == 0 and not justEntered
     brokeStop = (dir == -1 and close > stopLevel) or (dir == 1 and close < stopLevel)
-    expired   = not inWindow or (bar_index - armBar) > maxBarsToFill
+    // expired: the window's (or the session's) last bar has closed, or the fill cap ran out
+    expired   = not entryTimeOK or (bar_index - armBar) > maxBarsToFill
     if brokeStop or expired
         strategy.cancel("Long")
         strategy.cancel("Short")

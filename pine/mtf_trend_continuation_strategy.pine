@@ -126,7 +126,7 @@ useSession = input.bool(true, "Restrict entries to a session window", group = g_
 sessStartH = input.int(9,  "Session start hour (24h)",  minval = 0, maxval = 23, group = g_sess)
 sessStartM = input.int(30, "Session start minute",      minval = 0, maxval = 59, group = g_sess)
 sessEndH   = input.int(15, "Session end hour (24h)",    minval = 0, maxval = 23, group = g_sess)
-sessEndM   = input.int(55, "Session end minute",        minval = 0, maxval = 59, group = g_sess, tooltip = "No new entries at/after this time; if 'flat at end' is on, open trades are closed.")
+sessEndM   = input.int(55, "Session end minute",        minval = 0, maxval = 59, group = g_sess, tooltip = "No new entries whose fill bar would open at/after this time; if 'flat at end' is on, open trades are closed.")
 flatAtEnd  = input.bool(true, "Flat at session end", group = g_sess)
 
 // Backtest date range / OOS
@@ -171,6 +171,11 @@ curMin = nyH * 60 + nyM
 sStart = sessStartH * 60 + sessStartM
 sEnd   = sessEndH   * 60 + sessEndM
 sessionOK = not useSession or (curMin >= sStart and curMin < sEnd)
+// Entry-time gate: a market entry fills at the NEXT bar's open, so the signal bar must not be
+// the chart session's last bar (the fill would land in the next session) and, with the session
+// window on, the fill bar must open before the session end.
+barMin      = math.max(1, int(timeframe.in_seconds() / 60))    // chart bar length in minutes
+entryTimeOK = not session.islastbar and (not useSession or curMin + barMin < sEnd)
 
 newDay = ta.change(dayofmonth(time, tz)) != 0
 
@@ -344,7 +349,7 @@ if useDailyLoss and not na(dayStartEquity)
         dailyLossHit := true
 
 haltedToday  = dailyLossHit or (useConsec and consecHaltHit)
-canEnterBase = inDateRange and sessionOK and not haltedToday and tradesToday < maxTradesDay and strategy.position_size == 0
+canEnterBase = inDateRange and sessionOK and entryTimeOK and not haltedToday and tradesToday < maxTradesDay and strategy.position_size == 0
 
 // =====================================================================================
 //  EXECUTION

@@ -11,6 +11,7 @@
 //      in the bias direction, and enter when price pulls back and touches the gap.
 //   4. Risk: fixed 1:2 reward/risk + a trailing stop that locks profit as price moves.
 //   5. One trade per day. Optionally flat at session end.
+//      No entry on the session's last bar, nor when the fill bar would open at/after the session end.
 // -------------------------------------------------------------------------------------
 //  FEATURES
 //   • POSITION SIZING — TRUE FIXED-FRACTIONAL RISK:
@@ -178,6 +179,12 @@ sessEnd  = sessEndHour * 60 + sessEndMin
 isInOR       = curMin >= orStart and curMin < orEnd
 // ">=" + session.islastbar: also flattens on half days and when the sessEnd bar is missing
 atSessionEnd = curMin >= sessEnd or session.islastbar
+
+// Entry-time gate: a market entry fills at the NEXT bar's open, so (a) the signal bar must not
+// be the chart session's last bar (the fill would land in the next session = overnight carry)
+// and (b) the fill bar must open before the session end. On the 1m chart: curMin < sessEnd - 1.
+barMin      = math.max(1, int(timeframe.in_seconds() / 60))    // chart bar length in minutes
+entryTimeOK = not session.islastbar and curMin + barMin < sessEnd
 
 inDateRange = time >= startDate and time <= endDate
 isOOS       = time >= oosStart
@@ -371,7 +378,8 @@ if canScan and array.size(aTop) > 0
 
 // ───────────────────────────── ENTRY (pullback into the gap) ─────────────────────────────
 // NOTE the "not halted" gate: a tripped circuit breaker blocks every new entry for the day.
-if canScan and not tradedToday and not halted and strategy.position_size == 0 and array.size(aTop) > 0
+// entryTimeOK: no entry whose fill (next bar's open) would land at/after the session end.
+if canScan and entryTimeOK and not tradedToday and not halted and strategy.position_size == 0 and array.size(aTop) > 0
     if bias == 1
         for i = array.size(aTop) - 1 to 0
             st = array.get(aState, i)

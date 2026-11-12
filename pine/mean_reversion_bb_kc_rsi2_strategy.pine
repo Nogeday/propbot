@@ -22,6 +22,7 @@
 //   • Sizing       : TRUE fixed-fractional — quantity is solved so a full stop-out loses
 //                    ≈ Risk% of the risk base — Initial Capital by default (the SL distance defines the size).
 //   • Time filter  : trade only inside [10:00 , 15:45] exchange time (skip the noisy open).
+//                    No entry when the fill bar (next bar) would open at/after the session end.
 //   • Daily breaker: latch-HALT new entries (and optionally flatten) once the day's equity
 //                    drawdown — including open P&L — exceeds the user threshold. Resets daily.
 //   • Trade cap    : at most "Max trades per day" new entries per NY calendar day (default 1).
@@ -214,6 +215,12 @@ inWindow    = curMin >= sMin and curMin < eMin
 sessOk      = not useTimeFilter or inWindow         // entries permitted now?
 atOrPastEnd = useTimeFilter and curMin >= eMin       // time to force flat?
 
+// Entry-time gate: a market entry fills at the NEXT bar's open, so the signal bar must not be
+// the chart session's last bar (the fill would land in the next session) and, with the time
+// filter on, the fill bar must open before the session end.
+barMin      = math.max(1, int(timeframe.in_seconds() / 60))    // chart bar length in minutes
+entryTimeOK = not session.islastbar and (not useTimeFilter or curMin + barMin < eMin)
+
 startTime   = timestamp(tz, startYear, startMonth, startDay, 0, 0)
 endTime     = timestamp(tz, endYear,   endMonth,   endDay,   23, 59)
 oosStart    = timestamp(tz, oosYear,   oosMonth,   oosDay,   0, 0)
@@ -277,7 +284,7 @@ longConfirm  = longSetup[1]  and close > bbLower and trendOkLong  and confLongOk
 shortConfirm = shortSetup[1] and close < bbUpper and trendOkShort and confShortOk
 
 // Master permission to open a NEW position
-tradingAllowed = inDateRange and sessOk and dayOK and not dailyHalt and tradesToday < maxTradesDay and strategy.position_size == 0
+tradingAllowed = inDateRange and sessOk and entryTimeOK and dayOK and not dailyHalt and tradesToday < maxTradesDay and strategy.position_size == 0
 goLong  = tradingAllowed and longConfirm
 goShort = tradingAllowed and shortConfirm
 

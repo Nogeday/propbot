@@ -14,6 +14,7 @@
 //          prints a BULLISH FVG that CLOSES back above the Low.
 //   3. ENTRY: after the sweep is confirmed by the FVG, enter on the pullback that TOUCHES
 //      the FVG. One trade per day.
+//      No entry when the fill bar (next bar) would fall outside the active window or the session.
 //   4. RISK: fixed 1:2 reward/risk. Initial stop = "FVG Buffer" or "ATR Based" (dropdown).
 //   5. INFRASTRUCTURE: backtest date range + OOS splitter, day-of-week filter, weekday
 //      stats table (All / In-Sample / Out-of-Sample scope).
@@ -177,6 +178,14 @@ activeNow = activeEndM > activeStartM ? (curMin >= activeStartM and curMin < act
 asianStartBar = asianNow and not asianNow[1]      // entered the Asian session  -> new cycle
 asianEndBar   = not asianNow and asianNow[1]       // left the Asian session     -> finalize range
 activeFirst   = activeNow and not activeNow[1]
+
+// Entry-time gate: a market entry fills at the NEXT bar's open, so the fill bar must still be
+// inside the active window and the signal bar must not be the chart session's last bar (the
+// fill would land in the next session).
+barMin      = math.max(1, int(timeframe.in_seconds() / 60))    // chart bar length in minutes
+nextMin     = (curMin + barMin) % 1440
+nextActive  = activeEndM > activeStartM ? (nextMin >= activeStartM and nextMin < activeEndM) : (nextMin >= activeStartM or nextMin < activeEndM)
+entryTimeOK = nextActive and not session.islastbar
 
 inDateRange = time >= startDate and time <= endDate
 isOOS       = time >= oosStart
@@ -360,8 +369,8 @@ if canTrade and not tradedToday and not halted and strategy.position_size == 0 a
         armDir := 0
     else if armDir == -1 and close > armTop
         armDir := 0
-    // Enter on the touch (one bar after the FVG formed)
-    if armDir == 1 and bar_index > armBar and low <= armTop
+    // Enter on the touch (one bar after the FVG formed), only while the fill bar stays in the window
+    if armDir == 1 and entryTimeOK and bar_index > armBar and low <= armTop
         // --- Fixed-fractional sizing (estimate the fill at the signal-bar close) ---
         estStop = (stopMethod == "ATR Based" and not na(atrInit)) ? close - atrInit * atrMultInit : armBot - buffer
         estStop := math.min(estStop, close - syminfo.mintick)
@@ -384,7 +393,7 @@ if canTrade and not tradedToday and not halted and strategy.position_size == 0 a
             armDir := 0
             if showZones and inDateRange
                 label.new(bar_index, armTop, "▲", style = label.style_label_up, color = color.new(color.green, 0), textcolor = color.white, size = size.tiny)
-    else if armDir == -1 and bar_index > armBar and high >= armBot
+    else if armDir == -1 and entryTimeOK and bar_index > armBar and high >= armBot
         // --- Fixed-fractional sizing (estimate the fill at the signal-bar close) ---
         estStop = (stopMethod == "ATR Based" and not na(atrInit)) ? close + atrInit * atrMultInit : armTop + buffer
         estStop := math.max(estStop, close + syminfo.mintick)
