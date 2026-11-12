@@ -9,7 +9,7 @@ Ayrıntılı spesifikasyon `docs/SPEC.md`'de — bir faza başlamadan önce o fa
 
 | Faz | Çıktı | SPEC |
 |---|---|---|
-| 0 | Pine hata düzeltmeleri (§4.1 B-maddeleri) + TradingView doğrulama listesi | §4 |
+| 0 | Pine hata düzeltmeleri (§4.1 B-maddeleri) + kural/varsayılan hizalaması (§4.3 E-maddeleri) + TradingView doğrulama listesi | §4 |
 | 1 | TradingView → webhook → Telegram sinyal botu (emir YOK) | §5 |
 | 2 | Python strateji motoru + maliyetli backtest + parite + Monte Carlo prop simülatörü | §6 |
 | 3 | MT5 köprüsü, `paper` ve `approve` modları (yalnızca demo hesap) | §7 |
@@ -29,7 +29,8 @@ Ayrıntılı spesifikasyon `docs/SPEC.md`'de — bir faza başlamadan önce o fa
 - `pine/` dosyalarının kaynağı kullanıcının TradingView'daki güncel script'leridir; düzeltilen dosya TradingView'a
   geri yapıştırılır. Her dosya tek parça ve doğrudan yapıştırılabilir kalır.
 - Pine v5'te kal; v6'ya yükseltme (davranış farkları sonuçları değiştirir, önce/sonra karşılaştırmasını bozar).
-- Faz 0'da yalnızca SPEC §4'teki B-maddeleri değişir; giriş/çıkış mantığı ve mevcut girdilerin varsayılanları aynı kalır.
+- Faz 0'da yalnızca SPEC §4.1'deki B-maddeleri ve §4.3'teki E-maddeleri (2026-11-12 kullanıcı kararı) değişir; bunların
+  dışında giriş/çıkış mantığı ve girdi varsayılanları aynı kalır.
   Başka sorun görürsen düzeltme, `CHANGELOG.md`'de "Açık bulgular" altında listele.
 - Pine'ı derleyemez ve çalıştıramazsın. Kullanıcının TradingView'da yapacağı kontrolleri
   `docs/tv-verification-checklist.md`'ye yaz; derleme hatalarını ve test sonuçlarını kullanıcıdan iste.
