@@ -62,6 +62,8 @@ Strateji kodu saat, dosya, ağ ya da ortam değişkeni okumaz; her şey `ctx` il
     tolerans olarak belgelenir.
 - Aynı barda hem SL hem TP'ye değilirse backtest varsayılanı `fill_model: pessimistic` (önce SL). `tv_ohlc` modu
   TradingView emülatörünü taklit eder (açılış yükseğe daha yakınsa O→H→L→C, değilse O→L→H→C) — yalnızca parite testinde.
+- **Limit emirleri** (Silver Bullet girişi ve tüm TP'ler) fiyat seviyeyi **1 tick geçince** dolar
+  (Pine `backtest_fill_limits_assumption = 1`); dokunma dolum sayılmaz.
 - **Boyut:** `qty = risk% × risk tabanı / (stop mesafesi × point value)`; risk tabanı varsayılanı **başlangıç bakiyesi**
   (Pine `Risk base = Initial Capital`, §8.1). Tahmini giriş = sinyal barı kapanışı; aşağı yuvarlama, < 1 ise işlem atlanır.
 - Strateji başına günde en fazla 1 işlem (tüm script'lerde varsayılan). Seans sonunda pozisyon kesinlikle kapalı
@@ -212,6 +214,9 @@ Strateji kodu saat, dosya, ağ ya da ortam değişkeni okumaz; her şey `ctx` il
 - **Trailing:** aday = long: max(başa baş, iz); short: min(başa baş, iz). İz = Chandelier (`highest(high, 22)` −
   ATR(22) × 3,0; short simetrik) ya da ATR (`close ∓ ATR(14) × 2,5`). Başa başa ilk çekiş koşulsuz; sonrası yalnızca aday
   mevcut stop'u ≥ `trailMinStepTicks` (4) tick iyileştiriyorsa. Stop yalnızca kâr yönüne gider.
+  Aday stop bar kapanışında fiyatın yanlış tarafında kalırsa (long'da stop ≥ fiyat) Pine emri sonraki barın açılışında
+  doldurur; canlı yürütmede bu, stop değişikliği yerine **piyasa emriyle kapatma** olarak uygulanır (broker böyle bir
+  stop'u reddeder).
 - **Kesiciler:** günlük zarar (gün başı özsermaye − bar kapanışı özsermayesi) ≥ `dailyLossPct` (2) → gün için dur +
   (`flatOnDailyLoss`) kapat; isteğe bağlı ardışık zarar durdurması (kapalı). **Seans sonu:** `curMin ≥ 15:55` ya da seansın
   son barı → kapat.
@@ -307,6 +312,8 @@ karşılaştırmasında orijinalle fark beklenir. Ayrıntı ve gerekçe: `CHANGE
 | E8 | MTF, SB | Tablo kapsamı (All / In-Sample / Out-of-Sample); SB panosunda Tot R. |
 | E9 | 6 dosya | `strategy()` varsayılanları MES test profili (kontrat başı $0,50 taraf başı, 1 tick; sermaye 100.000, marjin %0); başlıkta enstrüman notları. |
 | E10 | Doküman | `pine/README.md`, §3.4 semantiği, CHANGELOG, doğrulama listesi. |
+| E11 | 6 dosya | Yürütme modeli bayrakları açıkça yazıldı (`calc_on_every_tick`, `calc_on_order_fills`, `process_orders_on_close` = `false`); davranış değişmez. |
+| E12 | NY, Asian, Master, MR, MTF | `backtest_fill_limits_assumption = 1`: TP limitleri fiyat seviyeyi 1 tick geçince dolar (Silver Bullet'ta zaten vardı). |
 
 ## 5. Faz 1 — TradingView → Telegram sinyal botu (emir yok)
 
@@ -383,7 +390,7 @@ systemd (`Restart=always`) · chrony · log rotasyonu.
 
 ### 6.2 Dolum modeli
 Piyasa emri: sonraki bar açılışı + `slippage_ticks`. Stop: değdiği an stop fiyatı (boşlukla açılışta açılış fiyatı) + slipaj.
-Limit: değdiğinde limit fiyatı (slipaj yok). Aynı barda SL+TP → §3.1.
+Limit: fiyat seviyeyi 1 tick geçince limit fiyatından (slipaj yok; Pine `backtest_fill_limits_assumption = 1` ile aynı). Aynı barda SL+TP → §3.1.
 
 ### 6.3 Maliyet modeli (venue/enstrüman bazlı, config)
 CFD: spread (sabit ya da saat dilimine göre tablo; NY açılışında genişleme) + slipaj + komisyon (varsa).

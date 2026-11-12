@@ -175,9 +175,28 @@ Commit'ler: `683ffcc` E1 · `f000482` E2 · `52b6f6a` E3 · `ccfc655` E4 · `c69
   Mean Reversion, MTF semantiği), §4.3 (E-maddeleri); `docs/tv-verification-checklist.md` yeni varsayılanlar ve
   E-kontrolleriyle. → Açık bulgu 10.
 
+## Denetim sonrası sertleştirme — E11–E12 (2026-11-13)
+
+Repaint / lookahead / bar-içi dolum denetimi: `docs/audits/2026-11-13-repaint-lookahead-denetimi.md`. Sinyal üretiminde
+repaint ya da lookahead kaynağı bulunmadı; iki küçük sertleştirme yapıldı. Hiçbir dosya henüz TradingView'da derlenmedi.
+
+Commit'ler: `a5af400` E11 · `159d883` E12.
+
+### E11 — Yürütme modeli bayrakları açıkça yazıldı (6 dosya)
+- `calc_on_every_tick = false`, `calc_on_order_fills = false`, `process_orders_on_close = false` artık her `strategy()`
+  bildiriminde (NY, Asian ve Master'da hiçbiri yoktu; Silver Bullet ve Mean Reversion'da `calc_on_order_fills`, MTF'de son
+  ikisi eksikti). Değerler zaten varsayılandı: **davranış değişmez**. Amaç: niyet kodda görünsün ve Properties'teki
+  "Recalculate" kutuları yanlışlıkla açılırsa fark edilsin (doğrulama listesi B).
+
+### E12 — Limit emirleri 1 tick geçince dolar (NY, Asian, Master, Mean Reversion, MTF)
+- `backtest_fill_limits_assumption = 1` (Silver Bullet'ta B4 ile zaten vardı). TP limitleri artık fiyat seviyeye
+  değdiğinde değil, **1 tick geçtiğinde** dolar. Davranış notu: tam TP seviyesinde dönen barlarda işlem TP ile kapanmaz;
+  sonuçlar bir miktar kötüleşir (daha gerçekçi). MTF Plan B'de 1,5R eşiği emir değil gözlem olduğu için
+  (bar high/low ≥ TP1) değişmedi.
+
 ## Açık bulgular
 
-Durum (2026-11-12): 1 ve 3–11 kapandı; 2 kısmen. 12–17 yeni.
+Durum (2026-11-13): 1 ve 3–11 kapandı; 2 kısmen. 12–23 açık (18–23 denetimden).
 
 1. ~~**MTF derleme riski:** `riskPts := ...` bildirimi olmayan değişkene atama.~~ **Çözüldü** (`e997dd5`).
 2. **B4 sayısal değerleri — kısmen:** kod varsayılanı artık MES test profili (E9). FTMO `US500.cash` spread'i/komisyonu
@@ -202,3 +221,17 @@ Durum (2026-11-12): 1 ve 3–11 kapandı; 2 kısmen. 12–17 yeni.
     venue profilinde kaldıraç alanı yok (VERIFY, Faz 2/3). TradingView tarafında marjin kontrolü kapalı (E9).
 17. **Yarım günlerde 1 barlık işlem:** E5 sınırı — sondan bir önceki bardaki sinyal son barda dolup aynı barın
     kapanışında kapanır.
+18. **Zorunlu kapanış fiyatı (denetim D4):** `immediately = true` kapanışları barın kapanış fiyatından dolar. Seansın son
+    barında (`session.islastbar`: yarım gün, erken kapanış) canlıda bu fiyat alınamaz; düzleştirme botta takvim tabanlı ve
+    kapanıştan önce yapılmalı (§3.1, §7.2). Faz 1 alıcısı yarım günlerde `exit` alert'ine güvenmemeli.
+19. **Stop fiyatın yanlış tarafında (denetim D5):** MTF runner stop'u (başa baş / Chandelier) bar kapanışında fiyatın
+    yanlış tarafına düşebilir; backtest sonraki açılışta doldurur, gerçek broker stop değişikliğini reddeder. Faz 3
+    yürütme kuralı: böyle durumda piyasa emriyle kapat (§3.4.4).
+20. **Aynı barda SL + TP (D6) ve sabit 1 tick slipaj (D7):** bar içi yol bilinmez; NY açılışı ve haber barlarında slipaj
+    iyimser. Python'da `pessimistic` dolum ve maliyet duyarlılık matrisi (§6); TradingView'da 2× maliyet koşusu (liste C).
+21. **`session.islastbar` gerçek zamanlıda (D9):** erken kapanış günlerinde canlı `exit` alert'inin gelip gelmediği
+    doğrulanmadı.
+22. **MTF hacim filtresi (D10):** MES'te gerçek hacim, FTMO CFD'sinde tick hacmi; yürütme sinyali venue verisinde
+    hesaplanacağı için (ADR-0000) parite ve G1 açısından izlenmeli.
+23. **Config doğrulaması (denetim Y1–Y10):** `config/*.yaml` için şema/doğrulama kodu ve `config/strategies.yaml` yok;
+    `cost_buffer`, spread koruması ve strateji önceliği için anahtar tanımlı değil. Python iskeletiyle birlikte gelecek.

@@ -21,7 +21,9 @@ Her dosya için A–G adımlarını tamamla, sonra bir sonrakine geç.
       | Commission | 0.5 — USD per contract (taraf başı → gidiş-dönüş $1,00) |
       | Slippage | 1 tick |
       | Margin for long / short positions | 0 % |
-      | Verify price for limit orders (yalnızca Silver Bullet) | 1 tick |
+      | Verify price for limit orders | 1 tick (altı dosyada da) |
+      | Recalculate: After order is filled / On every tick | ikisi de işaretsiz |
+      | Fill orders: On bar close | işaretsiz |
 
 - [ ] **Orijinal script'lerde** aynı ayarları elle gir (orijinal varsayılanları farklı: 10000, yüzde komisyon vb.).
       Marjin %100 kalırsa TradingView pozisyonun tüm notional'ını teminat ister; MES'te risk-temelli boyut bunu aşar →
@@ -49,7 +51,8 @@ Her dosya için A–G adımlarını tamamla, sonra bir sonrakine geç.
 - [ ] Inputs: `Risk base = Initial Capital`; risk `0.5`; günlük zarar kesicisi `2`; `Max trades per day = 1`
       (Silver Bullet, Mean Reversion, MTF); `Min trail step (ticks) = 4` (NY, Master S1, MTF);
       `Flatten open trade on breach` işaretli (NY, Asian, Master, Silver Bullet).
-- [ ] Silver Bullet: Properties'te "Verify price for limit orders" = **1 tick**.
+- [ ] Altı dosyada da "Verify price for limit orders" = **1 tick**; "Recalculate" kutuları ve "On bar close" **işaretsiz**.
+      Bu kutulardan biri işaretliyse gerçek zamanlı davranış backtest'ten ayrışır (denetim D3).
 
 ## C. Önce/sonra tablosu (Strategy Tester → Overview / Performance Summary)
 Orijinal ve v2 için aynı sembol, zaman dilimi, tarih aralığı ve Properties ile doldur. "Tot R" script'in kendi
@@ -62,6 +65,10 @@ tablosundan (MTF'de tablo farklı: "Full trades", "Avg runner R"; Silver Bullet'
 
 - [ ] **Maliyetli ve maliyetsiz fark:** v2'yi bir kez de Commission = 0 ve Slippage = 0 ile çalıştır, net kâr ve PF'yi
       not et (yalnızca karşılaştırma için), sonra varsayılana dön.
+- [ ] **2× maliyet koşusu:** Commission = 1.0 ve Slippage = 2 ile bir koşu; net kâr ve PF'yi not et, sonra varsayılana
+      dön. Strateji 2× maliyette kâr bırakmıyorsa bunu açıkça yaz (denetim D7).
+- [ ] (Premium varsa) **Bar Magnifier** açık bir koşu: işlem sayısı ve net kâr farkını not et — aynı barda stop + hedef
+      varsayımının etkisini gösterir (denetim D6).
 
 ## D. Grafik ve işlem listesi (B-maddeleri)
 - [ ] Pozisyon açıkken grafikte stop çizgisi (NY/Master S1: turuncu "Stop / Trail"; Asian/Master S2/MR/SB: stop
