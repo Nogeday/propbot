@@ -20,6 +20,7 @@
 //  PROP-FIRM RISK ARCHITECTURE
 //   - TRUE fixed-fractional sizing: qty solved from (risk% x balance)/(stop distance x
 //     point value). Risk per trade is constant in CASH, not a nominal % of equity.
+//     Balance = "Risk base": Initial Capital (default, the prop rule) / Account Equity / Fixed Balance.
 //   - HARD DAILY LOSS LIMIT: equity X% below the day's start -> halt for the day
 //     (optionally flatten the open position).
 //   - MAX CONSECUTIVE LOSSES: a losing streak halts new trades for the day.
@@ -101,7 +102,7 @@ maxBarsToFill = input.int(20, "Max bars for limit to fill", minval = 1, group = 
 
 // ── 4) Risk & sizing
 riskPct     = input.float(1.0, "Risk per trade (%)", minval = 0.01, step = 0.05, group = grpRisk, tooltip = "Cash risked per trade as a % of the chosen balance. Position size is SOLVED from this and the stop distance.")
-riskBase    = input.string("Account Equity", "Risk base", options = ["Account Equity", "Fixed Balance"], group = grpRisk, tooltip = "Account Equity compounds. Fixed Balance mirrors most prop rules (fixed % of starting balance).")
+riskBase    = input.string("Initial Capital", "Risk base", options = ["Initial Capital", "Account Equity", "Fixed Balance"], group = grpRisk, tooltip = "Balance the risk % is applied to. Initial Capital = the strategy's starting capital (Properties): fixed cash risk per trade, no compounding — the prop-firm rule (SPEC §8.1). Account Equity = current equity (compounds with wins and losses). Fixed Balance = the amount typed below.")
 fixedBal    = input.float(10000, "Fixed balance ($)", minval = 1, group = grpRisk, tooltip = "Used only when Risk base = Fixed Balance.")
 tickOffset  = input.int(1, "Stop offset beyond sweep (ticks)", minval = 0, group = grpRisk, tooltip = "Stop = sweep extreme +/- this many ticks. 1 = exactly one tick past the swept liquidity.")
 roundToInt  = input.bool(true, "Round quantity to whole contracts", group = grpRisk, tooltip = "ON for futures (ES/MES). If the risk-correct size is < 1 contract, the trade is SKIPPED (account too small for this risk).")
@@ -218,10 +219,14 @@ dow   = dayofweek(time, tz)
 dayOK = (dow == dayofweek.monday and tradeMon) or (dow == dayofweek.tuesday and tradeTue) or (dow == dayofweek.wednesday and tradeWed) or (dow == dayofweek.thursday and tradeThu) or (dow == dayofweek.friday and tradeFri)
 
 // ───────────────────────────── HELPERS ─────────────────────────────
+// Risk base (SPEC §8.1): by default the STARTING balance, so the cash risk per trade neither
+// compounds with wins nor shrinks with losses.
+riskBaseAmt = riskBase == "Fixed Balance" ? fixedBal : riskBase == "Account Equity" ? strategy.equity : strategy.initial_capital
+
 // True fixed-fractional contract sizing (accounts for instrument point value).
 f_qty(_entry, _stop) =>
     _riskPerContract = math.abs(_entry - _stop) * syminfo.pointvalue
-    _cap = (riskBase == "Fixed Balance" ? fixedBal : strategy.equity) * riskPct / 100.0
+    _cap = riskBaseAmt * riskPct / 100.0
     _raw = _riskPerContract > 0 ? _cap / _riskPerContract : 0.0
     roundToInt ? math.floor(_raw) : _raw
 

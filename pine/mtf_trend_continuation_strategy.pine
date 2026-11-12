@@ -22,7 +22,7 @@
 //      (long: bullish close AND close > high[1] ; short mirrored).
 // -------------------------------------------------------------------------------------
 //  TRADE MANAGEMENT (prop-firm)
-//   • SIZING       : fixed % of equity risk -> qty = (equity*risk%) / (stopDist*pointValue)
+//   • SIZING       : fixed % of the risk base (Initial Capital by default) -> qty = (base*risk%) / (stopDist*pointValue)
 //   • INITIAL STOP : just beyond the recent 5m swing low/high (+ buffer).
 //   • SCALE-OUT    : close 50% (configurable) at 1.5R, then move the runner's stop to
 //                    BREAKEVEN, then trail it with a Chandelier Exit OR a 14-ATR stop.
@@ -97,7 +97,9 @@ allowShort      = input.bool(true,  "Allow shorts", group = g_entry)
 armValidityBars = input.int(10, "Pullback validity (bars)", minval = 1, group = g_entry, tooltip = "After a valid pullback is detected, the momentum trigger must fire within this many 5m bars, or the setup expires.")
 
 // Risk & sizing
-riskPercent  = input.float(0.5, "Risk per trade (% of equity)", minval = 0.01, step = 0.1, group = g_risk, tooltip = "Fixed-fractional risk. qty = (equity * risk%) / (stopDistance * pointValue). 0.5% is a conservative prop-firm default.")
+riskPercent  = input.float(0.5, "Risk per trade (%)", minval = 0.01, step = 0.1, group = g_risk, tooltip = "Fixed-fractional risk. qty = (risk base * risk%) / (stopDistance * pointValue). 0.5% is a conservative prop-firm default.")
+riskBase     = input.string("Initial Capital", "Risk base", options = ["Initial Capital", "Account Equity", "Fixed Balance"], group = g_risk, tooltip = "Balance the risk % is applied to. Initial Capital = the strategy's starting capital (Properties): fixed cash risk per trade, no compounding — the prop-firm rule (SPEC §8.1). Account Equity = current equity (compounds with wins and losses). Fixed Balance = the amount typed below.")
+fixedBal     = input.float(10000, "Fixed balance ($)", minval = 1, group = g_risk, tooltip = "Used only when Risk base = Fixed Balance.")
 swingLen     = input.int(10, "Swing lookback for initial stop (bars)", minval = 1, group = g_risk, tooltip = "Stop is placed beyond the lowest low / highest high of the last N bars (a proxy for the recent swing).")
 swingBufTick = input.int(4, "Stop buffer beyond swing (ticks)", minval = 0, group = g_risk)
 roundUnits   = input.bool(true, "Round position to whole units", group = g_risk, tooltip = "ON = integer contracts/shares. On futures (ES pointvalue 50) a small account can legitimately size to 0 contracts (correct, not a bug).")
@@ -347,12 +349,16 @@ canEnterBase = inDateRange and sessionOK and not haltedToday and tradesToday < m
 // =====================================================================================
 //  EXECUTION
 // =====================================================================================
+// Risk base (SPEC §8.1): by default the STARTING balance, so the cash risk per trade neither
+// compounds with wins nor shrinks with losses.
+riskBaseAmt = riskBase == "Fixed Balance" ? fixedBal : riskBase == "Account Equity" ? strategy.equity : strategy.initial_capital
+
 // ---- Entries (with fixed-% sizing) ----
 if longSignal and canEnterBase
     stopLvl  = math.min(swingLow - buf, close - syminfo.mintick)   // ensure stop sits below price
     stopDist = close - stopLvl
     if stopDist > 0
-        riskCash = strategy.equity * riskPercent / 100.0
+        riskCash = riskBaseAmt * riskPercent / 100.0
         rawQty   = riskCash / (stopDist * syminfo.pointvalue)
         qty      = roundUnits ? math.floor(rawQty) : rawQty
         if qty > 0
@@ -380,7 +386,7 @@ if shortSignal and canEnterBase
     stopLvl  = math.max(swingHigh + buf, close + syminfo.mintick)
     stopDist = stopLvl - close
     if stopDist > 0
-        riskCash = strategy.equity * riskPercent / 100.0
+        riskCash = riskBaseAmt * riskPercent / 100.0
         rawQty   = riskCash / (stopDist * syminfo.pointvalue)
         qty      = roundUnits ? math.floor(rawQty) : rawQty
         if qty > 0

@@ -44,6 +44,8 @@
 //       US500 CFD : Commission 0 unless the broker charges one · slippage = (spread / 2 +
 //                   expected slip) in ticks of the chart symbol (a round trip pays two fills)
 //     NOTE: S2 needs 20:00–00:00 ET data → SPY/SPX cannot run S2; use ES/MES or a US500 CFD.
+//   RISK BASE: every entry is sized from "Risk Per Trade (%)" of the Risk base — Initial Capital
+//     by default (fixed cash risk off the STARTING balance, the prop rule); Account Equity compounds.
 //   QUANTITY ROUNDING: "Auto" = whole contracts on futures; a size < 1 skips the trade.
 //   WEBHOOK ALERTS: JSON via alert() (create ONE alert with "alert() function calls only");
 //     S1 alerts carry strategy_id "ny_orb_fvg", S2 alerts "asian_sweep".
@@ -81,7 +83,9 @@ grpAlert    = "Alerts (webhook)"
 // ── Master / global ──
 s1_enable           = input.bool(true,  "Enable NY Breakout (S1)",  group = grpMaster)
 s2_enable           = input.bool(true,  "Enable Asian Sweep (S2)",  group = grpMaster)
-riskPct             = input.float(0.5, "Risk Per Trade (%) — both engines", minval = 0.1, step = 0.1, group = grpMaster, tooltip = "TRUE fixed-fractional risk applied to every entry from BOTH engines. Position size = (equity × this%) / (stop distance × point value). Keep ≤ 0.5% for prop-firm challenges.")
+riskPct             = input.float(0.5, "Risk Per Trade (%) — both engines", minval = 0.1, step = 0.1, group = grpMaster, tooltip = "TRUE fixed-fractional risk applied to every entry from BOTH engines. Position size = (risk base × this%) / (stop distance × point value). Keep ≤ 0.5% for prop-firm challenges.")
+riskBase            = input.string("Initial Capital", "Risk base", options = ["Initial Capital", "Account Equity", "Fixed Balance"], group = grpMaster, tooltip = "Balance the risk % is applied to. Initial Capital = the strategy's starting capital (Properties): fixed cash risk per trade, no compounding — the prop-firm rule (SPEC §8.1). Account Equity = current equity (compounds with wins and losses). Fixed Balance = the amount typed below.")
+fixedBal            = input.float(10000, "Fixed balance ($)", minval = 1, group = grpMaster, tooltip = "Used only when Risk base = Fixed Balance.")
 rr                  = input.float(2.0, "Reward : Risk — both engines", minval = 0.1, step = 0.1, group = grpMaster)
 maxConcurrentRiskPct= input.float(1.0, "Max concurrent open risk (%)", minval = 0.1, step = 0.1, group = grpMaster, tooltip = "If one engine is already open and the other fires, the new entry is blocked unless total OPEN risk stays ≤ this. With 0.5% per trade, 1.0% permits exactly two concurrent positions (same direction only — see header).")
 tz                  = input.string("America/New_York", "Exchange timezone", group = grpMaster, tooltip = "Keep as America/New_York for SPX/SPY. All session times are in this zone.")
@@ -327,8 +331,12 @@ s1_swLow   = ta.lowest(low,  s1_swingLen)
 s1_swHigh  = ta.highest(high, s1_swingLen)
 
 // ───────────────────────────── POSITION SIZING (true fixed-fractional risk) ─────────────────────────────
-f_qty(float estEntry, float estStop, float risk, float eq) =>
-    riskAmt = eq * (risk / 100.0)
+// Risk base (SPEC §8.1): by default the STARTING balance, so the cash risk per trade neither
+// compounds with wins nor shrinks with losses.
+riskBaseAmt = riskBase == "Fixed Balance" ? fixedBal : riskBase == "Account Equity" ? strategy.equity : strategy.initial_capital
+
+f_qty(float estEntry, float estStop, float risk, float baseAmt) =>
+    riskAmt = baseAmt * (risk / 100.0)
     dist    = math.max(math.abs(estEntry - estStop), syminfo.mintick)
     perUnit = dist * syminfo.pointvalue
     perUnit > 0 ? riskAmt / perUnit : 0.0
@@ -532,7 +540,7 @@ if s1_canEnter
                         estStop  = (s1_stopMethod == "ATR Based" and not na(s1_atrInit)) ? estEntry - s1_atrInit * s1_atrMultInit : b - s1_buffer
                         estStop := math.min(estStop, estEntry - syminfo.mintick)
                         s1_risk  = math.max(estEntry - estStop, syminfo.mintick)
-                        qty      = f_roundQty(f_qty(estEntry, estStop, riskPct, strategy.equity))
+                        qty      = f_roundQty(f_qty(estEntry, estStop, riskPct, riskBaseAmt))
                         if qty > 0
                             strategy.entry("S1 Long", strategy.long, qty = qty, comment = "S1 Long")
                             s1_inDir := 1
@@ -564,7 +572,7 @@ if s1_canEnter
                         estStop  = (s1_stopMethod == "ATR Based" and not na(s1_atrInit)) ? estEntry + s1_atrInit * s1_atrMultInit : t + s1_buffer
                         estStop := math.max(estStop, estEntry + syminfo.mintick)
                         s1_risk  = math.max(estStop - estEntry, syminfo.mintick)
-                        qty      = f_roundQty(f_qty(estEntry, estStop, riskPct, strategy.equity))
+                        qty      = f_roundQty(f_qty(estEntry, estStop, riskPct, riskBaseAmt))
                         if qty > 0
                             strategy.entry("S1 Short", strategy.short, qty = qty, comment = "S1 Short")
                             s1_inDir := -1
@@ -675,7 +683,7 @@ if s2_canEnter
         estStop  = (s2_stopMethod == "ATR Based" and not na(s2_atrInit)) ? estEntry - s2_atrInit * s2_atrMultInit : s2_armBot - s2_buffer
         estStop := math.min(estStop, estEntry - syminfo.mintick)
         s2_risk  = math.max(estEntry - estStop, syminfo.mintick)
-        qty      = f_roundQty(f_qty(estEntry, estStop, riskPct, strategy.equity))
+        qty      = f_roundQty(f_qty(estEntry, estStop, riskPct, riskBaseAmt))
         if qty > 0
             strategy.entry("S2 Long", strategy.long, qty = qty, comment = "S2 Long")
             s2_inDir := 1
@@ -696,7 +704,7 @@ if s2_canEnter
         estStop  = (s2_stopMethod == "ATR Based" and not na(s2_atrInit)) ? estEntry + s2_atrInit * s2_atrMultInit : s2_armTop + s2_buffer
         estStop := math.max(estStop, estEntry + syminfo.mintick)
         s2_risk  = math.max(estStop - estEntry, syminfo.mintick)
-        qty      = f_roundQty(f_qty(estEntry, estStop, riskPct, strategy.equity))
+        qty      = f_roundQty(f_qty(estEntry, estStop, riskPct, riskBaseAmt))
         if qty > 0
             strategy.entry("S2 Short", strategy.short, qty = qty, comment = "S2 Short")
             s2_inDir := -1

@@ -19,8 +19,10 @@
 //      stats table (All / In-Sample / Out-of-Sample scope).
 // -------------------------------------------------------------------------------------
 //  POSITION SIZING — TRUE FIXED-FRACTIONAL RISK:
-//        Every trade is sized from "Risk Per Trade (%)" of CURRENT equity and the initial
-//        stop distance, so each trade risks the SAME % whether the stop is tight or wide.
+//        Every trade is sized from "Risk Per Trade (%)" of the RISK BASE and the initial stop
+//        distance, so each trade risks the SAME % whether the stop is tight or wide. Risk base
+//        default = Initial Capital (fixed cash risk off the STARTING balance, the prop rule);
+//        "Account Equity" compounds, "Fixed Balance" uses a typed-in amount.
 //  HARD DAILY CIRCUIT BREAKERS (auto lockout):
 //        - Daily realized-loss limit (default −2%) blocks all new entries for the rest of
 //          the day once breached; - Consecutive-loss breaker (default 2) does the same on
@@ -96,7 +98,9 @@ allowLong   = input.bool(true, "Allow longs (sweep of Low)",   group = grpEntry)
 allowShort  = input.bool(true, "Allow shorts (sweep of High)", group = grpEntry)
 
 // Risk
-riskPct     = input.float(0.5, "Risk Per Trade (%)", minval = 0.1, step = 0.1, group = grpRisk, tooltip = "TRUE fixed-fractional risk. Position size is computed from this % of CURRENT equity and the initial stop distance, so every trade risks the same % regardless of stop width. Keep ≤ 0.5% for prop-firm challenges. (Risk compounds with equity; for fixed-dollar risk off the starting balance, replace strategy.equity with strategy.initial_capital in f_qty.)")
+riskPct     = input.float(0.5, "Risk Per Trade (%)", minval = 0.1, step = 0.1, group = grpRisk, tooltip = "TRUE fixed-fractional risk. Position size is computed from this % of the RISK BASE (see 'Risk base') and the initial stop distance, so every trade risks the same % regardless of stop width. Keep ≤ 0.5% for prop-firm challenges.")
+riskBase    = input.string("Initial Capital", "Risk base", options = ["Initial Capital", "Account Equity", "Fixed Balance"], group = grpRisk, tooltip = "Balance the risk % is applied to. Initial Capital = the strategy's starting capital (Properties): fixed cash risk per trade, no compounding — the prop-firm rule (SPEC §8.1). Account Equity = current equity (compounds with wins and losses). Fixed Balance = the amount typed below.")
+fixedBal    = input.float(10000, "Fixed balance ($)", minval = 1, group = grpRisk, tooltip = "Used only when Risk base = Fixed Balance.")
 rr          = input.float(2.0, "Reward : Risk", minval = 0.1, step = 0.1, group = grpRisk, tooltip = "Take-profit distance as a multiple of initial risk. 2 = 1:2 R/R. Adapts to whichever stop method is selected.")
 stopMethod  = input.string("FVG Buffer", "Initial stop method", options = ["FVG Buffer", "ATR Based"], group = grpRisk, tooltip = "FVG Buffer: stop just beyond the entry gap. ATR Based: stop = entry ± ATR×multiplier.")
 slBuf       = input.int(2, "FVG stop buffer (ticks)", minval = 0, group = grpRisk, tooltip = "FVG Buffer method: extra ticks placed beyond the gap edge for the stop.")
@@ -224,15 +228,19 @@ buffer  = slBuf * syminfo.mintick
 atrInit = ta.atr(atrLenInit)
 
 // ───────────────────────────── POSITION SIZING (true fixed-fractional risk) ─────────────────────────────
-// Returns the qty so that hitting the INITIAL stop loses exactly riskPct of CURRENT equity.
-//   riskAmt = equity × risk%        perUnitRisk = stopDistance × pointValue        qty = riskAmt / perUnitRisk
+// Risk base (SPEC §8.1): by default the STARTING balance, so the cash risk per trade neither
+// compounds with wins nor shrinks with losses.
+riskBaseAmt = riskBase == "Fixed Balance" ? fixedBal : riskBase == "Account Equity" ? strategy.equity : strategy.initial_capital
+
+// Returns the qty so that hitting the INITIAL stop loses exactly riskPct of the risk base.
+//   riskAmt = riskBase × risk%      perUnitRisk = stopDistance × pointValue        qty = riskAmt / perUnitRisk
 // Entry is a MARKET order, so the signal-bar close is the estimated fill used to size BEFORE
 // the fill exists (the most robust v5 approach). ATR-based stop distance is fill-independent
 // (= ATR×mult) so risk is essentially exact; the FVG-buffer distance carries one bar of drift.
 // Qty stays a float unless "Quantity rounding" asks for whole units (futures): f_roundQty
 // rounds DOWN, and a result < 1 makes the caller skip the trade (never rounds risk up).
-f_qty(float estEntry, float estStop, float risk, float eq) =>
-    riskAmt = eq * (risk / 100.0)
+f_qty(float estEntry, float estStop, float risk, float baseAmt) =>
+    riskAmt = baseAmt * (risk / 100.0)
     dist    = math.max(math.abs(estEntry - estStop), syminfo.mintick)   // floor prevents qty blow-up on a degenerate stop
     perUnit = dist * syminfo.pointvalue
     perUnit > 0 ? riskAmt / perUnit : 0.0
@@ -357,7 +365,7 @@ if canTrade and not tradedToday and not halted and strategy.position_size == 0 a
         // --- Fixed-fractional sizing (estimate the fill at the signal-bar close) ---
         estStop = (stopMethod == "ATR Based" and not na(atrInit)) ? close - atrInit * atrMultInit : armBot - buffer
         estStop := math.min(estStop, close - syminfo.mintick)
-        qty     = f_roundQty(f_qty(close, estStop, riskPct, strategy.equity))
+        qty     = f_roundQty(f_qty(close, estStop, riskPct, riskBaseAmt))
         if qty > 0
             estTP = close + rr * (close - estStop)
             strategy.entry("Long", strategy.long, qty = qty, comment = "Long")
@@ -380,7 +388,7 @@ if canTrade and not tradedToday and not halted and strategy.position_size == 0 a
         // --- Fixed-fractional sizing (estimate the fill at the signal-bar close) ---
         estStop = (stopMethod == "ATR Based" and not na(atrInit)) ? close + atrInit * atrMultInit : armTop + buffer
         estStop := math.max(estStop, close + syminfo.mintick)
-        qty     = f_roundQty(f_qty(close, estStop, riskPct, strategy.equity))
+        qty     = f_roundQty(f_qty(close, estStop, riskPct, riskBaseAmt))
         if qty > 0
             estTP = close - rr * (estStop - close)
             strategy.entry("Short", strategy.short, qty = qty, comment = "Short")

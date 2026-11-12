@@ -20,7 +20,7 @@
 //   • Take profit  : the LIVE 20-SMA Bollinger basis (dynamic mean-reversion target),
 //                    clamped so it can never sit on the losing side of the entry.
 //   • Sizing       : TRUE fixed-fractional — quantity is solved so a full stop-out loses
-//                    ≈ Risk% of current equity (the SL distance defines the size).
+//                    ≈ Risk% of the risk base — Initial Capital by default (the SL distance defines the size).
 //   • Time filter  : trade only inside [10:00 , 15:45] exchange time (skip the noisy open).
 //   • Daily breaker: latch-HALT new entries (and optionally flatten) once the day's equity
 //                    drawdown — including open P&L — exceeds the user threshold. Resets daily.
@@ -98,7 +98,9 @@ allowLong      = input.bool(true,  "Allow longs (fade lower band)",             
 allowShort     = input.bool(true,  "Allow shorts (fade upper band)",                     group = grpFilter)
 
 // Risk management
-riskPct      = input.float(1.0, "Risk per trade (% of equity)",                 minval = 0.01, step = 0.1, group = grpRisk, tooltip = "True fixed-fractional sizing. Quantity is solved so a full stop-out loses ≈ this % of current equity (before slippage/commission).")
+riskPct      = input.float(1.0, "Risk per trade (%)",                           minval = 0.01, step = 0.1, group = grpRisk, tooltip = "True fixed-fractional sizing. Quantity is solved so a full stop-out loses ≈ this % of the risk base (before slippage/commission).")
+riskBase     = input.string("Initial Capital", "Risk base", options = ["Initial Capital", "Account Equity", "Fixed Balance"], group = grpRisk, tooltip = "Balance the risk % is applied to. Initial Capital = the strategy's starting capital (Properties): fixed cash risk per trade, no compounding — the prop-firm rule (SPEC §8.1). Account Equity = current equity (compounds with wins and losses). Fixed Balance = the amount typed below.")
+fixedBal     = input.float(10000, "Fixed balance ($)", minval = 1, group = grpRisk, tooltip = "Used only when Risk base = Fixed Balance.")
 maxDailyLoss = input.float(3.0, "Max daily loss halt (% of day-start equity)",  minval = 0.1,  step = 0.1, group = grpRisk, tooltip = "Once the day's equity drawdown (including open P&L) reaches this, NEW entries are blocked until the next session. Mirrors a prop-firm daily loss limit.")
 closeOnHalt  = input.bool(true,  "Flatten open trade when daily halt triggers",              group = grpRisk, tooltip = "Prop-firm-safe: close any open position the moment the daily loss limit is breached.")
 qtyRound     = input.string("Auto", "Quantity rounding", options = ["Auto", "Whole units", "Fractional"], group = grpRisk, tooltip = "Auto = whole contracts on futures (syminfo.type == futures), fractional otherwise. Sizes are always rounded DOWN; a rounded size < 1 skips the trade.")
@@ -149,11 +151,15 @@ showLevels  = input.bool(true,  "Show active stop / target",       group = grpVi
 alertToken = input.string("", "Webhook token", group = grpAlert, tooltip = "Webhook-only random value (NOT a login or API key). Must match the receiver. Create ONE alert: condition = this strategy, 'alert() function calls only', webhook URL = receiver. Re-create the alert after changing any input.")
 
 // ───────────────────────────── POSITION SIZING HELPER ─────────────────────────────
-// Solve quantity from the STOP DISTANCE so a full stop-out ≈ riskPct of equity.
+// Risk base (SPEC §8.1): by default the STARTING balance, so the cash risk per trade neither
+// compounds with wins nor shrinks with losses.
+riskBaseAmt = riskBase == "Fixed Balance" ? fixedBal : riskBase == "Account Equity" ? strategy.equity : strategy.initial_capital
+
+// Solve quantity from the STOP DISTANCE so a full stop-out ≈ riskPct of the risk base.
 //   loss_at_stop = qty × stopDistance(points) × pointvalue  ->  qty = riskCapital / (dist × pv)
 // Rounds DOWN to whole units when requested (futures); a result < 1 skips the trade (qty > 0 gate).
 f_qtyFromDist(_distPoints) =>
-    _riskCapital = strategy.equity * (riskPct / 100.0)
+    _riskCapital = riskBaseAmt * (riskPct / 100.0)
     _perUnit     = _distPoints * syminfo.pointvalue
     _raw         = _perUnit > 0 ? _riskCapital / _perUnit : 0.0
     _whole       = qtyRound == "Whole units" or (qtyRound == "Auto" and syminfo.type == "futures")
