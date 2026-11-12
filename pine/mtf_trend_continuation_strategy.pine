@@ -509,17 +509,15 @@ if inShort
         f_alert("stop_update", "short", strategy.position_avg_price, curStopS, tp1Filled ? na : activeTP1)
 
 // ---- Forced exits ----
-if useDailyLoss and flatOnDailyLoss and dailyLossHit and strategy.position_size != 0
-    strategy.close_all(comment = "Daily loss halt")
-
-// session.islastbar also covers half days; immediately = fill at this bar's close (on an
-// RTH-only chart the next open would be the next session)
-if flatAtEnd and ((useSession and curMin >= sEnd) or session.islastbar) and strategy.position_size != 0
+// One reason per bar, always filled at THIS bar's close (immediately = true; on an RTH-only chart
+// the next bar's open would be the next session), each with an "exit" alert:
+//   - daily-loss breaker hit, when "Force flat when daily loss is hit" is on
+//   - session end (session.islastbar also covers half days)
+//   - past the backtest End date
+flatReason = (useDailyLoss and flatOnDailyLoss and dailyLossHit) ? "Daily loss halt" : (flatAtEnd and ((useSession and curMin >= sEnd) or session.islastbar)) ? "Session end" : time > endDate ? "End of test range" : ""
+if flatReason != "" and strategy.position_size != 0
     f_alert("exit", strategy.position_size > 0 ? "long" : "short", close, na, na)
-    strategy.close_all(comment = "Session end", immediately = true)
-
-if time > endDate and strategy.position_size != 0
-    strategy.close_all(comment = "End of test range")
+    strategy.close_all(comment = flatReason, immediately = true)
 
 // (State reset after a closed trade now runs BEFORE the entry block — see "Reset state once
 // the previous trade is over".)

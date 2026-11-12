@@ -8,9 +8,10 @@
 //    • S2 — ASIAN RANGE SWEEP & REVERSAL (mean-reversion / liquidity fade, fixed 1:2)
 // -------------------------------------------------------------------------------------
 //  WHAT THIS SCRIPT ADDS OVER THE TWO STANDALONE VERSIONS
-//   1. GLOBAL CIRCUIT BREAKERS (the shield): one combined daily realized-loss tracker and
-//      one combined consecutive-loss counter across BOTH engines. Tripping either halts
-//      ALL new entries (S1 AND S2) for the rest of the NY day; resets next day.
+//   1. GLOBAL CIRCUIT BREAKERS (the shield): one combined daily loss tracker (realized, or
+//      floating on bar-close equity) and one combined consecutive-loss counter across BOTH
+//      engines. Tripping either halts ALL new entries (S1 AND S2) for the rest of the NY day;
+//      resets next day. A daily-loss breach can also flatten both open legs at once (input).
 //   2. INDEPENDENT TOGGLES: enable / disable S1 and S2 separately for testing.
 //   3. CONFLICT RESOLUTION: every variable is prefixed s1_ / s2_ so the two engines never
 //      overwrite each other. Concurrent open risk is capped (default 1.0%).
@@ -93,7 +94,8 @@ qtyRound            = input.string("Auto", "Quantity rounding — both engines",
 
 // ── Global circuit breakers ──
 useBreakers   = input.bool(true, "Enable global daily circuit breakers", group = grpBrk, tooltip = "When ON, the engine blocks ALL new entries (S1 AND S2) for the rest of the NY day once a combined daily limit is breached, then resets next day. Detection/visuals keep running so skipped setups are still drawn.")
-dailyDDPct    = input.float(2.0, "Combined daily max realized loss (%)", minval = 0.1, step = 0.1, group = grpBrk, tooltip = "Halts everything once the COMBINED realized net loss for the day (S1+S2, incl. commission) reaches this % of the day's starting equity (capped at initial capital = the more conservative $ limit). Keep well under the firm's hard daily wall.")
+dailyDDPct    = input.float(2.0, "Combined daily max loss (%)", minval = 0.1, step = 0.1, group = grpBrk, tooltip = "Halts everything once the COMBINED net loss for the day (S1+S2) — realized (incl. commission) or floating (bar-close equity, incl. open legs) — reaches this % of the day's starting equity (capped at initial capital = the more conservative $ limit). Keep well under the firm's hard daily wall.")
+flattenBreach = input.bool(true, "Flatten open trade on breach", group = grpBrk, tooltip = "When the daily loss limit is breached, close BOTH open legs at that bar's close. Checked on bar close: an intrabar breach is only seen once the bar has closed.")
 maxConsecLoss = input.int(2, "Combined consecutive losses to halt", minval = 1, group = grpBrk, tooltip = "Halts everything after this many losing trades in a row on the same day, counted ACROSS both engines in close order (toxic-regime guard).")
 
 // ── Backtest date range / OOS splitter (shared) ──
@@ -456,11 +458,19 @@ if strategy.closedtrades > g_lastClosed
 g_baseEq    = na(g_dayStartEquity) ? strategy.initial_capital : math.min(g_dayStartEquity, strategy.initial_capital)
 g_lossCap   = g_baseEq * (dailyDDPct / 100.0)
 g_realPnL   = na(g_dayStartNet) ? 0.0 : strategy.netprofit - g_dayStartNet
-if g_realPnL <= -g_lossCap
+// Floating check: bar-close equity includes the OPEN legs' P&L (seen on bar close, not intrabar).
+g_eqPnL     = na(g_dayStartEquity) ? 0.0 : strategy.equity - g_dayStartEquity
+if math.min(g_realPnL, g_eqPnL) <= -g_lossCap
     g_haltedDD := true
 if g_consecLoss >= maxConsecLoss
     g_haltedStreak := true
 halted = useBreakers and (g_haltedDD or g_haltedStreak)
+
+// Portfolio-level forced flat (executed at the bottom of the script): a daily-loss breach with
+// "Flatten open trade on breach", or a bar past the End date. On such a bar the per-engine
+// session-end closes below stand down, so every leg gets exactly one close order and one alert.
+g_flatDD    = useBreakers and flattenBreach and g_haltedDD
+g_forceFlat = (g_flatDD or time > endDate) and strategy.position_size != 0
 
 // Opposite-direction overlap is blocked using the per-leg direction flags (s1_inDir / s2_inDir),
 // which are same-bar accurate — unlike strategy.position_size, which lags a same-bar fill. The
@@ -625,7 +635,7 @@ else if s1_inDir == -1
 
 // S1 force flat at its session end (immediately = fill at this bar's close, not the next
 // bar's open, which on an RTH-only chart would be the next session)
-if s1_closeAtEnd and s1_atSessionEnd and s1_inDir != 0
+if s1_closeAtEnd and s1_atSessionEnd and s1_inDir != 0 and not g_forceFlat
     f_alert("ny_orb_fvg", "exit", s1_inDir == 1 ? "long" : "short", "", close, na, na)
     strategy.close(s1_inDir == 1 ? "S1 Long" : "S1 Short", comment = "S1 EOD", immediately = true)
 
@@ -739,13 +749,20 @@ else if s2_inDir == -1
 
 // S2 force flat at its active session end (first bar after the window, or the chart session's
 // last bar inside it); immediately = fill at this bar's close
-if s2_closeAtEnd and s2_activeExit and s2_inDir != 0
+if s2_closeAtEnd and s2_activeExit and s2_inDir != 0 and not g_forceFlat
     f_alert("asian_sweep", "exit", s2_inDir == 1 ? "long" : "short", "", close, na, na)
     strategy.close(s2_inDir == 1 ? "S2 Long" : "S2 Short", comment = "S2 session end", immediately = true)
 
-// ───────────────────────────── END OF TEST RANGE ─────────────────────────────
-if time > endDate and strategy.position_size != 0
-    strategy.close_all(comment = "End of test range")
+// ───────────────────────────── FORCED FLAT: DAILY-LOSS BREACH / END OF TEST RANGE ─────────────────────────────
+// Closes BOTH legs at THIS bar's close (immediately = true) with one "exit" alert per open leg.
+// g_forceFlat is computed with the breakers above.
+if g_forceFlat
+    g_side = strategy.position_size > 0 ? "long" : "short"
+    if s1_isOpen
+        f_alert("ny_orb_fvg", "exit", g_side, "", close, na, na)
+    if s2_isOpen
+        f_alert("asian_sweep", "exit", g_side, "", close, na, na)
+    strategy.close_all(comment = g_flatDD ? "Daily DD halt" : "End of test range", immediately = true)
 
 // ───────────────────────────── DATE-RANGE / OOS VISUALS ─────────────────────────────
 bgcolor(showDateViz and not inDateRange       ? color.new(color.gray, 92) : na, title = "Out of date range")

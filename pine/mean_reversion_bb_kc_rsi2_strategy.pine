@@ -311,19 +311,15 @@ if strategy.position_size < 0 and inDir == -1
     strategy.exit("Exit S", from_entry = "Short", stop = inStop, limit = tpS)
 
 // ───────────────────────────── FORCED EXITS ─────────────────────────────
-// Flatten at session end. session.islastbar also covers half days; immediately = fill at
-// this bar's close (on an RTH-only chart the next open would be the next session).
-if closeAtEnd and (atOrPastEnd or session.islastbar) and strategy.position_size != 0
+// One reason per bar, always filled at THIS bar's close (immediately = true; on an RTH-only chart
+// the next bar's open would be the next session), each with an "exit" alert:
+//   - session end (session.islastbar also covers half days)
+//   - daily loss breaker tripped, when "Flatten open trade when daily halt triggers" is on
+//   - past the backtest end date
+flatReason = (closeAtEnd and (atOrPastEnd or session.islastbar)) ? "Session end" : (closeOnHalt and dailyHalt) ? "Daily loss halt" : time > endTime ? "End of range" : ""
+if flatReason != "" and strategy.position_size != 0
     f_alert("exit", strategy.position_size > 0 ? "long" : "short", close, na, na)
-    strategy.close_all(comment = "Session end", immediately = true)
-
-// Flatten the instant the daily loss breaker trips
-if closeOnHalt and dailyHalt and strategy.position_size != 0
-    strategy.close_all(comment = "Daily loss halt")
-
-// Flatten past the backtest end date
-if time > endTime and strategy.position_size != 0
-    strategy.close_all(comment = "End of range")
+    strategy.close_all(comment = flatReason, immediately = true)
 
 // ───────────────────────────── RESET STATE WHEN FLAT ─────────────────────────────
 if strategy.position_size == 0 and inDir != 0

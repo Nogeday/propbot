@@ -464,11 +464,16 @@ if strategy.position_size == 0 and phase == 3
 dailyPnL    = strategy.equity - dayStartEq
 dailyPnLPct = dayStartEq > 0 ? dailyPnL / dayStartEq * 100.0 : 0.0
 
+// One forced close + "exit" alert per bar, always filled at THIS bar's close (immediately = true).
+bool flatSent = false
+
 if useDailyDD and not haltedToday and dailyPnLPct <= -maxDailyDDPct
     haltedToday := true
     haltReason  := "Daily DD limit"
     if flattenBreach and strategy.position_size != 0
-        strategy.close_all(comment = "Daily DD halt")
+        f_alert("exit", strategy.position_size > 0 ? "long" : "short", "market", close, na, na)
+        strategy.close_all(comment = "Daily DD halt", immediately = true)
+        flatSent := true
     strategy.cancel("Long")
     strategy.cancel("Short")
     if strategy.position_size == 0      // never pull the stop of an open position
@@ -484,8 +489,10 @@ ddPeakPct = peakEq > 0 ? (strategy.equity - peakEq) / peakEq * 100.0 : 0.0
 if useOverallDD and not haltedPerma and ddPeakPct <= -maxOverallPct
     haltedPerma := true
     haltReason  := "Overall DD limit"
-    if flattenBreach and strategy.position_size != 0
-        strategy.close_all(comment = "Overall DD halt")
+    if flattenBreach and strategy.position_size != 0 and not flatSent
+        f_alert("exit", strategy.position_size > 0 ? "long" : "short", "market", close, na, na)
+        strategy.close_all(comment = "Overall DD halt", immediately = true)
+        flatSent := true
     strategy.cancel("Long")
     strategy.cancel("Short")
     if strategy.position_size == 0
@@ -495,13 +502,12 @@ if useOverallDD and not haltedPerma and ddPeakPct <= -maxOverallPct
             f_alert("cancel", dir == -1 ? "short" : "long", "limit", entryLevel, stopLevel, tpLevel)
 
 // ───────────────────────────── INTRADAY / END-OF-RANGE FLATTEN ─────────────────────────────
-// session.islastbar also flattens on half days; immediately = fill at this bar's close
-if closeAtDayEnd and strategy.position_size != 0 and (curMin >= flatMin or session.islastbar)
+// Day-end flat (session.islastbar also covers half days) or a bar past the End date: one reason
+// per bar, filled at THIS bar's close (immediately = true) with an "exit" alert.
+flatReason = (closeAtDayEnd and (curMin >= flatMin or session.islastbar)) ? "EOD flat" : time > endDate ? "End of range" : ""
+if flatReason != "" and strategy.position_size != 0 and not flatSent
     f_alert("exit", strategy.position_size > 0 ? "long" : "short", "market", close, na, na)
-    strategy.close_all(comment = "EOD flat", immediately = true)
-
-if time > endDate and strategy.position_size != 0
-    strategy.close_all(comment = "End of range")
+    strategy.close_all(comment = flatReason, immediately = true)
 
 // ───────────────────────────── DATE-RANGE / OOS VISUALS ─────────────────────────────
 bgcolor(showDateViz and not inDateRange       ? color.new(color.gray, 92) : na, title = "Out of date range")

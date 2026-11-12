@@ -20,8 +20,9 @@
 //        default = Initial Capital (fixed cash risk off the STARTING balance, the prop rule);
 //        "Account Equity" compounds, "Fixed Balance" uses a typed-in amount.
 //   • HARD DAILY CIRCUIT BREAKERS (auto lockout):
-//        - Daily realized-loss limit (default −2%): once the day's realized net loss
-//          (incl. commission) reaches the limit, ALL new entries are blocked till next day.
+//        - Daily loss limit (default −2%): once the day's net loss — realized (incl. commission)
+//          or floating (bar-close equity incl. the open trade) — reaches the limit, ALL new
+//          entries are blocked till next day; optionally the open trade is flattened at once.
 //        - Consecutive-loss breaker (default 2): N losing trades in a row on the same day
 //          also halts new entries (toxic-regime guard).
 //        - On a trip, a red wash + a "🛑 TRADING HALTED" label + a bottom-of-chart banner
@@ -113,7 +114,8 @@ qtyRound    = input.string("Auto", "Quantity rounding", options = ["Auto", "Whol
 
 // Circuit breakers (hard daily lockout)
 useBreakers   = input.bool(true, "Enable hard daily circuit breakers", group = grpBrk, tooltip = "When ON, the engine automatically blocks ALL new entries for the rest of the day once a daily risk limit is breached, then resets the next day. Detection / visuals keep running so you still SEE the setups that were skipped.")
-dailyDDPct    = input.float(2.0, "Daily max realized loss (%)", minval = 0.1, step = 0.1, group = grpBrk, tooltip = "Halts new entries once the day's REALIZED net loss (incl. commission) reaches this % of the day's starting equity (capped at initial capital = the more conservative $ limit). Keep well under the firm's hard daily wall (e.g. 2% internal vs a 5% firm limit).")
+dailyDDPct    = input.float(2.0, "Daily max loss (%)", minval = 0.1, step = 0.1, group = grpBrk, tooltip = "Halts new entries once the day's net loss — REALIZED (incl. commission) or FLOATING (bar-close equity, incl. the open trade) — reaches this % of the day's starting equity (capped at initial capital = the more conservative $ limit). Keep well under the firm's hard daily wall (e.g. 2% internal vs a 5% firm limit).")
+flattenBreach = input.bool(true, "Flatten open trade on breach", group = grpBrk, tooltip = "When the daily loss limit is breached, close the open position at that bar's close. Checked on bar close: an intrabar breach is only seen once the bar has closed.")
 maxConsecLoss = input.int(2, "Consecutive losses to halt", minval = 1, group = grpBrk, tooltip = "Halts new entries after this many losing trades in a row on the SAME day (toxic-regime guard). NOTE: with the built-in one-trade-per-day cap, this can only trip if you raise that cap or run at portfolio level; under 1 trade/day the daily-loss breaker is the active guard.")
 
 // Trailing
@@ -268,7 +270,8 @@ f_alert(string action, string side, string setup, float estEntry, float stop, fl
     alert(j, alert.freq_once_per_bar_close)
 
 // ───────────────────────────── CIRCUIT BREAKERS (hard daily lockout) ─────────────────────────────
-// Tracks the day's REALIZED net P&L (incl. commission) plus a consecutive-loss counter.
+// Tracks the day's net P&L — realized (incl. commission) and floating (bar-close equity) —
+// plus a consecutive-loss counter.
 // Once tripped, the engine blocks ALL new entries for the rest of the day; everything resets
 // the next day. Detection/visuals keep running so skipped setups are still drawn.
 // IMPORTANT: under the built-in one-trade-per-day cap and ~riskPct per trade, a single
@@ -279,7 +282,7 @@ var float dayStartEquity  = na
 var float dayStartNet     = na
 var int   consecLossToday = 0
 var int   lastClosedCount = 0
-var bool  haltedDD        = false   // tripped by the daily realized-loss limit
+var bool  haltedDD        = false   // tripped by the daily loss limit (realized or floating)
 var bool  haltedStreak    = false   // tripped by consecutive losses
 
 // (re)baseline at the start of each calendar trading day
@@ -303,7 +306,9 @@ if strategy.closedtrades > lastClosedCount
 dayBaseEq    = na(dayStartEquity) ? strategy.initial_capital : math.min(dayStartEquity, strategy.initial_capital)
 dailyLossCap = dayBaseEq * (dailyDDPct / 100.0)
 dailyRealPnL = na(dayStartNet) ? 0.0 : strategy.netprofit - dayStartNet
-if dailyRealPnL <= -dailyLossCap
+// Floating check: bar-close equity includes the OPEN trade's P&L (seen on bar close, not intrabar).
+dailyEqPnL   = na(dayStartEquity) ? 0.0 : strategy.equity - dayStartEquity
+if math.min(dailyRealPnL, dailyEqPnL) <= -dailyLossCap
     haltedDD := true
 if consecLossToday >= maxConsecLoss
     haltedStreak := true
@@ -492,15 +497,15 @@ if strategy.position_size < 0 and inDir == -1
     if inTrailStop < prevTrailS
         f_alert("stop_update", "short", "", avg, inTrailStop, inTakeProfit)
 
-// Force flat at session end (immediately = fill at this bar's close, not the next bar's open,
-// which on an RTH-only chart would be the next session)
-if closeAtEnd and atSessionEnd and strategy.position_size != 0
+// Forced flats — one reason per bar, always filled at THIS bar's close (immediately = true; the
+// next bar's open could be the next session on an RTH-only chart), each with an "exit" alert:
+//   - session end (">=" + session.islastbar also covers half days and a missing sessEnd bar)
+//   - daily-loss breach, when "Flatten open trade on breach" is on
+//   - past the backtest End date
+flatReason = (closeAtEnd and atSessionEnd) ? "EOD close" : (useBreakers and flattenBreach and haltedDD) ? "Daily DD halt" : time > endDate ? "End of test range" : ""
+if flatReason != "" and strategy.position_size != 0
     f_alert("exit", strategy.position_size > 0 ? "long" : "short", "", close, na, na)
-    strategy.close_all(comment = "EOD close", immediately = true)
-
-// Stop trading outside the backtest date range (close anything still open past the End date)
-if time > endDate and strategy.position_size != 0
-    strategy.close_all(comment = "End of test range")
+    strategy.close_all(comment = flatReason, immediately = true)
 
 // Reset management vars ONLY after a trade has actually closed. On the signal bar the market
 // entry is still pending (position_size == 0), so a plain "flat" test would wipe inDir before
