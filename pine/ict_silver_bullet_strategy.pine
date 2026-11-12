@@ -120,7 +120,7 @@ flattenBreach  = input.bool(true, "Flatten open trade on breach", group = grpGua
 maxConsec      = input.int(3, "Max consecutive losses", minval = 1, group = grpGuard, tooltip = "A losing streak of this length halts NEW trades for the day.")
 resetConsecDay = input.bool(true, "Reset the streak each new day", group = grpGuard, tooltip = "ON = 'consecutive losses within a day'. OFF = the streak carries across days.")
 maxTrWindow    = input.int(1, "Max trades per window", minval = 1, group = grpGuard, tooltip = "1 = one A+ setup per Silver Bullet window (recommended).")
-maxTrDay       = input.int(2, "Max trades per day", minval = 1, group = grpGuard)
+maxTrDay       = input.int(1, "Max trades per day", minval = 1, group = grpGuard, tooltip = "1 = at most one trade per day (SPEC §3.1). With both windows enabled, the PM window is skipped once the AM window has traded.")
 useOverallDD   = input.bool(true, "Use overall drawdown limit", group = grpGuard)
 maxOverallPct  = input.float(8.0, "Overall drawdown limit (%)", minval = 0.1, step = 0.1, group = grpGuard, tooltip = "Peak-to-equity drop past this % STOPS the strategy entirely. Keep below your firm's max overall DD.")
 closeAtDayEnd  = input.bool(true, "Flatten before the cash close", group = grpGuard)

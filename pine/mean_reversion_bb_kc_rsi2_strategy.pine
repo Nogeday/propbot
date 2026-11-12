@@ -24,6 +24,7 @@
 //   • Time filter  : trade only inside [10:00 , 15:45] exchange time (skip the noisy open).
 //   • Daily breaker: latch-HALT new entries (and optionally flatten) once the day's equity
 //                    drawdown — including open P&L — exceeds the user threshold. Resets daily.
+//   • Trade cap    : at most "Max trades per day" new entries per NY calendar day (default 1).
 //   • Date filter  : Year/Month/Day → Year/Month/Day backtest window.
 //
 //  NO-REPAINT GUARANTEES  (read this before changing the fill model)
@@ -103,6 +104,7 @@ riskBase     = input.string("Initial Capital", "Risk base", options = ["Initial 
 fixedBal     = input.float(10000, "Fixed balance ($)", minval = 1, group = grpRisk, tooltip = "Used only when Risk base = Fixed Balance.")
 maxDailyLoss = input.float(2.0, "Max daily loss halt (% of day-start equity)",  minval = 0.1,  step = 0.1, group = grpRisk, tooltip = "Once the day's equity drawdown (including open P&L) reaches this, NEW entries are blocked until the next session. Mirrors a prop-firm daily loss limit.")
 closeOnHalt  = input.bool(true,  "Flatten open trade when daily halt triggers",              group = grpRisk, tooltip = "Prop-firm-safe: close any open position the moment the daily loss limit is breached.")
+maxTradesDay = input.int(1, "Max trades per day", minval = 1, group = grpRisk, tooltip = "Hard cap on new entries per NY calendar day. 1 = one trade per strategy per day (SPEC §3.1).")
 qtyRound     = input.string("Auto", "Quantity rounding", options = ["Auto", "Whole units", "Fractional"], group = grpRisk, tooltip = "Auto = whole contracts on futures (syminfo.type == futures), fractional otherwise. Sizes are always rounded DOWN; a rounded size < 1 skips the trade.")
 
 // Time filter
@@ -239,6 +241,11 @@ if isNewDay
 if dayDDPct >= maxDailyLoss
     dailyHalt := true
 
+// Daily trade counter: entries submitted today (resets on the NY-calendar day change)
+var int tradesToday = 0
+if isNewDay
+    tradesToday := 0
+
 // ───────────────────────────── OPEN-TRADE STATE ─────────────────────────────
 var int   inDir     = 0     // 1 long / -1 short while a position is open
 var float inStop    = na    // fixed initial stop, finalized from the actual fill price
@@ -270,7 +277,7 @@ longConfirm  = longSetup[1]  and close > bbLower and trendOkLong  and confLongOk
 shortConfirm = shortSetup[1] and close < bbUpper and trendOkShort and confShortOk
 
 // Master permission to open a NEW position
-tradingAllowed = inDateRange and sessOk and dayOK and not dailyHalt and strategy.position_size == 0
+tradingAllowed = inDateRange and sessOk and dayOK and not dailyHalt and tradesToday < maxTradesDay and strategy.position_size == 0
 goLong  = tradingAllowed and longConfirm
 goShort = tradingAllowed and shortConfirm
 
@@ -331,6 +338,7 @@ if goLong
         array.push(stopArr, estStopL)    // record at signal; refined on the fill bar
         array.push(dirArr, 1)
         f_alert("entry", "long", close, estStopL, estTpL)
+        tradesToday += 1
 if goShort
     qtyS = f_qtyFromDist(atrMult * atrVal)
     if qtyS > 0
@@ -342,6 +350,7 @@ if goShort
         array.push(stopArr, estStopS)
         array.push(dirArr, -1)
         f_alert("entry", "short", close, estStopS, estTpS)
+        tradesToday += 1
 
 // ───────────────────────────── VISUALS ─────────────────────────────
 // Bollinger Bands + fill
