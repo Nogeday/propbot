@@ -28,10 +28,12 @@
 //   This is a sandbox limitation, not a design choice. For truly independent long+short legs
 //   you would run two separate accounts/algos with a broker-side daily-loss limit.
 //
-//   Each leg's stop & 1:2 target are FIXED at the signal-bar close (estimated fill), because
-//   strategy.position_avg_price is the BLENDED average of both legs and cannot size each leg
-//   individually. Realized risk per leg is ~exact for the ATR stop and carries one bar of
-//   drift for the FVG-buffer stop (inherent to market orders).
+//   Each leg's bracket is placed on the signal bar from the estimated fill (bar close) and is
+//   RE-PRICED on the fill bar from that leg's REAL fill price, read per leg with
+//   strategy.opentrades.entry_price() (strategy.position_avg_price is the BLENDED average of
+//   both legs and cannot be used). Same rule as the standalone scripts: the FVG-buffer stop is
+//   structural (unchanged), the ATR stop is a distance re-applied to the fill, and the target
+//   is fill ± rr × actual risk. Sizing still uses the signal-bar estimate (market orders).
 //
 //   Commission/Slippage are pre-filled with realistic defaults; confirm them for your symbol.
 //   COSTS PER INSTRUMENT — strategy() cost fields are constants, so set them in Properties.
@@ -193,7 +195,9 @@ var int[]   s1_aState   = array.new_int()
 var int[]   s1_aFormBar = array.new_int()
 var int[]   s1_aFlipBar = array.new_int()
 var int   s1_inDir         = 0
-var float s1_entryEst      = na
+var float s1_fillPrice     = na    // real fill price of the S1 leg (na until its fill bar)
+var float s1_inFvgStop     = na    // FVG-buffer stop level captured at signal time (structural)
+var float s1_inAtrDist     = na    // ATR-method stop distance captured at signal time
 var float s1_inInitialStop = na
 var float s1_inTakeProfit  = na
 var float s1_inTrailStop   = na
@@ -217,7 +221,9 @@ var float s2_armTop = na
 var float s2_armBot = na
 var int   s2_armBar = na
 var int   s2_inDir         = 0
-var float s2_entryEst      = na
+var float s2_fillPrice     = na    // real fill price of the S2 leg (na until its fill bar)
+var float s2_inFvgStop     = na    // FVG-buffer stop level captured at signal time (structural)
+var float s2_inAtrDist     = na    // ATR-method stop distance captured at signal time
 var float s2_inInitialStop = na
 var float s2_inTakeProfit  = na
 var int   s2_entryBar      = na
@@ -348,29 +354,68 @@ f_pcol(float v) => v > 0 ? color.new(color.green, 0) : v < 0 ? color.new(color.r
 
 // ───────────────────────────── OPEN-STATE SCAN + PER-LEG CLOSE DETECTION ─────────────────────────────
 // Because S1 and S2 can be open at once, we cannot use strategy.position_size to know which
-// leg is open. We scan open trades by their entry id, then clear a leg's state once it has
-// actually left the book (with a 1-bar guard for the entry-fill lag).
+// leg is open. We scan open trades by their entry id (reading each leg's own fill price on the
+// way), then clear a leg's state once it has actually left the book (with a 1-bar guard for
+// the entry-fill lag).
 s1_isOpen = false
 s2_isOpen = false
+float s1_openPrice = na
+float s2_openPrice = na
 if strategy.opentrades > 0
     for oi = 0 to strategy.opentrades - 1
         oid = strategy.opentrades.entry_id(oi)
         if str.startswith(oid, "S1")
             s1_isOpen := true
+            s1_openPrice := strategy.opentrades.entry_price(oi)
         else if str.startswith(oid, "S2")
             s2_isOpen := true
+            s2_openPrice := strategy.opentrades.entry_price(oi)
 
 if s1_inDir != 0 and bar_index > s1_entryBar and not s1_isOpen
     s1_inDir := 0
-    s1_entryEst      := na
+    s1_fillPrice     := na
+    s1_inFvgStop     := na
+    s1_inAtrDist     := na
     s1_inInitialStop := na
     s1_inTakeProfit  := na
     s1_inTrailStop   := na
 if s2_inDir != 0 and bar_index > s2_entryBar and not s2_isOpen
     s2_inDir := 0
-    s2_entryEst      := na
+    s2_fillPrice     := na
+    s2_inFvgStop     := na
+    s2_inAtrDist     := na
     s2_inInitialStop := na
     s2_inTakeProfit  := na
+
+// ───────────────────────────── FILL-BAR RE-PRICING (parity with the standalone scripts) ─────────────────────────────
+// On the first bar a leg is on the book, move its stop/TP from the signal-bar estimate to the
+// leg's REAL fill price (SPEC §3.1): FVG-buffer stop = structural level (unchanged), ATR stop =
+// signal-bar distance re-applied to the fill, TP = fill ± rr × actual risk; the stop is kept at
+// least 1 tick on the losing side. The engine blocks below re-issue the exits with the same
+// ids, which modifies the resting bracket in place.
+if s1_inDir != 0 and s1_isOpen and na(s1_fillPrice)
+    s1_fillPrice := s1_openPrice
+    if s1_inDir == 1
+        s1_rawStop = (s1_stopMethod == "ATR Based" and not na(s1_atrInit)) ? s1_fillPrice - s1_inAtrDist : s1_inFvgStop
+        s1_inInitialStop := math.min(s1_rawStop, s1_fillPrice - syminfo.mintick)
+        s1_inTakeProfit  := s1_fillPrice + rr * (s1_fillPrice - s1_inInitialStop)
+    else
+        s1_rawStop = (s1_stopMethod == "ATR Based" and not na(s1_atrInit)) ? s1_fillPrice + s1_inAtrDist : s1_inFvgStop
+        s1_inInitialStop := math.max(s1_rawStop, s1_fillPrice + syminfo.mintick)
+        s1_inTakeProfit  := s1_fillPrice - rr * (s1_inInitialStop - s1_fillPrice)
+    s1_inTrailStop := s1_inInitialStop                                         // seed the trail
+    array.set(s1_stopQueue, array.size(s1_stopQueue) - 1, s1_inInitialStop)    // refine the signal-bar record
+if s2_inDir != 0 and s2_isOpen and na(s2_fillPrice)
+    s2_fillPrice := s2_openPrice
+    if s2_inDir == 1
+        s2_rawStop = (s2_stopMethod == "ATR Based" and not na(s2_atrInit)) ? s2_fillPrice - s2_inAtrDist : s2_inFvgStop
+        s2_inInitialStop := math.min(s2_rawStop, s2_fillPrice - syminfo.mintick)
+        s2_inTakeProfit  := s2_fillPrice + rr * (s2_fillPrice - s2_inInitialStop)
+    else
+        s2_rawStop = (s2_stopMethod == "ATR Based" and not na(s2_atrInit)) ? s2_fillPrice + s2_inAtrDist : s2_inFvgStop
+        s2_inInitialStop := math.max(s2_rawStop, s2_fillPrice + syminfo.mintick)
+        s2_inTakeProfit  := s2_fillPrice - rr * (s2_inInitialStop - s2_fillPrice)
+    array.set(s2_stopQueue, array.size(s2_stopQueue) - 1, s2_inInitialStop)
 
 // ───────────────────────────── GLOBAL CIRCUIT BREAKERS ─────────────────────────────
 // strategy.netprofit / strategy.closedtrades already aggregate BOTH engines, so the combined
@@ -491,7 +536,9 @@ if s1_canEnter
                         if qty > 0
                             strategy.entry("S1 Long", strategy.long, qty = qty, comment = "S1 Long")
                             s1_inDir := 1
-                            s1_entryEst      := estEntry
+                            s1_fillPrice     := na                  // set on the fill bar
+                            s1_inFvgStop     := b - s1_buffer       // structural level, kept at the fill
+                            s1_inAtrDist     := estEntry - estStop  // ATR method: distance re-applied to the fill
                             s1_inInitialStop := estStop
                             s1_inTrailStop   := estStop
                             s1_inTakeProfit  := estEntry + rr * s1_risk
@@ -521,7 +568,9 @@ if s1_canEnter
                         if qty > 0
                             strategy.entry("S1 Short", strategy.short, qty = qty, comment = "S1 Short")
                             s1_inDir := -1
-                            s1_entryEst      := estEntry
+                            s1_fillPrice     := na
+                            s1_inFvgStop     := t + s1_buffer
+                            s1_inAtrDist     := estStop - estEntry
                             s1_inInitialStop := estStop
                             s1_inTrailStop   := estStop
                             s1_inTakeProfit  := estEntry - rr * s1_risk
@@ -533,27 +582,28 @@ if s1_canEnter
                             label.new(bar_index, t, st == 1 ? "S1 IFVG ▼" : "S1 FVG ▼", style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.small)
                         break
 
-// S1 trade management (initial stop fixed at entry + 1:2 TP + optional trailing)
+// S1 trade management (bracket re-priced on the fill bar above + 1:2 TP + optional trailing).
+// Trailing starts only once the leg is filled and is measured from its REAL fill price.
 if s1_inDir == 1
-    riskL = math.max(s1_entryEst - s1_inInitialStop, syminfo.mintick)
     prevTrailL = s1_inTrailStop
-    if s1_useTrail
-        cand = s1_trailMode == "Swing (1m structure)" ? s1_swLow - s1_buffer : s1_trailMode == "ATR step" ? close - s1_atrT * s1_atrMultT : close * (1 - s1_trailPct / 100)
-        if (close - s1_entryEst) >= s1_trailActR * riskL
+    if s1_useTrail and not na(s1_fillPrice)
+        riskL = math.max(s1_fillPrice - s1_inInitialStop, syminfo.mintick)
+        cand  = s1_trailMode == "Swing (1m structure)" ? s1_swLow - s1_buffer : s1_trailMode == "ATR step" ? close - s1_atrT * s1_atrMultT : close * (1 - s1_trailPct / 100)
+        if (close - s1_fillPrice) >= s1_trailActR * riskL
             s1_inTrailStop := math.max(s1_inTrailStop, cand)
     strategy.exit("S1 ExitL", from_entry = "S1 Long", stop = s1_inTrailStop, limit = s1_inTakeProfit)
-    if bar_index > s1_entryBar and s1_inTrailStop > prevTrailL
-        f_alert("ny_orb_fvg", "stop_update", "long", "", s1_entryEst, s1_inTrailStop, s1_inTakeProfit)
+    if s1_inTrailStop > prevTrailL
+        f_alert("ny_orb_fvg", "stop_update", "long", "", s1_fillPrice, s1_inTrailStop, s1_inTakeProfit)
 else if s1_inDir == -1
-    riskS = math.max(s1_inInitialStop - s1_entryEst, syminfo.mintick)
     prevTrailS = s1_inTrailStop
-    if s1_useTrail
-        cand = s1_trailMode == "Swing (1m structure)" ? s1_swHigh + s1_buffer : s1_trailMode == "ATR step" ? close + s1_atrT * s1_atrMultT : close * (1 + s1_trailPct / 100)
-        if (s1_entryEst - close) >= s1_trailActR * riskS
+    if s1_useTrail and not na(s1_fillPrice)
+        riskS = math.max(s1_inInitialStop - s1_fillPrice, syminfo.mintick)
+        cand  = s1_trailMode == "Swing (1m structure)" ? s1_swHigh + s1_buffer : s1_trailMode == "ATR step" ? close + s1_atrT * s1_atrMultT : close * (1 + s1_trailPct / 100)
+        if (s1_fillPrice - close) >= s1_trailActR * riskS
             s1_inTrailStop := math.min(s1_inTrailStop, cand)
     strategy.exit("S1 ExitS", from_entry = "S1 Short", stop = s1_inTrailStop, limit = s1_inTakeProfit)
-    if bar_index > s1_entryBar and s1_inTrailStop < prevTrailS
-        f_alert("ny_orb_fvg", "stop_update", "short", "", s1_entryEst, s1_inTrailStop, s1_inTakeProfit)
+    if s1_inTrailStop < prevTrailS
+        f_alert("ny_orb_fvg", "stop_update", "short", "", s1_fillPrice, s1_inTrailStop, s1_inTakeProfit)
 
 // S1 force flat at its session end (immediately = fill at this bar's close, not the next
 // bar's open, which on an RTH-only chart would be the next session)
@@ -629,7 +679,9 @@ if s2_canEnter
         if qty > 0
             strategy.entry("S2 Long", strategy.long, qty = qty, comment = "S2 Long")
             s2_inDir := 1
-            s2_entryEst      := estEntry
+            s2_fillPrice     := na                       // set on the fill bar
+            s2_inFvgStop     := s2_armBot - s2_buffer    // structural level, kept at the fill
+            s2_inAtrDist     := estEntry - estStop       // ATR method: distance re-applied to the fill
             s2_inInitialStop := estStop
             s2_inTakeProfit  := estEntry + rr * s2_risk
             s2_entryBar      := bar_index
@@ -648,7 +700,9 @@ if s2_canEnter
         if qty > 0
             strategy.entry("S2 Short", strategy.short, qty = qty, comment = "S2 Short")
             s2_inDir := -1
-            s2_entryEst      := estEntry
+            s2_fillPrice     := na
+            s2_inFvgStop     := s2_armTop + s2_buffer
+            s2_inAtrDist     := estStop - estEntry
             s2_inInitialStop := estStop
             s2_inTakeProfit  := estEntry - rr * s2_risk
             s2_entryBar      := bar_index
@@ -659,7 +713,7 @@ if s2_canEnter
             if s2_showZones and inDateRange
                 label.new(bar_index, s2_armBot, "S2 ▼", style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.tiny)
 
-// S2 trade management (initial stop fixed at entry + fixed 1:2 TP; no trailing)
+// S2 trade management (bracket re-priced on the fill bar above + fixed 1:2 TP; no trailing)
 if s2_inDir == 1
     strategy.exit("S2 ExitL", from_entry = "S2 Long", stop = s2_inInitialStop, limit = s2_inTakeProfit)
 else if s2_inDir == -1
