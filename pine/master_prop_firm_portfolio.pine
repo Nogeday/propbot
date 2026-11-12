@@ -132,6 +132,7 @@ s1_atrLenT   = input.int(14, "S1 trailing ATR length", minval = 1, group = grpS1
 s1_atrMultT  = input.float(1.5, "S1 trailing ATR multiplier", minval = 0.1, step = 0.1, group = grpS1trail)
 s1_trailPct  = input.float(0.3, "S1 trail distance %", minval = 0.01, step = 0.01, group = grpS1trail)
 s1_trailActR = input.float(1.0, "S1 start trailing after (R)", minval = 0.0, step = 0.1, group = grpS1trail)
+s1_trailMinStepTicks = input.int(4, "S1 min trail step (ticks)", minval = 1, group = grpS1trail, tooltip = "The S1 trailing stop (and its stop_update alert) only moves when the new level improves the current stop by at least this many ticks. Default 4 = trail_min_step_ticks in config/risk.yaml (request budget: at most one stop update per bar, in meaningful steps).")
 
 // ── S1 day filter ──
 s1_tradeMon = input.bool(true, "S1 Monday",    group = grpS1dow)
@@ -336,6 +337,7 @@ if s2_asianEndBar and not na(s2_asianHigh)
 // ───────────────────────────── INDICATORS ─────────────────────────────
 s1_buffer  = s1_slBuf * syminfo.mintick
 s2_buffer  = s2_slBuf * syminfo.mintick
+s1_trailMinStep = s1_trailMinStepTicks * syminfo.mintick   // minimum trailing improvement, in price units
 s1_atrT    = ta.atr(s1_atrLenT)
 s1_atrInit = ta.atr(s1_atrLenInit)
 s2_atrInit = ta.atr(s2_atrLenInit)
@@ -617,8 +619,9 @@ if s1_inDir == 1
     if s1_useTrail and not na(s1_fillPrice)
         riskL = math.max(s1_fillPrice - s1_inInitialStop, syminfo.mintick)
         cand  = s1_trailMode == "Swing (1m structure)" ? s1_swLow - s1_buffer : s1_trailMode == "ATR step" ? close - s1_atrT * s1_atrMultT : close * (1 - s1_trailPct / 100)
-        if (close - s1_fillPrice) >= s1_trailActR * riskL
-            s1_inTrailStop := math.max(s1_inTrailStop, cand)
+        // only ever moves up, and only in steps of at least s1_trailMinStepTicks
+        if (close - s1_fillPrice) >= s1_trailActR * riskL and cand - s1_inTrailStop >= s1_trailMinStep
+            s1_inTrailStop := cand
     strategy.exit("S1 ExitL", from_entry = "S1 Long", stop = s1_inTrailStop, limit = s1_inTakeProfit)
     if s1_inTrailStop > prevTrailL
         f_alert("ny_orb_fvg", "stop_update", "long", "", s1_fillPrice, s1_inTrailStop, s1_inTakeProfit)
@@ -627,8 +630,9 @@ else if s1_inDir == -1
     if s1_useTrail and not na(s1_fillPrice)
         riskS = math.max(s1_inInitialStop - s1_fillPrice, syminfo.mintick)
         cand  = s1_trailMode == "Swing (1m structure)" ? s1_swHigh + s1_buffer : s1_trailMode == "ATR step" ? close + s1_atrT * s1_atrMultT : close * (1 + s1_trailPct / 100)
-        if (s1_fillPrice - close) >= s1_trailActR * riskS
-            s1_inTrailStop := math.min(s1_inTrailStop, cand)
+        // only ever moves down, and only in steps of at least s1_trailMinStepTicks
+        if (s1_fillPrice - close) >= s1_trailActR * riskS and s1_inTrailStop - cand >= s1_trailMinStep
+            s1_inTrailStop := cand
     strategy.exit("S1 ExitS", from_entry = "S1 Short", stop = s1_inTrailStop, limit = s1_inTakeProfit)
     if s1_inTrailStop < prevTrailS
         f_alert("ny_orb_fvg", "stop_update", "short", "", s1_fillPrice, s1_inTrailStop, s1_inTakeProfit)

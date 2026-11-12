@@ -26,6 +26,7 @@
 //   • INITIAL STOP : just beyond the recent 5m swing low/high (+ buffer).
 //   • SCALE-OUT    : close 50% (configurable) at 1.5R, then move the runner's stop to
 //                    BREAKEVEN, then trail it with a Chandelier Exit OR a 14-ATR stop.
+//                    After the breakeven move the trail advances only in steps of >= N ticks (default 4).
 //   • PLAN B       : if integer sizing yields an ODD / 1-contract position (no clean
 //                    50/50 split for futures), the scale-out is skipped and the FULL
 //                    position is run as the runner (initial stop until 1.5R, then BE+trail).
@@ -112,6 +113,7 @@ chLen        = input.int(22, "Chandelier length (highest + ATR)", minval = 1, gr
 chMult       = input.float(3.0, "Chandelier ATR multiplier", minval = 0.1, step = 0.1, group = g_scale)
 atrTrailLen  = input.int(14, "ATR trailing length", minval = 1, group = g_scale)
 atrTrailMult = input.float(2.5, "ATR trailing multiplier", minval = 0.1, step = 0.1, group = g_scale)
+trailMinStepTicks = input.int(4, "Min trail step (ticks)", minval = 1, group = g_scale, tooltip = "After the first move to breakeven, the runner stop (and its stop_update alert) only moves when the new level improves the current stop by at least this many ticks. Default 4 = trail_min_step_ticks in config/risk.yaml (request budget: at most one stop update per bar, in meaningful steps).")
 
 // Daily limits & circuit breakers
 maxTradesDay   = input.int(1, "Max trades per day", minval = 1, group = g_limit, tooltip = "Hard cap on new entries per NY calendar day to avoid overtrading chop. 1 = one trade per strategy per day (SPEC §3.1).")
@@ -195,6 +197,7 @@ volOK   = useVolFilter ? (not na(volAvg) and volume < volAvg) : true
 swingLow  = ta.lowest(low,  swingLen)
 swingHigh = ta.highest(high, swingLen)
 buf       = swingBufTick * syminfo.mintick
+trailMinStep = trailMinStepTicks * syminfo.mintick   // minimum trailing improvement, in price units
 
 atrCh   = ta.atr(chLen)
 atrTr   = ta.atr(atrTrailLen)
@@ -440,8 +443,12 @@ if inLong
         if not tp1Filled and high >= activeTP1
             tp1Filled := true                          // 1.5R reached (no contracts taken off)
         if tp1Filled
-            be = strategy.position_avg_price
-            runnerStop := math.max(runnerStop, math.max(be, trailLong))
+            be   = strategy.position_avg_price
+            cand = math.max(be, trailLong)
+            if runnerStop < be                             // first move: straight to breakeven (or the trail, if higher)
+                runnerStop := cand
+            else if cand - runnerStop >= trailMinStep      // afterwards: only in steps of >= trailMinStepTicks
+                runnerStop := cand
         if not tp1Filled
             strategy.exit("Stop", from_entry = "Long", stop = activeInitStop, comment = "Init stop")
         else
@@ -452,8 +459,12 @@ if inLong
         if not tp1Filled and not na(entryQty) and math.abs(strategy.position_size) < entryQty * 0.95
             tp1Filled := true                          // TP1 partial filled
         if tp1Filled
-            be = strategy.position_avg_price
-            runnerStop := math.max(runnerStop, math.max(be, trailLong))
+            be   = strategy.position_avg_price
+            cand = math.max(be, trailLong)
+            if runnerStop < be                             // first move: straight to breakeven (or the trail, if higher)
+                runnerStop := cand
+            else if cand - runnerStop >= trailMinStep      // afterwards: only in steps of >= trailMinStepTicks
+                runnerStop := cand
         if not tp1Filled
             strategy.exit("TP1",  from_entry = "Long", qty_percent = scaleOutPct,       stop = activeInitStop, limit = activeTP1, comment = "TP1")
             strategy.exit("Init", from_entry = "Long", qty_percent = 100 - scaleOutPct, stop = activeInitStop, comment = "Init stop")
@@ -484,8 +495,12 @@ if inShort
         if not tp1Filled and low <= activeTP1
             tp1Filled := true
         if tp1Filled
-            be = strategy.position_avg_price
-            runnerStop := math.min(runnerStop, math.min(be, trailShort))
+            be   = strategy.position_avg_price
+            cand = math.min(be, trailShort)
+            if runnerStop > be                             // first move: straight to breakeven (or the trail, if lower)
+                runnerStop := cand
+            else if runnerStop - cand >= trailMinStep      // afterwards: only in steps of >= trailMinStepTicks
+                runnerStop := cand
         if not tp1Filled
             strategy.exit("Stop", from_entry = "Short", stop = activeInitStop, comment = "Init stop")
         else
@@ -496,8 +511,12 @@ if inShort
         if not tp1Filled and not na(entryQty) and math.abs(strategy.position_size) < entryQty * 0.95
             tp1Filled := true
         if tp1Filled
-            be = strategy.position_avg_price
-            runnerStop := math.min(runnerStop, math.min(be, trailShort))
+            be   = strategy.position_avg_price
+            cand = math.min(be, trailShort)
+            if runnerStop > be                             // first move: straight to breakeven (or the trail, if lower)
+                runnerStop := cand
+            else if runnerStop - cand >= trailMinStep      // afterwards: only in steps of >= trailMinStepTicks
+                runnerStop := cand
         if not tp1Filled
             strategy.exit("TP1",  from_entry = "Short", qty_percent = scaleOutPct,       stop = activeInitStop, limit = activeTP1, comment = "TP1")
             strategy.exit("Init", from_entry = "Short", qty_percent = 100 - scaleOutPct, stop = activeInitStop, comment = "Init stop")
