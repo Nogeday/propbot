@@ -1,6 +1,6 @@
 //@version=5
 // =====================================================================================
-//  NY OPEN — 5m Opening Range + FVG / IFVG Strategy   (S&P 500: SPY / SPX)
+//  NY OPEN — 5m Opening Range + FVG / IFVG Strategy   (S&P 500: MES / ES / US500.cash / SPY)
 //  Built for a 1-MINUTE chart. Switch the chart to 1m before backtesting.
 // -------------------------------------------------------------------------------------
 //  LOGIC
@@ -27,15 +27,17 @@
 //          also halts new entries (toxic-regime guard).
 //        - On a trip, a red wash + a "🛑 TRADING HALTED" label + a bottom-of-chart banner
 //          show exactly why a valid FVG setup was skipped.
-//   • REALISTIC FRICTION DEFAULTS (slippage + non-zero commission) so the backtest is not
-//        a "zero-fee" illusion. Tune to your instrument/broker in Properties.
-//   • COSTS PER INSTRUMENT — strategy() cost fields are constants, so set them in Properties.
-//        TradingView charges commission on EACH fill (entry and exit separately) and adds
-//        slippage only to market and stop fills (never to limit fills).
-//          SPY / ETF : Commission "% of value" per side (default 0.01) · slippage 1 tick
-//          MES / ES  : Commission "cash per contract" = your broker's PER-SIDE rate · slippage 1 tick
+//   • COSTS — DEFAULTS = MES PROFILE (CME_MINI:MES1!): commission "cash per contract" $0.50 PER
+//        SIDE ($1.00 round turn) + 1 tick slippage, so the script can be pasted and tested on MES
+//        without touching Properties. strategy() cost fields are constants: for any other
+//        instrument change them in Properties —
+//          ES        : Commission "cash per contract" = your broker's PER-SIDE rate · slippage 1 tick
 //          US500 CFD : Commission 0 unless the broker charges one · slippage = (spread / 2 +
 //                      expected slip) in ticks of the chart symbol (a round trip pays two fills)
+//          SPY / ETF : Commission "% of value" per side (e.g. 0.01) · slippage 1 tick. The cash
+//                      default would charge $0.50 PER SHARE, so it MUST be changed on SPY.
+//        TradingView charges commission on EACH fill (entry and exit separately) and adds
+//        slippage only to market and stop fills (never to limit fills).
 //   • QUANTITY ROUNDING: "Auto" = whole contracts on futures; a size < 1 skips the trade.
 //   • WEBHOOK ALERTS: JSON via alert() (create the alert with "alert() function calls only").
 //   • TRAIL MIN STEP: the trailing stop (and its stop_update alert) moves only when it improves
@@ -51,9 +53,9 @@ strategy(title              = "NY Open ORB + FVG/IFVG Strategy",
          initial_capital    = 10000,
          default_qty_type   = strategy.fixed,   // fallback only; every entry passes an explicit qty
          default_qty_value  = 1,
-         commission_type    = strategy.commission.percent,
-         commission_value   = 0.01,             // 0.01% PER SIDE (≈0.02% round turn). SPY profile — see COSTS in the header.
-         slippage           = 1,                // ticks per market/stop fill. Test 2–3 for fast/news bars.
+         commission_type    = strategy.commission.cash_per_contract,
+         commission_value   = 0.50,             // MES profile: $0.50 per contract PER SIDE ($1.00 round turn) — see COSTS in the header
+         slippage           = 1,                // ticks per market/stop fill (MES tick = 0.25 pt = $1.25). Test 2–3 for fast/news bars.
          max_boxes_count    = 500,
          max_lines_count    = 500,
          max_labels_count   = 500)

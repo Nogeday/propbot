@@ -1,6 +1,6 @@
 //@version=5
 // =====================================================================================
-//  MASTER PROP FIRM PORTFOLIO   (S&P 500: SPY / SPX)   ·   1-MINUTE chart only
+//  MASTER PROP FIRM PORTFOLIO   (S&P 500: MES / ES / US500.cash / SPY)   ·   1-MINUTE chart only
 //  Merges two non-correlated edges into ONE script so a single GLOBAL risk shield can
 //  govern both (TradingView sandboxes are isolated — merging is the only way to get
 //  true portfolio-level daily risk management).
@@ -36,15 +36,20 @@
 //   structural (unchanged), the ATR stop is a distance re-applied to the fill, and the target
 //   is fill ± rr × actual risk. Sizing still uses the signal-bar estimate (market orders).
 //
-//   Commission/Slippage are pre-filled with realistic defaults; confirm them for your symbol.
-//   COSTS PER INSTRUMENT — strategy() cost fields are constants, so set them in Properties.
-//     TradingView charges commission on EACH fill (entry and exit separately) and adds
-//     slippage only to market and stop fills (never to limit fills).
-//       SPY / ETF : Commission "% of value" per side (default 0.01) · slippage 1 tick
-//       MES / ES  : Commission "cash per contract" = your broker's PER-SIDE rate · slippage 1 tick
+//   INSTRUMENT — S2 needs a ~23-HOUR session: its Asian range is 20:00–00:00 ET, which only
+//     futures (MES / ES) and US500 CFDs print. On SPY / SPX there are no bars there: S2 never
+//     trades and only S1 runs.
+//   COSTS — DEFAULTS = MES PROFILE (CME_MINI:MES1!): commission "cash per contract" $0.50 PER SIDE
+//     ($1.00 round turn) + 1 tick slippage, so the script can be pasted and tested on MES without
+//     touching Properties. strategy() cost fields are constants: for any other instrument change
+//     them in Properties —
+//       ES        : Commission "cash per contract" = your broker's PER-SIDE rate · slippage 1 tick
 //       US500 CFD : Commission 0 unless the broker charges one · slippage = (spread / 2 +
 //                   expected slip) in ticks of the chart symbol (a round trip pays two fills)
-//     NOTE: S2 needs 20:00–00:00 ET data → SPY/SPX cannot run S2; use ES/MES or a US500 CFD.
+//       SPY / ETF : Commission "% of value" per side (e.g. 0.01) · slippage 1 tick. The cash
+//                   default would charge $0.50 PER SHARE, so it MUST be changed on SPY.
+//     TradingView charges commission on EACH fill (entry and exit separately) and adds
+//     slippage only to market and stop fills (never to limit fills).
 //   RISK BASE: every entry is sized from "Risk Per Trade (%)" of the Risk base — Initial Capital
 //     by default (fixed cash risk off the STARTING balance, the prop rule); Account Equity compounds.
 //   QUANTITY ROUNDING: "Auto" = whole contracts on futures; a size < 1 skips the trade.
@@ -59,9 +64,9 @@ strategy(title              = "Master Prop Firm Portfolio (S1 ORB + S2 Sweep)",
          initial_capital    = 10000,
          default_qty_type   = strategy.fixed,   // fallback only; every entry passes an explicit qty
          default_qty_value  = 1,
-         commission_type    = strategy.commission.percent,
-         commission_value   = 0.01,             // 0.01% PER SIDE (≈0.02% round turn). SPY profile — see COSTS in the header.
-         slippage           = 1,                // ticks per market/stop fill. Test 2–3 for fast/news bars.
+         commission_type    = strategy.commission.cash_per_contract,
+         commission_value   = 0.50,             // MES profile: $0.50 per contract PER SIDE ($1.00 round turn) — see COSTS in the header
+         slippage           = 1,                // ticks per market/stop fill (MES tick = 0.25 pt = $1.25). Test 2–3 for fast/news bars.
          max_boxes_count    = 500,
          max_lines_count    = 500,
          max_labels_count   = 500)

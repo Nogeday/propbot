@@ -1,6 +1,6 @@
 //@version=5
 // =====================================================================================
-//  ASIAN RANGE LIQUIDITY SWEEP & REVERSAL   (S&P 500: SPY / SPX)
+//  ASIAN RANGE LIQUIDITY SWEEP & REVERSAL   (S&P 500: MES / ES / US500.cash)
 //  Built for a 1-MINUTE chart. Designed as a non-correlated companion to the NY-open
 //  breakout strategy: it FADES failed breaks of the Asian range instead of chasing them.
 // -------------------------------------------------------------------------------------
@@ -29,15 +29,18 @@
 //          new entries for the rest of the day once breached and can flatten the open trade;
 //          - Consecutive-loss breaker (default 2) does the same on
 //          a toxic streak; - a red wash + "🛑 TRADING HALTED" label + bottom banner show why.
-//  REALISTIC FRICTION DEFAULTS (slippage + non-zero commission). Tune in Properties.
-//  COSTS PER INSTRUMENT — strategy() cost fields are constants, so set them in Properties.
-//        TradingView charges commission on EACH fill (entry and exit separately) and adds
-//        slippage only to market and stop fills (never to limit fills).
-//          SPY / ETF : Commission "% of value" per side (default 0.01) · slippage 1 tick
-//          MES / ES  : Commission "cash per contract" = your broker's PER-SIDE rate · slippage 1 tick
+//  INSTRUMENT — needs a ~23-HOUR session: the Asian range is 20:00–00:00 ET, which only futures
+//        (MES / ES) and US500 CFDs print. SPY / SPX have no bars there, so the range never forms
+//        and this script cannot trade on them.
+//  COSTS — DEFAULTS = MES PROFILE (CME_MINI:MES1!): commission "cash per contract" $0.50 PER SIDE
+//        ($1.00 round turn) + 1 tick slippage, so the script can be pasted and tested on MES
+//        without touching Properties. strategy() cost fields are constants: for any other
+//        instrument change them in Properties —
+//          ES        : Commission "cash per contract" = your broker's PER-SIDE rate · slippage 1 tick
 //          US500 CFD : Commission 0 unless the broker charges one · slippage = (spread / 2 +
 //                      expected slip) in ticks of the chart symbol (a round trip pays two fills)
-//        NOTE: SPY/SPX have no 20:00–00:00 ET data → use a ~23h instrument (ES/MES, US500 CFD).
+//        TradingView charges commission on EACH fill (entry and exit separately) and adds
+//        slippage only to market and stop fills (never to limit fills).
 //  QUANTITY ROUNDING: "Auto" = whole contracts on futures; a size < 1 skips the trade.
 //  WEBHOOK ALERTS: JSON via alert() (create the alert with "alert() function calls only").
 //  NOTE: keep the Asian and Active windows non-overlapping.
@@ -50,9 +53,9 @@ strategy(title              = "Asian Range Liquidity Sweep & Reversal",
          initial_capital    = 10000,
          default_qty_type   = strategy.fixed,   // fallback only; every entry passes an explicit qty
          default_qty_value  = 1,
-         commission_type    = strategy.commission.percent,
-         commission_value   = 0.01,             // 0.01% PER SIDE (≈0.02% round turn). SPY profile — see COSTS in the header.
-         slippage           = 1,                // ticks per market/stop fill. Test 2–3 for fast/news bars.
+         commission_type    = strategy.commission.cash_per_contract,
+         commission_value   = 0.50,             // MES profile: $0.50 per contract PER SIDE ($1.00 round turn) — see COSTS in the header
+         slippage           = 1,                // ticks per market/stop fill (MES tick = 0.25 pt = $1.25). Test 2–3 for fast/news bars.
          max_boxes_count    = 500,
          max_lines_count    = 500,
          max_labels_count   = 500)

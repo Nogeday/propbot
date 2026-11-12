@@ -41,14 +41,17 @@
 //       this is cosmetic only and never alters a historical signal or trade.
 //   • Set realistic Commission / Slippage in the strategy "Properties" tab to match broker.
 //
-//  COSTS PER INSTRUMENT — strategy() cost fields are constants, so set them in Properties.
-//   TradingView charges commission on EACH fill (entry and exit separately) and adds
-//   slippage only to market and stop fills (never to limit fills such as the basis target).
-//     SPY / ETF : Commission "% of value" per side · slippage 1 tick
-//     MES / ES  : Commission "cash per contract" = your broker's PER-SIDE rate · slippage 1 tick
+//  COSTS — DEFAULTS = MES PROFILE (CME_MINI:MES1!): commission "cash per contract" $0.50 PER SIDE
+//   ($1.00 round turn) + 1 tick slippage, so the script can be pasted and tested on MES without
+//   touching Properties. strategy() cost fields are constants: for any other instrument change
+//   them in Properties —
+//     ES        : Commission "cash per contract" = your broker's PER-SIDE rate · slippage 1 tick
 //     US500 CFD : Commission 0 unless the broker charges one · slippage = (spread / 2 +
 //                 expected slip) in ticks of the chart symbol (a round trip pays two fills)
-//   The 0.02 % default below is a PLACEHOLDER, not a calibrated value.
+//     SPY / ETF : Commission "% of value" per side · slippage 1 tick. The cash default would
+//                 charge $0.50 PER SHARE, so it MUST be changed on SPY.
+//   TradingView charges commission on EACH fill (entry and exit separately) and adds
+//   slippage only to market and stop fills (never to limit fills such as the basis target).
 //  QUANTITY ROUNDING: "Auto" = whole contracts on futures; a size < 1 skips the trade.
 //  WEBHOOK ALERTS: JSON via alert() (create the alert with "alert() function calls only").
 // =====================================================================================
@@ -60,9 +63,9 @@ strategy(title                   = "Mean Reversion BB/KC + RSI(2) Fade",
          initial_capital         = 10000,
          default_qty_type        = strategy.fixed,
          default_qty_value       = 1,
-         commission_type         = strategy.commission.percent,
-         commission_value        = 0.02,   // placeholder — % PER SIDE; calibrate to your instrument/broker (see COSTS)
-         slippage                = 2,       // ticks per market/stop fill — calibrate to realistic index spread
+         commission_type         = strategy.commission.cash_per_contract,
+         commission_value        = 0.50,    // MES profile: $0.50 per contract PER SIDE ($1.00 round turn) — see COSTS in the header
+         slippage                = 1,       // MES profile: 1 tick per market/stop fill (MES tick = 0.25 pt = $1.25)
          calc_on_every_tick      = false,   // no intrabar recalculation -> no signal repaint
          process_orders_on_close = false,   // entries fill next open; stops/limits stay intrabar
          max_lines_count         = 500,
