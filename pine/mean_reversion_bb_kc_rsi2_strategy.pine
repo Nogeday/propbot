@@ -98,10 +98,10 @@ allowLong      = input.bool(true,  "Allow longs (fade lower band)",             
 allowShort     = input.bool(true,  "Allow shorts (fade upper band)",                     group = grpFilter)
 
 // Risk management
-riskPct      = input.float(1.0, "Risk per trade (%)",                           minval = 0.01, step = 0.1, group = grpRisk, tooltip = "True fixed-fractional sizing. Quantity is solved so a full stop-out loses ≈ this % of the risk base (before slippage/commission).")
+riskPct      = input.float(0.5, "Risk per trade (%)",                           minval = 0.01, step = 0.1, group = grpRisk, tooltip = "True fixed-fractional sizing. Quantity is solved so a full stop-out loses ≈ this % of the risk base (before slippage/commission). Keep ≤ 0.5% (SPEC §8.1 cap).")
 riskBase     = input.string("Initial Capital", "Risk base", options = ["Initial Capital", "Account Equity", "Fixed Balance"], group = grpRisk, tooltip = "Balance the risk % is applied to. Initial Capital = the strategy's starting capital (Properties): fixed cash risk per trade, no compounding — the prop-firm rule (SPEC §8.1). Account Equity = current equity (compounds with wins and losses). Fixed Balance = the amount typed below.")
 fixedBal     = input.float(10000, "Fixed balance ($)", minval = 1, group = grpRisk, tooltip = "Used only when Risk base = Fixed Balance.")
-maxDailyLoss = input.float(3.0, "Max daily loss halt (% of day-start equity)",  minval = 0.1,  step = 0.1, group = grpRisk, tooltip = "Once the day's equity drawdown (including open P&L) reaches this, NEW entries are blocked until the next session. Mirrors a prop-firm daily loss limit.")
+maxDailyLoss = input.float(2.0, "Max daily loss halt (% of day-start equity)",  minval = 0.1,  step = 0.1, group = grpRisk, tooltip = "Once the day's equity drawdown (including open P&L) reaches this, NEW entries are blocked until the next session. Mirrors a prop-firm daily loss limit.")
 closeOnHalt  = input.bool(true,  "Flatten open trade when daily halt triggers",              group = grpRisk, tooltip = "Prop-firm-safe: close any open position the moment the daily loss limit is breached.")
 qtyRound     = input.string("Auto", "Quantity rounding", options = ["Auto", "Whole units", "Fractional"], group = grpRisk, tooltip = "Auto = whole contracts on futures (syminfo.type == futures), fractional otherwise. Sizes are always rounded DOWN; a rounded size < 1 skips the trade.")
 

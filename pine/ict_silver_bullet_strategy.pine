@@ -101,7 +101,7 @@ entryFill     = input.string("50% (Consequent Encroachment)", "FVG entry level",
 maxBarsToFill = input.int(20, "Max bars for limit to fill", minval = 1, group = grpFvg, tooltip = "Safety cap. The order is also cancelled the moment the window closes.")
 
 // ── 4) Risk & sizing
-riskPct     = input.float(1.0, "Risk per trade (%)", minval = 0.01, step = 0.05, group = grpRisk, tooltip = "Cash risked per trade as a % of the chosen balance. Position size is SOLVED from this and the stop distance.")
+riskPct     = input.float(0.5, "Risk per trade (%)", minval = 0.01, step = 0.05, group = grpRisk, tooltip = "Cash risked per trade as a % of the chosen balance. Position size is SOLVED from this and the stop distance. Keep ≤ 0.5% (SPEC §8.1 cap).")
 riskBase    = input.string("Initial Capital", "Risk base", options = ["Initial Capital", "Account Equity", "Fixed Balance"], group = grpRisk, tooltip = "Balance the risk % is applied to. Initial Capital = the strategy's starting capital (Properties): fixed cash risk per trade, no compounding — the prop-firm rule (SPEC §8.1). Account Equity = current equity (compounds with wins and losses). Fixed Balance = the amount typed below.")
 fixedBal    = input.float(10000, "Fixed balance ($)", minval = 1, group = grpRisk, tooltip = "Used only when Risk base = Fixed Balance.")
 tickOffset  = input.int(1, "Stop offset beyond sweep (ticks)", minval = 0, group = grpRisk, tooltip = "Stop = sweep extreme +/- this many ticks. 1 = exactly one tick past the swept liquidity.")
@@ -115,7 +115,7 @@ liqBuf    = input.int(2, "Liquidity target buffer (ticks)", minval = 0, group = 
 
 // ── 6) Prop-firm guards
 useDailyDD     = input.bool(true, "Use daily loss limit", group = grpGuard)
-maxDailyDDPct  = input.float(4.0, "Daily loss limit (%)", minval = 0.1, step = 0.1, group = grpGuard, tooltip = "Halt for the day when equity drops this % below the day's starting equity. Set BELOW your firm's hard limit (e.g. 4% under a 5% rule) as a safety buffer.")
+maxDailyDDPct  = input.float(2.0, "Daily loss limit (%)", minval = 0.1, step = 0.1, group = grpGuard, tooltip = "Halt for the day when equity drops this % below the day's starting equity. Set BELOW your firm's hard limit (e.g. 2% under a 5% rule) as a safety buffer.")
 flattenBreach  = input.bool(true, "Flatten open trade on breach", group = grpGuard, tooltip = "On a daily/overall limit breach, close any open position immediately.")
 maxConsec      = input.int(3, "Max consecutive losses", minval = 1, group = grpGuard, tooltip = "A losing streak of this length halts NEW trades for the day.")
 resetConsecDay = input.bool(true, "Reset the streak each new day", group = grpGuard, tooltip = "ON = 'consecutive losses within a day'. OFF = the streak carries across days.")
