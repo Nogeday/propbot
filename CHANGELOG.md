@@ -95,27 +95,110 @@ Commit'ler: `e26e1bb` baseline · `1035771` NY dosya adı · `aa4025d` NY · `7a
 - `strategy_id` değerleri, `cancel` action, yeni `setup` değerleri ve `order_type` (`market`/`limit`) alanı eklendi;
   olmayan sayısal alan `null`.
 
+## Faz 0 genişletme — E-maddeleri (2026-11-12)
+
+Kullanıcı kararı: TradingView doğrulamasından önce script'ler nihai hâle getirildi; aşağıdaki "Açık bulgular"dan 2–11
+Faz 0'a alındı (`docs/SPEC.md` §4.3). B-maddelerinden farklı olarak bunlar **kural ve varsayılan değişiklikleridir**:
+orijinal script'lerle önce/sonra farkı beklenir. Pine v5'te kalındı; hiçbir dosya henüz TradingView'da derlenmedi.
+
+Commit'ler: `683ffcc` E1 · `f000482` E2 · `52b6f6a` E3 · `ccfc655` E4 · `c6928a0` E5 · `e7c3b51` E6 · `a4ca1fb` E7 · `bd85d03` E8 · `491c8f1` E9 maliyet/başlık · `290936d` E9 sermaye/marjin.
+
+### E1 — Master: dolum barında yeniden fiyatlama (`master_prop_firm_portfolio.pine`)
+- Açık bacak taraması her bacağın kendi dolum fiyatını da okuyor (`strategy.opentrades.entry_price`). Bacağın defterde
+  göründüğü ilk barda stop/TP sinyal barı tahmininden gerçek dolum fiyatına taşınıyor: FVG Buffer stop'u yapısal seviye
+  (değişmez), ATR stop'u sinyal barındaki mesafenin doluma uygulanması, TP = dolum ± rr × gerçek risk; stop dolumun en az
+  1 tick zarar tarafında. `s1_stopQueue` / `s2_stopQueue` son elemanı gerçek stop ile güncelleniyor.
+- S1 trailing artık bacak dolduktan sonra başlıyor ve aktivasyon R'si gerçek dolum fiyatından ölçülüyor
+  (`s1_entryEst` / `s2_entryEst` kaldırıldı). NY ve Asian tekil dosyalarıyla aynı kural (§3.1). → Açık bulgu 3.
+
+### E2 — Risk tabanı (6 dosya)
+- `Risk base` girdisi: `Initial Capital` (varsayılan) / `Account Equity` / `Fixed Balance` + `Fixed balance ($)` (10000).
+  Tüm boyutlandırma (`f_qty`, `f_qtyFromDist`, `riskCash`) `riskBaseAmt` üzerinden.
+  Davranış notu: risk artık bileşik değil; kazanç/kayıp sonrası işlem başı nakit risk sabit kalır (§8.1).
+- Silver Bullet'ta girdi zaten vardı; `Initial Capital` seçeneği eklendi ve varsayılan oldu. → Açık bulgu 4.
+
+### E3 — Risk varsayılanları (Silver Bullet, Mean Reversion)
+- `riskPct` 1,0 → 0,5 (§8.1 tavanı). Günlük zarar kesicisi: SB 4,0 → 2,0; MR 3,0 → 2,0 (diğer dördü zaten 2,0). → Açık bulgu 5.
+
+### E4 — Günde en fazla 1 işlem (Mean Reversion, Silver Bullet, MTF)
+- MR: `Max trades per day` (1) + `tradesToday` sayacı (emir gönderilince artar, NY günü değişince sıfırlanır).
+- SB `maxTrDay` 2 → 1 (davranış notu: iki pencere de açıkken AM'de işlem olduysa PM atlanır). MTF `maxTradesDay` 3 → 1.
+  → Açık bulgu 6.
+
+### E5 — Giriş-zamanı kapısı (6 dosya)
+- Yeni `entryTimeOK` (Master: `s1_entryTimeOK` / `s2_entryTimeOK`): sinyal barı seansın son barı değilse ve dolum barı
+  seans/pencere bitiminden önce açılıyorsa giriş var. Bar süresine duyarlı: `curMin + barMin < bitiş`
+  (1m grafikte `curMin < sessEnd − 1`).
+- Yalnızca **giriş** koşuluna eklendi; `canScan` / `canTrade` (bias, FVG, sweep taraması) pencereleri değişmedi
+  (§3.2/§3.3 ile aynı; işlem sonucu açısından eşdeğer).
+- Silver Bullet (limit giriş): av başlatma ve silahlanma `entryTimeOK` ister; dolmamış limit emir artık pencerenin
+  **son barının kapanışında** (ya da seansın son barında) iptal ediliyor. Davranış notu: önceden iptal pencere dışındaki
+  ilk barın kapanışında işlendiği için emir o barda da dolabiliyordu.
+- Sınır: erken kapanış Pine'da önceden bilinemediği için yarım günde seansın sondan bir önceki barındaki sinyal 1 barlık
+  işlem açabilir; pozisyon aynı seansta kapanır, geceye taşınmaz. → Açık bulgu 7.
+
+### E6 — Yüzen günlük zarar kesicisi ve anında zorunlu kapanışlar (6 dosya)
+- NY/Asian/Master: kesici artık `min(gerçekleşen, strategy.equity − gün başı özsermaye)` değerine bakıyor (bar
+  kapanışında). Yeni girdi `Flatten open trade on breach` (varsayılan açık): ihlalde açık pozisyon o barın kapanışında
+  kapatılır (Master: iki bacak birden). Girdi başlığı "Daily max realized loss" → "Daily max loss".
+- Tüm dosyalarda zorunlu kapanışlar tek blokta: bar başına tek neden, `strategy.close_all(immediately = true)` ve tek
+  `exit` alert'i. Günlük zarar ve tarih-sonu kapanışları önceden bir sonraki barın açılışında doluyor ve alert
+  göndermiyordu.
+- Master: ihlal/tarih-sonu barında motor bazlı seans-sonu kapanışları devre dışı kalır (bacak başına tek emir, tek alert).
+- Silver Bullet: günlük/toplam DD bloklarındaki kapanışlara `immediately = true` + `exit` alert'i; `flatSent` aynı barda
+  çift kapanışı önler. → Açık bulgu 8.
+
+### E7 — Trailing min adımı (NY, Master S1, MTF)
+- `Min trail step (ticks)` (4; Master'da `S1 min trail step (ticks)`): trailing stop yalnızca aday mevcut stop'u en az
+  N tick iyileştirdiğinde ilerler; `stop_update` alert'i de yalnızca o zaman gider (`config/risk.yaml`
+  `trail_min_step_ticks`, değişmez kural 8). MTF'de başa başa ilk çekiş bu filtreden muaf. → Açık bulgu 11.
+
+### E8 — Tablolar (MTF, Silver Bullet)
+- MTF: `Table scope` girdisi; tam-işlem istatistikleri mod (Scaled / Plan B) × örneklem (IS / OOS) kovalarında tutuluyor
+  (`fullN`, `fullWin`, `fullPnl`), runner satırları giriş zamanına göre süzülüyor.
+- Silver Bullet: panoda `Table scope` + `Tot R` satırı (toplanan ama gösterilmeyen `stopArr` / `dirArr` ile). Kazanma
+  oranı ve işlem sayısı satırları kapsama göre; canlı durum satırları kapsamdan bağımsız.
+
+### E9 — Başlıklar ve test varsayılanları (6 dosya)
+- `strategy()` maliyet varsayılanları MES profili: `commission.cash_per_contract` 0,50 (taraf başı), slipaj 1 tick
+  (NY/Asian/Master: %0,01'den; SB: 2,0 / 2 tick'ten; MR: %0,02 / 2 tick'ten; MTF zaten böyleydi).
+  Uyarı: SPY'de bu varsayılan hisse başı $0,50 keser → Properties'ten değiştirilmeli (başlıklarda yazıyor).
+- Başlangıç sermayesi 10.000 → 100.000 (FTMO 2-Step 100k profili; `Risk base = Initial Capital` ile işlem başı risk 500 $)
+  ve `margin_long = margin_short = 0`. Gerekçe: 10.000 ile MES'te çoğu işlem 1 kontratın altında kalıp atlanır;
+  TradingView'ın varsayılan %100 marjini pozisyonun tüm notional'ını teminat ister, risk-temelli vadeli boyutu bunu aşar.
+  Marjin davranışı TradingView'da doğrulanmadı → doğrulama listesi B.
+- NY ve Master başlığı "(S&P 500: MES / ES / US500.cash / SPY)"; Asian başlığında SPY yok (çalışmıyor). Asian ve
+  Master S2 için "~23 saatlik seans gerekir" notu. → Açık bulgu 2 (kısmen) ve 9.
+
+### E10 — Doküman
+- `pine/README.md` gerçek dosya adlarıyla; `docs/SPEC.md` §3.1 (ortak kurallar), §3.4.1–3.4.4 (Master, Silver Bullet,
+  Mean Reversion, MTF semantiği), §4.3 (E-maddeleri); `docs/tv-verification-checklist.md` yeni varsayılanlar ve
+  E-kontrolleriyle. → Açık bulgu 10.
+
 ## Açık bulgular
 
-Durum: 1 çözüldü; 2–8 Faz 2'ye ertelendi (kullanıcı kararı, Faz 0'da dokunulmayacak); 9–11 açık.
+Durum (2026-11-12): 1 ve 3–11 kapandı; 2 kısmen. 12–17 yeni.
 
-1. ~~**MTF derleme riski:** `riskPts := ...` bildirimi olmayan değişkene atama.~~ **Çözüldü** (`e997dd5`,
-   `float riskPts = ...`).
-2. **B4 sayısal değerleri — Faz 2:** Koddaki varsayılanlar değişmedi. FTMO `US500.cash` spread'i/komisyonu Faz 2'de
-   verilecek. Faz 0 TradingView testleri altı dosyada da `CME_MINI:MES1!` üzerinde, Properties'te elle
-   Commission = 0,50 USD/kontrat (taraf başı), Slippage = 1 tick ile yapılıyor (orijinal ve v2 aynı).
-3. **[Faz 2]** **Master dolum barında yeniden fiyatlamıyor:** TP ve ATR stop sinyal kapanışına göre sabit; trailing R'si de
-   `s1_entryEst`'e göre. NY/Asian tekil dosyalar dolum fiyatını kullanıyor → S1/S2 dosyalar arasında farklı, §3.1
-   parite tanımından sapma. Faz 2 paritesinden önce karar verilmeli.
-4. **[Faz 2]** **Boyutlandırma güncel equity'ye göre** (bileşik) — NY/Asian/Master/MR/MTF; SB varsayılanı "Account Equity".
-   §8.1 başlangıç bakiyesini istiyor.
-5. **[Faz 2]** **Risk varsayılanları:** SB ve MR `riskPct = 1.0` (§8.1 tavanı 0,5); SB günlük DD %4.
-6. **[Faz 2]** **Günlük işlem sınırı:** MR'de yok; MTF 3, SB 2 — §3.1 "strateji başına günde en fazla 1".
-7. **[Faz 2]** **Seansın son barında giriş:** NY/MR/MTF/SB yarım günde (veya yalnız-RTH grafikte) son barda piyasa girişi
-   üretebilir → emir bir sonraki seansın açılışında dolar (gece taşıma). B3 yalnızca çıkış tarafını kapsıyor.
-8. **[Faz 2]** **`immediately` olmayan zorunlu kapanışlar:** günlük/toplam DD kapanışları ve "End of (test) range" bir sonraki
-   barın açılışında doluyor.
-9. **NY/Asian/Master başlıkları "SPY/SPX"** diyor; Asian ve S2 23 saatlik enstrüman gerektiriyor (§3.3).
-10. **`pine/README.md`** dosya adları gerçek adlarla eşleşmiyor.
-11. **`stop_update` sıklığı:** trailing her bar ilerleyebilir; `trail_min_step_ticks` filtresi (değişmez kural 8) Faz 1
-    alıcısında uygulanmalı.
+1. ~~**MTF derleme riski:** `riskPts := ...` bildirimi olmayan değişkene atama.~~ **Çözüldü** (`e997dd5`).
+2. **B4 sayısal değerleri — kısmen:** kod varsayılanı artık MES test profili (E9). FTMO `US500.cash` spread'i/komisyonu
+   Faz 2'de verilecek.
+3. ~~**Master dolum barında yeniden fiyatlamıyor.**~~ **Çözüldü** (E1).
+4. ~~**Boyutlandırma güncel equity'ye göre.**~~ **Çözüldü** (E2).
+5. ~~**Risk varsayılanları** (SB/MR `riskPct` 1,0; SB günlük DD %4).~~ **Çözüldü** (E3).
+6. ~~**Günlük işlem sınırı** (MR'de yok; MTF 3, SB 2).~~ **Çözüldü** (E4).
+7. ~~**Seansın son barında giriş.**~~ **Çözüldü** (E5).
+8. ~~**`immediately` olmayan zorunlu kapanışlar.**~~ **Çözüldü** (E6).
+9. ~~**NY/Asian/Master başlıkları "SPY/SPX".**~~ **Çözüldü** (E9).
+10. ~~**`pine/README.md` dosya adları.**~~ **Çözüldü** (E10).
+11. ~~**`stop_update` sıklığı.**~~ Pine tarafında **çözüldü** (E7); Faz 1 alıcısı aynı filtreyi ayrıca uygulamalı.
+12. **Kesiciler bar kapanışında:** yüzen günlük zarar kontrolü bar içi ihlali ancak bar kapanınca görür (Pine sınırı;
+    `calc_on_every_tick` kapalı). Gerçek korumayı botun risk motoru sağlar (§8.1).
+13. **Günlük zarar tabanı dosyalar arasında farklı:** NY/Asian/Master `min(gün başı özsermaye, başlangıç sermayesi)` × %;
+    SB/MR/MTF gün başı özsermaye × %. Hizalanmadı (istenmedi).
+14. **Pine %2 günlük kesici ≠ `config/risk.yaml` `daily_cap_pct: 1.0`:** botun günlük bütçesi daha sıkıdır; bilgi amaçlı.
+15. **`exit` alert'inde neden alanı yok:** seans sonu / günlük zarar ihlali / tarih sonu alıcıda ayırt edilemiyor
+    (§5.1 şema v1). Faz 1'de `reason` alanı değerlendirilebilir.
+16. **Kaldıraç / marjin sınırı:** dar stop'larda risk-temelli boyutun notional'ı hesabın kaldıraç sınırını aşabilir;
+    venue profilinde kaldıraç alanı yok (VERIFY, Faz 2/3). TradingView tarafında marjin kontrolü kapalı (E9).
+17. **Yarım günlerde 1 barlık işlem:** E5 sınırı — sondan bir önceki bardaki sinyal son barda dolup aynı barın
+    kapanışında kapanır.

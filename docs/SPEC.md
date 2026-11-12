@@ -1,6 +1,6 @@
 # PropBot — Teknik Spesifikasyon
 
-Sürüm 0.1 · 2026-11-01 · Sahibi: Oğuz
+Sürüm 0.2 · 2026-11-12 · Sahibi: Oğuz
 `CLAUDE.md`'nin ayrıntısıdır. Sayı içeren her prop kuralı **VERIFY** etiketlidir: kullanılmadan önce firmanın
 resmi sayfasından doğrulanır ve venue profilindeki `rules_verified_at` güncellenir.
 
@@ -51,6 +51,10 @@ Strateji kodu saat, dosya, ağ ya da ortam değişkeni okumaz; her şey `ctx` il
 ### 3.1 Tüm stratejiler için
 - Karar yalnızca **kapanmış barda**; repaint ve lookahead yok.
 - Sinyal bar N kapanışında; piyasa emri bar N+1 **açılışında** dolar (Pine `process_orders_on_close=false`).
+- **Giriş-zamanı kapısı:** dolum bir sonraki barda olduğundan, sinyal barı grafik seansının son barıysa
+  (`session.islastbar`) ya da dolum barı seans/pencere bitiminde veya sonrasında açılacaksa giriş yok:
+  `curMin + bar süresi < bitiş` (1m grafikte `curMin < sessEnd − 1`). Pencere modellerinde (Asian, Silver Bullet)
+  dolum barı pencerenin içinde olmalıdır. Tarama ve durum makinesi pencereleri bundan etkilenmez.
 - SL+TP sinyal anında bracket olarak kurulur (Faz 0 sonrası Pine ile aynı). Dolumda:
   - FVG Buffer stop'u **yapısal seviyedir** (değişmez); ATR stop'u **mesafedir** (dolum ∓ sinyal barındaki ATR × çarpan).
   - TP = dolum ± rr × |dolum − stop|. Stop, dolumun en az 1 tick zarar tarafında zorlanır.
@@ -58,11 +62,20 @@ Strateji kodu saat, dosya, ağ ya da ortam değişkeni okumaz; her şey `ctx` il
     tolerans olarak belgelenir.
 - Aynı barda hem SL hem TP'ye değilirse backtest varsayılanı `fill_model: pessimistic` (önce SL). `tv_ohlc` modu
   TradingView emülatörünü taklit eder (açılış yükseğe daha yakınsa O→H→L→C, değilse O→L→H→C) — yalnızca parite testinde.
-- Strateji başına günde en fazla 1 işlem. Seans sonunda pozisyon kesinlikle kapalı (takvim tabanlı; yarım günler dahil).
+- **Boyut:** `qty = risk% × risk tabanı / (stop mesafesi × point value)`; risk tabanı varsayılanı **başlangıç bakiyesi**
+  (Pine `Risk base = Initial Capital`, §8.1). Tahmini giriş = sinyal barı kapanışı; aşağı yuvarlama, < 1 ise işlem atlanır.
+- Strateji başına günde en fazla 1 işlem (tüm script'lerde varsayılan). Seans sonunda pozisyon kesinlikle kapalı
+  (takvim tabanlı; yarım günler dahil).
+- **Zorunlu kapanışlar** (seans/pencere sonu, günlük zarar ihlali, tarih aralığı sonu) koşulun görüldüğü barın
+  **kapanışında** dolar (Pine `immediately = true`) ve `exit` alert'i üretir; bar başına tek neden, tek emir.
+- **Günlük zarar kesicisi (Pine içi, varsayılan %2):** gün içi zarar — gerçekleşen ya da bar kapanışı özsermayesiyle
+  yüzen — eşiğe ulaşınca gün için yeni giriş yok ve (varsayılan) açık pozisyon kapatılır. Bar kapanışında
+  değerlendirilir; bar içi ihlal ancak bar kapanınca görülür. Botun bağlayıcı günlük bütçesi §8.1'dir.
 
 ### 3.2 NY Open ORB + FVG/IFVG (`pine/ny_open_fvg_strategy.pine`)
 - **OR:** NY saatiyle [09:30, 09:30 + orMinutes) aralığında açılan barların en yüksek high / en düşük low'u; `orEnd`'den itibaren hazır.
 - **Tarama penceresi:** [orEnd, sessEnd) (varsayılan 09:35–15:59). NY takvim günü değişince tüm durum sıfırlanır.
+  Giriş için ayrıca §3.1 giriş-zamanı kapısı: 1m'de son giriş sinyali 15:57 barı (dolum 15:58).
 - **Bias:** pencerede Close modunda ilk kapanış OR dışına çıkınca (Wick modunda fitil) belirlenir; gün boyu sabit.
   Yön kapalıysa (ör. allowLong=false) o yöndeki kırılım bias üretmez, tarama sürer.
 - **FVG tespiti** (yalnızca bias belirlendikten sonra; iki yön de izlenir; FIFO en fazla 60 kayıt):
@@ -77,7 +90,9 @@ Strateji kodu saat, dosya, ağ ya da ortam değişkeni okumaz; her şey `ctx` il
 - **TP:** giriş ± rr × risk.
 - **Trailing (opsiyonel, varsayılan açık):** kâr ≥ trailActR × R olunca; Swing: `lowest(low, swingLen) − buffer`
   (short: `highest(high, swingLen) + buffer`), ATR step: `close ∓ ATR(atrLenT) × atrMultT`,
-  Percent: `close × (1 ∓ trailPct/100)`. Stop yalnızca kâr yönüne gider; güncelleme bar başına ≤ 1 ve ≥ `trail_min_step_ticks`.
+  Percent: `close × (1 ∓ trailPct/100)`. Stop yalnızca kâr yönüne gider; güncelleme bar başına ≤ 1 ve
+  yalnızca aday mevcut stop'u ≥ `trail_min_step_ticks` (4) tick iyileştiriyorsa (Pine `trailMinStepTicks`). Trailing
+  dolumdan sonra başlar; aktivasyon R'si gerçek dolum fiyatından ölçülür.
 - **Seans sonu:** sessEnd'e ulaşılınca veya seansın son barında kapat.
 
 ### 3.3 Asian Range Sweep & Reversal (`pine/asian_sweep_reversal_strategy.pine`)
@@ -92,13 +107,116 @@ Strateji kodu saat, dosya, ağ ya da ortam değişkeni okumaz; her şey `ctx` il
   filtresi → bölge [high, low[2]]; sweep tüketilir. Long simetrik. Aynı barda ikisi birden olursa long kazanır (Pine
   sırası); yeni arming eskisinin üzerine yazar.
 - **Giriş:** önce invalidasyon (long: close < alt; short: close > üst → iptal), sonra arming barından sonraki bir barda
-  temas (long: `low ≤ üst`; short: `high ≥ alt`).
+  temas (long: `low ≤ üst`; short: `high ≥ alt`). Dolum barı aktif pencerenin içinde olmalı (§3.1): 1m'de son giriş
+  sinyali 10:58 barı.
 - **SL/TP:** sabit (trailing yok). Aktif pencere bitince kapat.
 - **Enstrüman:** SPX/SPY'de 20:00–00:00 ET verisi yok → yalnızca ~23 saat işlem gören enstrümanlarda (ES/MES, US500 CFD) anlamlı.
 
 ### 3.4 Diğer stratejiler
-BB/KC/RSI(2) mean reversion, ICT Silver Bullet ve Master Portfolio script'i kullanıcı `pine/` altına ekler.
-Portlamadan önce bu bölüme 3.2/3.3 düzeyinde semantik özet yaz ve kullanıcı onayı al. Sıra: önce 3.2 ve 3.3.
+§3.1 hepsi için geçerlidir. Parantez içindeki sayılar girdi varsayılanlarıdır. Python'a portlama sırası: önce 3.2 ve 3.3.
+
+#### 3.4.1 Master Prop Firm Portfolio (`pine/master_prop_firm_portfolio.pine`)
+- **Kapsam:** S1 = §3.2 (NY ORB + FVG/IFVG, trailing dahil), S2 = §3.3 (Asian Sweep) tek script'te. Motor girdileri
+  `s1_` / `s2_` öneklidir, varsayılanları tekil dosyalarla aynıdır; `riskPct` ve `rr` iki motor için ortaktır.
+  Sinyal, stop, TP, dolum barı yeniden fiyatlaması (§3.1) ve trailing kuralları tekil dosyalarla **aynıdır**; farklar
+  aşağıdadır. Grafik 1m; S2 için ~23 saat işlem gören enstrüman gerekir.
+- **Bar içi sıra:** (1) açık bacak taraması, kapanan bacağın durum sıfırlaması → (2) dolum barı yeniden fiyatlaması →
+  (3) küresel kesiciler → (4) S1: bias, FVG, durum makinesi, giriş, yönetim, seans sonu → (5) S2: arming, sweep,
+  invalidasyon, giriş, yönetim, pencere sonu → (6) portföy düzeyi zorunlu kapanış.
+- **Tek net pozisyon:** `pyramiding = 2`. İki bacak yalnızca **aynı yönde** birlikte açık olabilir; diğer motor açıkken
+  (ya da emri beklerken) ters yönlü giriş engellenir. Aynı barda çatışmada önce çalışan S1 kazanır.
+- **Eşzamanlı risk:** (diğer bacak açıksa `riskPct`, değilse 0) + `riskPct` ≤ `maxConcurrentRiskPct` (1,0) değilse giriş yok.
+- **Bacak takibi:** `strategy.opentrades.entry_id` ("S1 …" / "S2 …") ile; bacak defterden çıkınca durumu sıfırlanır
+  (giriş barında 1 bar koruma). Dolum fiyatı bacak bazında `strategy.opentrades.entry_price` ile okunur;
+  `position_avg_price` iki bacağın harmanı olduğu için kullanılmaz.
+- **Günlük işlem:** motor başına 1 (S1: NY takvim günü; S2: Asya döngüsü).
+- **Küresel kesiciler (NY takvim günü, iki motor birlikte):** günlük zarar — gerçekleşen ya da bar kapanışı özsermayesiyle
+  yüzen — ≥ `dailyDDPct` (2) × min(gün başı özsermaye, başlangıç sermayesi) → yeni giriş yok; `flattenBreach` açıksa iki
+  bacak o barın kapanışında kapatılır. Kapanış sırasına göre birleşik ardışık zarar ≥ `maxConsecLoss` (2) → yeni giriş yok.
+- **Zorunlu kapanışlar:** S1 seans sonu ve S2 aktif pencere sonu bacak bazında; günlük zarar ihlali ve End date tüm
+  pozisyon. Hepsi barın kapanışında. İhlal/End date barında motor bazlı kapanışlar devre dışıdır (bacak başına tek emir).
+- **Alert:** S1 → `ny_orb_fvg`, S2 → `asian_sweep` (tek TradingView alarmı yeterli).
+
+#### 3.4.2 ICT Silver Bullet (`pine/ict_silver_bullet_strategy.pine`)
+- **Grafik:** 1m veya 5m. **Pencereler (NY):** AM [10:00, 11:00) ve PM [14:00, 15:00); ayrı ayrı açılıp kapatılabilir.
+- **Pivotlar:** `ta.pivothigh/low(pivotLen, pivotLen)` (5); pivot `pivotLen` bar sonra onaylanır. Son onaylı pivotlar
+  `lastPH` / `lastPL`; her yön için son 25 pivot likidite havuzudur (FIFO).
+- **FVG izleme (yalnızca pencere içi barlar):** boğa `low > high[2]` → [high[2], low]; ayı `high < low[2]` → [high, low[2]];
+  `minFvgTicks` filtresi. Her yön için yalnızca **en son** boşluk tutulur; yeni pencerede önceki boşluklar geçersizdir.
+- **Durum makinesi:** 0 boşta → 1 sweep (MSS/FVG bekleniyor) → 2 silahlı (limit bekliyor) → 3 işlemde → 0.
+  Gün değişiminde (pozisyon yoksa) ve yeni pencere başında (pozisyon yok, faz ≠ 3) faz 0'a döner.
+- **Emir-yerleştirme kapısı (`entryTimeOK`):** pencere içi ∧ grafik seansının son barı değil ∧ **bir sonraki bar da aynı
+  pencerenin içinde**. Av başlatma, silahlanma ve bekleyen emrin yaşaması bu kapıya bağlıdır.
+- **Av başlatma:** kapı ∧ tarih aralığı ∧ gün filtresi ∧ durdurma yok ∧ pozisyon yok ∧ faz 0 ∧
+  `tradesWindow < maxTrWindow` (1) ∧ `tradesToday < maxTrDay` (1).
+- **1) Sweep** (iki pivot da tanımlıyken; önce short denenir): `high > lastPH` → short, `sweepExtreme = high`,
+  `mssLevel = lastPL`; değilse `low < lastPL` → long, `sweepExtreme = low`, `mssLevel = lastPH`.
+- **2) MSS** (faz 1, pencere içi; sweep barı dahil): her barda `sweepExtreme` güncellenir (short: max high; long: min low).
+  MSS = **kapanışla** kırılım (short: `close < mssLevel`; long: `close > mssLevel`). Sweep'ten sonra
+  `maxBarsSweepMSS` (10) bardan fazla geçerse av iptal.
+- **3) FVG → silahlanma:** MSS'ten sonra en çok `maxBarsMSSFvg` (5) bar içinde, yönle uyumlu ve sweep barında ya da
+  sonrasında oluşmuş en son FVG varsa ve kapı açıksa. Giriş seviyesi: Proximal (short: alt; long: üst) / %50 CE
+  (varsayılan) / Distal (short: üst; long: alt). Stop = `sweepExtreme` ± `tickOffset` (1) tick. Risk = |giriş − stop| > 0.
+  Sweep, MSS ve FVG aynı barda tamamlanabilir.
+- **Emir:** **limit** giriş + aynı anda bracket (stop + TP); bracket yalnızca giriş dolunca aktiftir. TP: Fixed R:R
+  (`rr` = 2) ya da "Next opposing liquidity" (girişin ötesindeki en yakın pivot ∓ `liqBuf` (2) tick; mesafe <
+  `minRRliq` (1) × risk ise Fixed R:R). Limit dolumu için fiyatın seviyeyi 1 tick geçmesi gerekir
+  (`backtest_fill_limits_assumption = 1`). Boyut: §3.1, tam kontrata aşağı yuvarlama; < 1 ise silahlanma yok.
+- **İptal (faz 2, dolmamış):** kapanış stop'un ötesindeyse (short: `close > stop`; long: `close < stop`), kapı kapandıysa
+  (pencerenin son barının kapanışı ya da seansın son barı) ya da `maxBarsToFill` (20) bar geçtiyse → limit ve bracket
+  iptal, `cancel` alert'i. Böylece emir pencere dışında dolamaz.
+- **Dolum tespiti:** `opentrades + closedtrades` artışı (aynı barda dolup kapanan işlem dahil) → faz 3; pencere ve gün
+  sayaçları +1.
+- **Yönetim:** stop ve TP sabit; trailing yok.
+- **Korumalar:** günlük: (özsermaye − gün başı özsermaye) / gün başı özsermaye ≤ −`maxDailyDDPct` (2) → gün için dur,
+  bekleyen emri iptal et, `flattenBreach` ile pozisyonu kapat. Ardışık `maxConsec` (3) zarar → gün için dur (sayaç her gün
+  sıfırlanır). Zirveden düşüş ≤ −`maxOverallPct` (8) → kalıcı dur. Gün sonu: `curMin ≥ 15:55` ya da seansın son barı → kapat.
+
+#### 3.4.3 Mean Reversion BB/KC + RSI(2) (`pine/mean_reversion_bb_kc_rsi2_strategy.pine`)
+- **Grafik:** 5m–15m. **Göstergeler:** BB = SMA(close, 20) ± 2,5 × stdev(close, 20); KC = EMA(close, 20) ± 1,5 × ATR(20);
+  RSI(2); EMA(200); ATR(14).
+- **Sıkışma filtresi (`useKcFilter`, açık):** squeeze = BB tamamen KC'nin içinde (`bbUpper < kcUpper ∧ bbLower > kcLower`);
+  setup yalnızca squeeze **değilken** geçerli.
+- **Setup barı:** long: `close < bbLower ∧ RSI2 < rsiOS` (10); short: `close > bbUpper ∧ RSI2 > rsiOB` (90); + sıkışma filtresi.
+- **Onay barı (setup'ın hemen ardındaki bar):** long: `close > bbLower` ∧ trend filtresi `close ≥ EMA200`; short:
+  `close < bbUpper` ∧ `close ≤ EMA200`. `requireStrong` (kapalı) açıksa mum işlem yönünde ve kapanış aralığın reddeden
+  yarısında olmalı. Bantlar ve EMA onay barının kendi değerleridir.
+- **Giriş izni:** tarih aralığı ∧ zaman penceresi [10:00, 15:45) ∧ giriş-zamanı kapısı (§3.1) ∧ gün filtresi ∧ günlük
+  durdurma yok ∧ `tradesToday < maxTradesDay` (1) ∧ pozisyon yok. Onay barı kapanışında piyasa emri.
+- **Stop:** dolum ∓ `atrMult` (2,0) × **sinyal barındaki** ATR(14); sabit, trailing yok. (Sinyal barı bracket'i: kapanış ∓
+  aynı mesafe.)
+- **TP:** canlı BB ortası (SMA20), her bar güncellenir; girişin zarar tarafına geçemez (long: max(orta, dolum + 1 tick);
+  short: min(orta, dolum − 1 tick)). TP limit emridir.
+- **Boyut:** §3.1; stop mesafesi = `atrMult` × ATR.
+- **Günlük kesici:** (gün başı özsermaye − özsermaye) / gün başı özsermaye ≥ `maxDailyLoss` (2) → gün için yeni giriş yok;
+  `closeOnHalt` (açık) ile pozisyon kapatılır. **Seans sonu:** `curMin ≥ 15:45` ya da seansın son barı → kapat.
+
+#### 3.4.4 MTF Trend Continuation (`pine/mtf_trend_continuation_strategy.pine`)
+- **Grafik:** 5m; üst zaman dilimi 60. **HTF trend:** 1H EMA(20) ve EMA(50), **son kapanmış** 1H bardan
+  (`request.security(..., [ema[1], ema[1]], lookahead_on)`): boğa = EMA20 > EMA50; ayı = EMA20 < EMA50.
+- **Değer alanı:** 5m EMA(21) ile EMA(50) arasındaki bant; barın aralığı bandı kesiyorsa içeride (`low ≤ üst ∧ high ≥ alt`).
+- **Hacim (`useVolFilter`, açık):** `volume < SMA(volume, 20)`.
+- **Silahlanma (her bar):** boğa ∧ içeride ∧ hacim → long silahlı; ayı simetrik; `armBar` = bu bar (her uygun barda
+  yenilenir). NY günü değişince silah sıfırlanır. Geçersizleşme: trend artık o yönde değil ya da
+  `bar − armBar > armValidityBars` (10).
+- **Tetik:** long: `close > open ∧ close > high[1]`; short: `close < open ∧ close < low[1]`. Silahlanma barında da olabilir.
+- **Giriş izni:** tarih aralığı ∧ seans [09:30, 15:55) ∧ giriş-zamanı kapısı (§3.1) ∧ durdurma yok ∧
+  `tradesToday < maxTradesDay` (1) ∧ pozisyon yok. Girişten sonra silah sıfırlanır.
+- **Stop (yapısal):** long: min(`lowest(low, 10)` − 4 tick, close − 1 tick); short: max(`highest(high, 10)` + 4 tick,
+  close + 1 tick). Dolumda seviye korunur, dolumun en az 1 tick zarar tarafına çekilir.
+- **Boyut:** §3.1; tam kontrata aşağı yuvarlama (`roundUnits`), 0 ise işlem atlanır.
+- **Ölçekli mod (çift sayılı kontrat):** TP1 = dolum ± `tp1RR` (1,5) × risk'te pozisyonun `scaleOutPct` (%50) kadarı limit
+  emirle kapanır; kalan (runner) için stop başa başa çekilir, sonra trailing.
+- **Plan B (tek sayılı / 1 kontrat):** ölçek yok; barın high/low'u TP1 seviyesine değince tüm pozisyonun stop'u başa başa
+  çekilir, sonra trailing (TP emri yok).
+- **Trailing:** aday = long: max(başa baş, iz); short: min(başa baş, iz). İz = Chandelier (`highest(high, 22)` −
+  ATR(22) × 3,0; short simetrik) ya da ATR (`close ∓ ATR(14) × 2,5`). Başa başa ilk çekiş koşulsuz; sonrası yalnızca aday
+  mevcut stop'u ≥ `trailMinStepTicks` (4) tick iyileştiriyorsa. Stop yalnızca kâr yönüne gider.
+- **Kesiciler:** günlük zarar (gün başı özsermaye − bar kapanışı özsermayesi) ≥ `dailyLossPct` (2) → gün için dur +
+  (`flatOnDailyLoss`) kapat; isteğe bağlı ardışık zarar durdurması (kapalı). **Seans sonu:** `curMin ≥ 15:55` ya da seansın
+  son barı → kapat.
+- **Tam işlem sonucu:** giriş sinyali anındaki özsermayeye göre net K/Z (ölçek çıkışı dahil); tablo mod (Scaled / Plan B)
+  ve örneklem (IS / OOS) bazında gösterir.
 
 ## 4. Faz 0 — Pine düzeltmeleri
 
@@ -156,6 +274,7 @@ if strategy.position_size == 0 and strategy.closedtrades > strategy.closedtrades
 1. §4.1'deki B-maddelerini `pine/` altındaki **tüm** stratejilere uygula (desen aynıysa; zaten çözülmüş maddeleri
    "mevcut değil" diye raporla; §4.1a'yı kontrol listesi olarak kullan). Her dosya ayrı commit.
 2. Kapsam: Pine v5'te kal; B-maddeleri dışında mantık veya varsayılan değişikliği yok. Diğer bulgular yalnızca raporlanır.
+   (2026-11-12: kapsam kullanıcı kararıyla §4.3'teki E-maddeleriyle genişletildi.)
 3. `CHANGELOG.md` (dosya bazında, gerekçesiyle; sonunda "Açık bulgular").
 4. `docs/tv-verification-checklist.md` — kullanıcı TradingView'da sırayla kontrol eder:
    - Script derleniyor (hata varsa mesaj ve satır numarası Claude Code'a iletilir).
@@ -170,6 +289,24 @@ if strategy.position_size == 0 and strategy.closedtrades > strategy.closedtrades
    - ABD kış saatine geçiş (2026-11-01) sonrası ilk günlerde OR 09:30 ET'de (17:30 TR) kuruluyor.
    - Maliyetli ve maliyetsiz sonuç farkı not edildi.
 5. **Kabul:** kullanıcı checklist'i TV'de geçti ve önce/sonra tablosunu paylaştı.
+
+### 4.3 Faz 0 genişletme — E-maddeleri (kullanıcı kararı, 2026-11-12)
+TradingView doğrulamasından önce script'lerin nihai hâle gelmesi için `CHANGELOG.md` "Açık bulgular" 2–11 Faz 0'a alındı.
+B-maddelerinden farklı olarak bunlar hata düzeltmesi değil, **kural ve varsayılan hizalamasıdır**; önce/sonra
+karşılaştırmasında orijinalle fark beklenir. Ayrıntı ve gerekçe: `CHANGELOG.md`.
+
+| ID | Kapsam | Değişiklik |
+|---|---|---|
+| E1 | Master | Bacak bazında dolum barı yeniden fiyatlaması (`strategy.opentrades.entry_price`); tekil dosyalarla parite (§3.1). |
+| E2 | 6 dosya | `Risk base` girdisi; varsayılan `Initial Capital` (§8.1). |
+| E3 | SB, MR | `riskPct` 1,0 → 0,5; günlük zarar kesicisi 4,0 / 3,0 → 2,0. |
+| E4 | MR, SB, MTF | Günde en fazla 1 işlem (MR'ye sayaç; SB ve MTF varsayılanı 1). |
+| E5 | 6 dosya | Giriş-zamanı kapısı (§3.1). SB: dolmamış limit pencerenin son barının kapanışında iptal. |
+| E6 | 6 dosya | NY/Asian/Master'da yüzen günlük zarar kesicisi + `flattenBreach`; tüm zorunlu kapanışlar `immediately = true` + `exit` alert'i. |
+| E7 | NY, Master S1, MTF | `trailMinStepTicks` (4): trailing ve `stop_update` yalnızca ≥ N tick iyileşmede. |
+| E8 | MTF, SB | Tablo kapsamı (All / In-Sample / Out-of-Sample); SB panosunda Tot R. |
+| E9 | 6 dosya | `strategy()` varsayılanları MES test profili (kontrat başı $0,50 taraf başı, 1 tick; sermaye 100.000, marjin %0); başlıkta enstrüman notları. |
+| E10 | Doküman | `pine/README.md`, §3.4 semantiği, CHANGELOG, doğrulama listesi. |
 
 ## 5. Faz 1 — TradingView → Telegram sinyal botu (emir yok)
 
