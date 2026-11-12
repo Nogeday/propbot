@@ -50,7 +50,9 @@ strategy(title              = "NY Open ORB + FVG/IFVG Strategy",
          shorttitle         = "NY FVG ORB",
          overlay            = true,
          pyramiding         = 0,
-         initial_capital    = 10000,
+         initial_capital    = 100000,           // FTMO 2-Step 100k profile (config/venues) — also the default Risk base
+         margin_long        = 0,                // 0 = no margin check (sizing is risk-based). TradingView's default of 100 % needs the full
+         margin_short       = 0,                // notional as collateral, which a futures position sized by risk exceeds
          default_qty_type   = strategy.fixed,   // fallback only; every entry passes an explicit qty
          default_qty_value  = 1,
          commission_type    = strategy.commission.cash_per_contract,
