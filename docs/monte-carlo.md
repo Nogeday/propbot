@@ -44,6 +44,9 @@ entry_time,exit_time,r,strategy_id,mae_r
   Initial Capital" ile nominal risk sabittir (ör. 100.000 × %0,5 = 500 $). Tam kontrata yuvarlama gerçek riski nominalin
   altına çeker; o zaman tam stop −1'den küçük çıkar (ör. −0,8). `mae_r` aynı tutara bölünmüş en kötü yüzen zarardır.
 - TradingView "List of Trades" dışa aktarımını doğrudan okuyan dönüştürücü henüz yok (örnek dosya bekleniyor).
+- **Hangi script sürümünden:** listeyi depodaki güncel `pine/` sürümünden (E12 dahil) ve maliyetler açıkken dışa aktar.
+  E12 ile TP limitleri fiyat seviyeyi 1 tick geçince doluyor (`backtest_fill_limits_assumption = 1`); daha eski bir
+  sürümden alınan liste "dokunma = dolum" sayar ve daha iyimserdir. Simülatör listenin hangi sürümden geldiğini bilemez.
 
 ## Seçenekler
 

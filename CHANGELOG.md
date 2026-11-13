@@ -301,6 +301,7 @@ Durum (2026-11-13): 1 ve 3–11 kapandı; 2 ve 23 kısmen. 12–27 açık (18–
     eşiği, günler arası bağımlılık, lot yuvarlama ve gün sonu trailing toplam kayıp modellenmiyor (ADR-0002). Risk motoru
     yazılınca simülatör aynı ön kontrol kodunu çağırmalı.
 26. **TradingView dönüştürücüsü yok:** simülatör belgelenmiş genel CSV okur (`docs/monte-carlo.md`). "List of Trades"
-    dışa aktarımı için dönüştürücü, v2 script'ler derlenip örnek dosya gelince yazılacak.
+    dışa aktarımı için dönüştürücü, v2 script'ler derlenip örnek dosya gelince yazılacak. Liste E12 sonrası sürümden
+    alınmalı: daha eski sürüm TP'de "dokunma = dolum" saydığı için daha iyimser sonuç verir.
 27. **Risk küçültme kademesi deneysel:** `--dd-risk-steps` yalnızca simülatörde karşılaştırma içindir. Bot kuralı olması
     ADR ve SPEC §8.1 değişikliği ister; değişmez kural 4 gereği yalnızca küçültme olabilir.
