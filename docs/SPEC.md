@@ -12,9 +12,12 @@ resmi sayfasından doğrulanır ve venue profilindeki `rules_verified_at` günce
 - **FTMO:** EA ve algoritmik işlem genel olarak serbest. Yasak: HFT, arbitraj, simülasyon açığı istismarı; günde 2.000'den
   fazla sunucu isteği yapan "hiperaktif" EA'lar; aynı işlem kalıbının birden çok hesapta tekrarı. VPN/VPS genel olarak
   serbest (MetaTrader/cTrader'da ABD konumu hariç).
-- **FTMO 2-Step (VERIFY):** hedef %10 → %5, günlük kayıp %5, toplam kayıp %10 statik, süre sınırı yok. Günlük reset saati
-  kaynaklar arasında çelişkili (CE(S)T gece yarısı / UTC gece yarısı) → resmi sayfadan doğrula.
-- **FTMO 1-Step (VERIFY):** hedef %10, günlük kayıp %3, toplam %10 gün sonu trailing, "Best Day" kuralı.
+- **FTMO 2-Step (doğrulandı 2026-11-13; kayıt `docs/compliance/2026-11-13-ftmo-kural-dogrulamasi.md`):** hedef %10 → %5;
+  günlük kayıp %5 (limit = 00:00 Prag saatindeki **bakiye** − başlangıcın %5'i, özsermayeyle ölçülür); toplam kayıp %10
+  statik; fazlarda en az 4 işlem günü. Haber kısıtı (±2 dk) yalnızca fonlu Standard hesapta. MT5 sunucu saati GMT+2,
+  ABD yaz saati takvimiyle GMT+3 (New York + 7 saat).
+- **FTMO 1-Step (bilgi, 2026-11-13):** hedef %10, günlük kayıp %3, toplam %10 gün sonu trailing; 12 Ekim 2026'dan sonraki
+  siparişlerde "Best Day" yerine "Consistency" kuralı.
 - **Funding Pips:** üçüncü taraf EA yalnızca trade/risk yöneticisi olarak serbest → kendi strateji otomasyonumuz için
   firmadan yazılı onay şart.
 - **TradingView webhook:** ücretli plan + 2FA; yalnızca port 80/443; IPv4; 3 sn içinde yanıt yoksa istek iptal; dört sabit
@@ -389,6 +392,8 @@ systemd (`Restart=always`) · chrony · log rotasyonu.
 ### 6.1 Veri
 - İçe aktarma: CSV/Parquet (MT5 "Bars → Export", TradingView grafik verisi dışa aktarımı, tedarikçi verisi).
   MT5 bar saatleri **sunucu saatindedir** → `server_tz` ile UTC'ye çevir (VERIFY: terminalde bilinen bir 09:30 NY mumuyla karşılaştır).
+  FTMO'da sunucu saati resmi kaynaklara göre New York + 7 saattir (GMT+2, ABD yaz saatinde GMT+3; 2026-11-13). Tek bir
+  IANA dilimi bunu karşılamadığı için profilde `server_tz` boş; alanın biçimi içe aktarma yazılırken kararlaştırılır.
 - Doğrulama raporu: çift bar, sıra dışı bar, gün içi boşluklar, seans kapsaması, DST geçişleri, aykırı fiyat sıçramaları.
 - Veri kaynağı ve kapsama tarihleri her rapora yazılır.
 
@@ -459,6 +464,8 @@ canlı sonuçlar backtest'in %95 güven aralığında.
 - Ön kontrol: `realized_today + open_risk + new_risk + cost_buffer ≤ günlük bütçe`; değilse RED.
 - Günlük taban = reset anındaki `max(balance, equity) − daily_loss_limit`. Kalan günlük tampon
   `flatten_when_daily_buffer_below_pct` altına inerse: tüm pozisyonları kapat, gün kapanır.
+  Bu botun kendi tabanıdır ve firmanınkinden gevşek olamaz. Firmanın tabanı profildeki `daily_loss_basis` ile hesaplanır
+  (FTMO: reset anındaki bakiye; reset'te yüzen kâr varsa botun tabanı daha yüksek, yani daha sıkıdır).
 - Toplam kayıp: statik → `initial × (1 − max_loss_pct)`; gün sonu trailing → profilde tanımlı formül.
 - Boyut: `lots = floor_to_step(risk_usd / (stop_points × value_per_point_per_lot))`; `< min_lot` → işlem atla
   (`RISK_TOO_WIDE`); asla yukarı yuvarlama.
@@ -477,7 +484,7 @@ canlı sonuçlar backtest'in %95 güven aralığında.
 | Asya aralığı 20:00–00:00 ET | 04:00–08:00 TR | 03:00–07:00 TR |
 | Asya aktif 03:00–11:00 ET | 11:00–19:00 TR | 10:00–18:00 TR |
 
-FTMO günlük reset (CE(S)T gece yarısı varsayımı, VERIFY): CET'te 02:00 TR, CEST'te 01:00 TR. ABD ve AB yaz saati
+FTMO günlük reset (Prag gece yarısı; doğrulandı 2026-11-13): CET'te 02:00 TR, CEST'te 01:00 TR. ABD ve AB yaz saati
 geçişleri farklı haftalarda → bu haftalar için ayrı testler. Asya aktif ve NY işlemleri aynı prop gününe düşer →
 günlük bütçe birlikte hesaplanır.
 

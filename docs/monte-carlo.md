@@ -12,12 +12,13 @@ gerçekçidir. Go/No-Go hükmü vermez (SPEC §9 G4 kararı senindir). Modelleme
 ```bash
 uv run propbot config check
 uv run propbot montecarlo --trades tests/fixtures/trades/synthetic_trades.csv \
-    --venue config/venues/ftmo_2step_100k.yaml --cost-r 0.05 --assume-min-trading-days 4
+    --venue config/venues/ftmo_2step_100k.yaml --cost-r 0.05
 ```
 
 `tests/fixtures/trades/synthetic_trades.csv` **uydurma** bir listedir (`tests/support/synthetic.py` üretir); yalnızca
-aracın çalıştığını gösterir. `--assume-min-trading-days`, profilde `min_trading_days` boş olduğu sürece zorunludur ve
-raporda VARSAYIM olarak yazılır; değeri firmanın resmi sayfasından doğrulayıp profile yazınca bayrağa gerek kalmaz.
+aracın çalıştığını gösterir. FTMO profilinde `min_trading_days` 2026-11-13'te doğrulandı (4), bu yüzden
+`--assume-min-trading-days` gerekmez. Bayrak yalnızca bu alanı boş olan bir profille zorunludur ve raporda VARSAYIM
+olarak yazılır.
 
 ## İşlem listesi (CSV)
 

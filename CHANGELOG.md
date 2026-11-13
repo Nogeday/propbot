@@ -250,9 +250,28 @@ Commit'ler: `5d9f2ac` iskelet · `79d7ecc` config şemaları · `1a5a365` prop g
   VARSAYIM yazar.
 - **İşlem listesi:** şimdilik genel CSV → açık bulgu 26.
 
+## FTMO kural doğrulaması (2026-11-13)
+
+Kullanıcı kararı: "kullanıcı doğrulaması" şartı (SPEC başlığı, §8.1) için yetki Claude Code'a devredildi. FTMO'nun herkese
+açık resmi sayfaları 2026-11-13'te okundu; alan alan sonuç ve kaynaklar:
+`docs/compliance/2026-11-13-ftmo-kural-dogrulamasi.md`. Commit: `4fc7bbd` profil.
+
+- `config/venues/ftmo_2step_100k.yaml`: `rules_verified_at: 2026-11-13` · `min_trading_days: 4` ·
+  `daily_loss_basis: balance_at_reset` (önceki değer temkinli varsayımdı). Hedefler (%10 / %5), günlük %5, toplam %10
+  statik, reset (Prag gece yarısı), haber kuralı (fonlu Standard, ±2 dk), EA izni ve günde 2.000 istek eşiği resmi
+  sayfalarla aynı çıktı; değerleri değişmedi.
+- `uv run propbot config check`: kurallar "taze (0 gün; sınır 30)". Boş kalanlar: `server_tz` (VERIFY) ve çalışma anı
+  `contract.*` alanları.
+- Botun kendi günlük tabanı değişmedi (SPEC §8.1: reset anındaki `max(balance, equity)`); profil artık firmanın gerçek
+  bazını söylüyor. Stratejiler reset'te pozisyon taşımadığı için Monte Carlo sonucu etkilenmez.
+- `docs/monte-carlo.md`: hızlı başlangıç komutunda `--assume-min-trading-days` artık gerekmiyor.
+- Doğrulama 30 gün geçerli (2026-12-13). Yenileme tarayıcıda elle yapılır: FTMO'nun Şartlar ve Koşulları (madde 9.4.6)
+  siteden otomatik araçlarla bilgi toplamayı yasaklıyor.
+
 ## Açık bulgular
 
-Durum (2026-11-13): 1 ve 3–11 kapandı; 2 ve 23 kısmen. 12–27 açık (18–23 denetimden, 24–27 Faz 2 ön diliminden).
+Durum (2026-11-13): 1, 3–11 ve 24 kapandı; 2 ve 23 kısmen. 12–23 ve 25–30 açık (18–23 denetimden, 25–27 Faz 2 ön
+diliminden, 28–30 FTMO doğrulamasından).
 
 1. ~~**MTF derleme riski:** `riskPts := ...` bildirimi olmayan değişkene atama.~~ **Çözüldü** (`e997dd5`).
 2. **B4 sayısal değerleri — kısmen:** kod varsayılanı artık MES test profili (E9). FTMO `US500.cash` spread'i/komisyonu
@@ -292,11 +311,9 @@ Durum (2026-11-13): 1 ve 3–11 kapandı; 2 ve 23 kısmen. 12–27 açık (18–
 23. **Config doğrulaması (denetim Y1–Y10) — kısmen:** şema ve doğrulama geldi (`src/propbot/risk`, ADR-0003). Açık
     kalanlar: `config/strategies.yaml` (Y2); `cost_buffer`, spread koruması ve strateji önceliği anahtarları (Y6, Y10) —
     risk motoruyla birlikte, karar gerekir.
-24. **FTMO kuralları doğrulanmadı (VERIFY):** `rules_verified_at` boş. Resmi "Trading Objectives" sayfasının 2026-11-13
-    tarihli otomatik okumasında 2-Step için en az 4 işlem günü ve günlük limitin "00:00 CE(S)T'deki **bakiyeden**"
-    hesaplandığı görünüyor; profil ise `min_trading_days: null` ve `daily_loss_basis: max_balance_equity_at_reset`
-    (temkinli varsayım). İkisi de kullanıcı doğrulaması bekliyor; şema iki baz değerini de kabul eder. Stratejiler
-    reset'te pozisyon taşımadığı için simülasyon sonucu baz seçiminden etkilenmez.
+24. ~~**FTMO kuralları doğrulanmadı (VERIFY):** `rules_verified_at` boş; `min_trading_days` ve `daily_loss_basis`
+    doğrulama bekliyor.~~ **Çözüldü** (`4fc7bbd`, 2026-11-13): en az 4 işlem günü ve "reset anındaki bakiye" bazı resmi
+    sayfadan doğrulandı. Geçerlilik 30 gün.
 25. **Monte Carlo sınırları:** botun kendi günlük bütçesi / haftalık tavanı / ardışık kayıp duraklaması / düzleştirme
     eşiği, günler arası bağımlılık, lot yuvarlama ve gün sonu trailing toplam kayıp modellenmiyor (ADR-0002). Risk motoru
     yazılınca simülatör aynı ön kontrol kodunu çağırmalı.
@@ -305,3 +322,13 @@ Durum (2026-11-13): 1 ve 3–11 kapandı; 2 ve 23 kısmen. 12–27 açık (18–
     alınmalı: daha eski sürüm TP'de "dokunma = dolum" saydığı için daha iyimser sonuç verir.
 27. **Risk küçültme kademesi deneysel:** `--dd-risk-steps` yalnızca simülatörde karşılaştırma içindir. Bot kuralı olması
     ADR ve SPEC §8.1 değişikliği ister; değişmez kural 4 gereği yalnızca küçültme olabilir.
+28. **"Gap trading" maddesi profilde yok (FTMO, bütün aşamalar):** ilgili piyasanın en az 2 saat kapalı kalacağı bir
+    kapanıştan 2 saat ya da daha az önce (ve büyük planlı haberlerde) pozisyon açmak yasak uygulamalar listesinde. Cuma
+    günü haftalık kapanıştan önceki son 2 saatte NY girişleri bu maddeye girebilir. `US500.cash` seans saatleri terminalden
+    okunup risk motoruna "kapanıştan N dakika önce yeni giriş yok" kuralı eklenmeli (şema alanı + test).
+29. **Fonlu Standard hesapta haber ve piyasa arası kuralları:** haber penceresinde (±2 dk) SL/TP dolumu da ihlal sayılır;
+    2 saatten uzun piyasa aralarında pozisyon taşınamaz. `news_rule` yalnızca pencereyi tutuyor; fonlu aşama için
+    "kısıtlı haberden önce düzleştir" davranışı ya da Swing hesap tipi kararı gerekir (Faz 3/4).
+30. **`server_tz` biçimi:** FTMO MT5 sunucu saati New York + 7 saat (GMT+2, ABD yaz saatinde GMT+3). Şemadaki tek IANA
+    dilimi bunu ifade edemiyor; alan boş kaldı. Bar içe aktarma (§6.1) yazılırken biçim kararlaştırılmalı (ör. çapa
+    dilim + saat farkı) ve terminaldeki bilinen bir 09:30 NY mumuyla doğrulanmalı.
