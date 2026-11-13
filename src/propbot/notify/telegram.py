@@ -83,12 +83,19 @@ _POLLING_TASK_NAME: Final = "Updater:start_polling:polling_task"
 
 # Telegram turns anything that looks like a domain ("US500.cash") into a link.
 _DOMAIN_LIKE: Final = re.compile(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
+# A command with an id, e.g. "/atladim 126". Telegram makes "/atladim" a link that SENDS the
+# bare command when tapped; without its id that command would act on another entry. As
+# `code` the whole "/atladim 126" is copied instead.
+_COMMAND_WITH_ID: Final = re.compile(r"/[a-z_]+ [0-9]+")
+_CODE_TOKEN: Final = re.compile(f"{_COMMAND_WITH_ID.pattern}|{_DOMAIN_LIKE.pattern}")
 # Exceptions (httpx / httpcore) proving that the HTTP request was never written: the
 # connection could not be opened, or no pooled connection became free.
 _NEVER_SENT_ERRORS: Final = frozenset({"ConnectError", "ConnectTimeout", "PoolTimeout"})
 _HTTP_LIBRARIES: Final = frozenset({"httpx", "httpcore"})
 
 _FLAG_CLEAR: Final = "0"
+_SEND_FAILED_ALARM_CODE: Final = "send_failed"
+_SEND_FAILED_ALARM_THROTTLE_MS: Final = 10 * 60 * 1000
 _TRUNCATION_MARK: Final = "\n[… mesaj kısaltıldı]"
 
 _FATAL_TOKEN: Final = (
@@ -109,6 +116,41 @@ _DELETE_FAILED_TEXT: Final = "PIN içeren mesajı silemedim — elle sil ve PROP
 _log = structlog.get_logger(__name__)
 
 
+def _after_permanent_failure(tx: Tx, row: OutboxRow, delivery: "_Delivery") -> None:
+    """Telegram refused this message for good, so it did not arrive: do not let that be silent.
+
+    An entry that never reached the user is released from the budget, and the user is told
+    (throttled) that a message was dropped. A failed alarm raises no further alarm.
+    """
+    released = False
+    if row.signal_id is not None and row.expires_at_ms is not None:
+        entry = tx.get_budget_entry(row.signal_id)
+        if entry is not None and entry.counted:
+            tx.set_budget_counted(
+                signal_id=row.signal_id,
+                counted=False,
+                reason=ReleaseReason.UNDELIVERED,
+                now_ms=delivery.at_ms,
+            )
+            released = True
+    if row.kind is OutboxKind.ALARM:
+        return
+    subject = "bir mesaj" if row.signal_id is None else f"sinyal id {row.signal_id} mesajı"
+    text = (
+        f"[ALARM] Telegram {subject} için kalıcı hata verdi ({delivery.error}); mesaj "
+        "GÖNDERİLEMEDİ ve atlandı.\n"
+        "TradingView Alert Log'undan ne olduğunu kontrol et."
+    )
+    if released:
+        text += " Bu bir giriş sinyaliydi: ATLA say; bütçeden düşüldü."
+    tx.enqueue_alarm(
+        code=_SEND_FAILED_ALARM_CODE,
+        text=text,
+        now_ms=delivery.at_ms,
+        throttle_ms=_SEND_FAILED_ALARM_THROTTLE_MS,
+    )
+
+
 class TelegramFatalError(Exception):
     """Telegram cannot be used as configured; the process must stop.
 
@@ -117,7 +159,11 @@ class TelegramFatalError(Exception):
 
 
 def code_entity_spans(text: str) -> list[tuple[int, int]]:
-    """`(offset, length)` of every domain-like token, in UTF-16 code units.
+    """`(offset, length)` of every token to send as `code`, in UTF-16 code units.
+
+    Two kinds of token: domain-like words ("US500.cash"), which Telegram would turn into
+    links, and commands that carry an id ("/atladim 126"), whose tap would otherwise send
+    the command without the id.
 
     Telegram counts entity positions in UTF-16: a character outside the Basic Multilingual
     Plane (most emoji) is two units, a Turkish letter is one. The tokens are ASCII, so a
@@ -126,7 +172,7 @@ def code_entity_spans(text: str) -> list[tuple[int, int]]:
     spans: list[tuple[int, int]] = []
     units = 0
     position = 0
-    for match in _DOMAIN_LIKE.finditer(text):
+    for match in _CODE_TOKEN.finditer(text):
         units += _utf16_length(text[position : match.start()])
         position = match.start()
         spans.append((units, match.end() - match.start()))
@@ -504,6 +550,7 @@ class TelegramService:
                 )
             else:
                 tx.mark_message_failed(row.id, error=delivery.error, now_ms=delivery.at_ms)
+                _after_permanent_failure(tx, row, delivery)
 
     async def _send_text(self, text: str) -> None:
         """Send plain text to the one allowed chat; domain-like tokens become `code`."""
