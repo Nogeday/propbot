@@ -39,6 +39,8 @@ DOWNTIME_THRESHOLD_MS: Final = 90 * _MILLIS_PER_SECOND
 _ALWAYS_OVERLAPS_DAYS: Final = 8
 
 _FLAG_SET: Final = "1"
+# Istanbul wall-clock hour from which the daily expiry reminder may be sent.
+_REMINDER_FROM_HOUR: Final = 9
 
 _log = structlog.get_logger(__name__)
 
@@ -128,7 +130,12 @@ def _check_silence(tx: Tx, heartbeat: HeartbeatConfig, now_ms: int, started_ms: 
 
 
 def _check_expiry(tx: Tx, config: TvAlertsConfig, now_ms: int) -> int:
-    """Once per Istanbul calendar day: list the alerts that expire soon or already have."""
+    """Once per Istanbul calendar day: list the alerts that expire soon or already have.
+
+    Not before `_REMINDER_FROM_HOUR` local time: a reminder is not worth waking the user.
+    """
+    if utc_from_ms(now_ms).astimezone(ISTANBUL).hour < _REMINDER_FROM_HOUR:
+        return 0
     today = local_date(now_ms, ISTANBUL)
     if tx.get_state(StateKey.EXPIRY_REMINDER_DAY) == today.isoformat():
         return 0
