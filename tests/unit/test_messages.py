@@ -172,12 +172,25 @@ def test_limit_entry_names_the_level_and_has_no_price_band() -> None:
         "stop +5.00 puan, TP −10.00 puan\n"
         "Önerilen boyut: 50.00 lot (≈ $256162.50 nominal, 2.6× hesap) · risk ≈ $250 "
         "(%0.25) · günlük bütçe $250/$1000 (bu sinyal dahil)\n"
-        "Emri 17:46:00 TR'ye kadar gir; İPTAL mesajı gelene kadar bekler\n"
-        "TradingView'da stop/TP dolunca mesaj gelmez; pozisyonun hâlâ açıksa seans sonunda "
-        "kendin kapat.\n"
-        "Not: limit dolmazsa İPTAL mesajı gelir.\n"
+        "Emri 17:46:00 TR'ye kadar gir; İPTAL ya da ÇIKIŞ mesajı gelene kadar, en geç seans "
+        "sonuna kadar bekler\n"
+        "TradingView'da emir dolup stop/TP ile kapanırsa mesaj gelmez: seans sonunda emrin hâlâ "
+        "bekliyorsa SİL, pozisyonun açıksa kendin kapat.\n"
+        "Not: TradingView'daki limit dolmazsa İPTAL mesajı gelir.\n"
         "id 123 · bar 09:44 NY / 17:44 TR"
     )
+
+
+def test_only_a_limit_entry_tells_the_trader_to_delete_a_resting_order() -> None:
+    # TradingView's limit can fill while the trader's own order (another instrument) does
+    # not; no cancel follows then, so the entry message itself must bound the order's life.
+    limit = entry_text(row(strategy_id="ict_silver_bullet", order_type="limit"))
+    market = entry_text(row(strategy_id="ict_silver_bullet", order_type="market"))
+
+    assert "emrin hâlâ bekliyorsa SİL" in limit
+    assert "en geç seans sonuna kadar bekler" in limit
+    assert "SİL" not in market
+    assert "bekler" not in market
 
 
 def test_entry_without_a_target_says_so_and_gives_no_target_offset() -> None:
@@ -228,7 +241,7 @@ def test_the_reward_multiple_comes_from_the_levels_not_from_the_alert() -> None:
     ("strategy_id", "note"),
     [
         ("ny_orb_fvg", "Not: trailing stop güncellemeleri ayrı mesajla gelir."),
-        ("ict_silver_bullet", "Not: limit dolmazsa İPTAL mesajı gelir."),
+        ("ict_silver_bullet", "Not: TradingView'daki limit dolmazsa İPTAL mesajı gelir."),
         (
             "mr_bb_kc_rsi2",
             "Not: TP dinamiktir (BB ortası, her bar değişir); TradingView'dan izle.",
@@ -486,7 +499,9 @@ def exit_row(**overrides: Any) -> SignalRow:
 
 
 def test_exit_matches_the_contract_layout() -> None:
-    assert messages.exit_signal(exit_row(), venue=VENUE, link=LINKED) == (
+    text = messages.exit_signal(exit_row(), venue=VENUE, link=LINKED, limit_may_rest=False)
+
+    assert text == (
         "[ÇIKIŞ] NY ORB FVG · LONG · CME_MINI:MES1!\n"
         "Strateji pozisyonu kapattı (seans sonu / günlük zarar kesicisi / test aralığı sonu).\n"
         "FTMO US500.cash'te pozisyon açıksa PİYASADAN KAPAT.\n"
@@ -494,13 +509,30 @@ def test_exit_matches_the_contract_layout() -> None:
     )
 
 
+def test_exit_after_a_limit_entry_also_withdraws_the_resting_order() -> None:
+    signal = exit_row(strategy_id="ict_silver_bullet", side="short")
+
+    text = messages.exit_signal(signal, venue=VENUE, link=LINKED, limit_may_rest=True)
+
+    assert text == (
+        "[ÇIKIŞ] ICT Silver Bullet · SHORT · CME_MINI:MES1!\n"
+        "Strateji pozisyonu kapattı (seans sonu / günlük zarar kesicisi / test aralığı sonu).\n"
+        "FTMO US500.cash'te pozisyon açıksa PİYASADAN KAPAT; limit emrin hâlâ bekliyorsa "
+        "İPTAL ET.\n"
+        "id 125 (giriş id 123) · bar 15:59 NY / 23:59 TR"
+    )
+
+
 def test_exit_of_an_unseen_entry_carries_the_orphan_note() -> None:
-    text = messages.exit_signal(exit_row(), venue=VENUE, link=TradeLink(late_seconds=75.0))
+    text = messages.exit_signal(
+        exit_row(), venue=VENUE, link=TradeLink(late_seconds=75.0), limit_may_rest=True
+    )
 
     assert text == (
         "[GEÇ GELDİ +1 dk 15 sn] [ÇIKIŞ] NY ORB FVG · LONG · CME_MINI:MES1!\n"
         "Strateji pozisyonu kapattı (seans sonu / günlük zarar kesicisi / test aralığı sonu).\n"
-        "FTMO US500.cash'te pozisyon açıksa PİYASADAN KAPAT.\n"
+        "FTMO US500.cash'te pozisyon açıksa PİYASADAN KAPAT; limit emrin hâlâ bekliyorsa "
+        "İPTAL ET.\n"
         "(bu bot giriş sinyalini görmedi)\n"
         "id 125 · bar 15:59 NY / 23:59 TR"
     )
@@ -590,7 +622,7 @@ def test_every_builder_tolerates_a_row_without_optional_fields() -> None:
         ),
         messages.stop_update_signal(bare, venue=VENUE, link=link, current_offset=None),
         messages.stop_widen_warning(bare, venue=VENUE, link=link, current_offset=-1.0),
-        messages.exit_signal(bare, venue=VENUE, link=link),
+        messages.exit_signal(bare, venue=VENUE, link=link, limit_may_rest=True),
         messages.cancel_signal(bare, venue=VENUE, link=link, release_hint=True),
         messages.side_mismatch_alarm(bare, bare),
         messages.processing_error_alarm(bare),

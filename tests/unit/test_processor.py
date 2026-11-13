@@ -711,6 +711,35 @@ def test_exit_is_forwarded() -> None:
     )
 
 
+def test_exit_after_a_limit_entry_also_withdraws_the_resting_order() -> None:
+    # TradingView's limit was filled and is now flattened; the trader's own order may not be.
+    entry = stored(alerts.ict_silver_bullet_entry(SHORT), signal_id=126, outcome=Outcome.FORWARDED)
+    exit_alert = stored(alerts.ict_silver_bullet_exit(SHORT), signal_id=128)
+
+    decision = decide(exit_alert, follow_up(exit_alert, reference=entry), CONFIG)
+
+    assert decision.outcome is Outcome.FORWARDED
+    assert text_of(decision).splitlines()[1:] == [
+        "Strateji pozisyonu kapattı (seans sonu / günlük zarar kesicisi / test aralığı sonu).",
+        "FTMO US500.cash'te pozisyon açıksa PİYASADAN KAPAT; limit emrin hâlâ bekliyorsa İPTAL ET.",
+        text_of(decision).splitlines()[-1],
+    ]
+    assert text_of(decision).splitlines()[-1].startswith("id 128 (giriş id 126) · bar ")
+
+
+@pytest.mark.parametrize("reference", [None, FORWARDED_SHORT_ENTRY], ids=["none", "other_side"])
+def test_exit_of_an_unknown_entry_assumes_a_resting_limit_order(
+    reference: SignalRow | None,
+) -> None:
+    context = follow_up(EXIT, reference=reference, reference_budget=None)
+
+    decision = decide(EXIT, context, CONFIG)
+
+    assert decision.outcome is Outcome.FORWARDED
+    assert "PİYASADAN KAPAT; limit emrin hâlâ bekliyorsa İPTAL ET." in text_of(decision)
+    assert text_of(decision).splitlines()[-2] == "(bu bot giriş sinyalini görmedi)"
+
+
 def test_cancel_is_forwarded_with_the_release_command_of_its_entry() -> None:
     entry = stored(alerts.ict_silver_bullet_entry(SHORT), signal_id=126, outcome=Outcome.FORWARDED)
     cancel = stored(alerts.ict_silver_bullet_cancel(SHORT), signal_id=127)
