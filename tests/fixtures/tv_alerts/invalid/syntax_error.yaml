@@ -1,0 +1,3 @@
+# MUST FAIL: YAML syntax error
+webhook:
+  source_ips: ["52.89.214.238"

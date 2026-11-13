@@ -1,0 +1,21 @@
+# Valid: values at the edges of what the schema accepts. Test data, not the real config.
+webhook:
+  rules_verified_at: "2026-11-13"        # a quoted date is accepted too
+  source_ips: ["52.89.214.238"]
+  allowed_ports: [443]
+  response_timeout_seconds: 2.5
+  mtls_supported: false
+receiver:
+  trusted_proxies: ["192.168.10.0/24", "fd00::/120", "10.1.2.3", "172.31.255.255/32"]
+  client_ip_header: "x-forwarded-for"
+  rate_limit_per_minute: 1
+  max_body_bytes: 1024
+heartbeat:
+  max_silence_minutes: 1
+  watch_windows:
+    - {days: [sun], start: "18:00", end: "23:59"}
+    - days: [mon, tue, wed, thu, fri, sat]
+      start: "00:00"
+      end: "17:00"
+alerts: []
+expiry_reminder_days: 30

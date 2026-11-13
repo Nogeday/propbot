@@ -1,0 +1,20 @@
+# MUST FAIL: max_silence_minutes above the code cap (75)
+webhook:
+  rules_verified_at: 2026-11-01
+  source_ips: ["52.89.214.238", "34.212.75.30", "54.218.53.128", "52.32.178.7"]
+  allowed_ports: [80, 443]
+  response_timeout_seconds: 3
+  mtls_supported: false
+receiver:
+  trusted_proxies: ["127.0.0.1", "::1"]
+  client_ip_header: "X-Forwarded-For"
+  rate_limit_per_minute: 30
+  max_body_bytes: 4096
+heartbeat:
+  max_silence_minutes: 90
+  watch_windows:
+    - {days: [mon, tue, wed, thu, fri], start: "03:00", end: "16:00"}
+alerts:
+  - {name: "heartbeat MES1! 1m", expires_on: 2027-01-12}
+  - {name: "ny_orb_fvg MES1! 1m", expires_on: null}
+expiry_reminder_days: 7
