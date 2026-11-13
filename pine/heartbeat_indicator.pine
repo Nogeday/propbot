@@ -14,6 +14,8 @@
 //   1. Inputs → "Webhook token": the SAME value as TV_WEBHOOK_TOKEN on the receiver.
 //   2. Create ONE alert: Condition = this indicator → "Any alert() function call";
 //      Webhook URL = the receiver address (https://…/tv/webhook). The message box is ignored.
+//      Notifications: tick ONLY "Webhook URL". The message carries the token, so e-mail, app,
+//      pop-up and plain-text notifications would copy the token to those places.
 //   3. Re-create the alert after changing an input (an alert keeps the inputs it was created with).
 //   The alert counts toward the plan's alert limit and expires like any other alert: write its
 //   expiry date into config/tv_alerts.yaml (alerts → expires_on).
@@ -25,12 +27,14 @@
 //   • The payload is schema v1 with action "heartbeat" and strategy_id "heartbeat"; it carries no
 //     prices. bar_time is the bar's OPEN time in epoch milliseconds, like every other alert.
 //   • Daily and higher charts are refused: the receiver cannot check their freshness.
+//   • The token input is declared with display.none, so it is not printed in the status line
+//     next to the indicator's name (a chart screenshot would otherwise show it).
 // =====================================================================================
 indicator(title = "PropBot Heartbeat", shorttitle = "PB Heartbeat", overlay = true)
 
 // ───────────────────────────── INPUTS ─────────────────────────────
 grpAlert = "Webhook Alert"
-alertToken  = input.string("", "Webhook token", group = grpAlert, tooltip = "Webhook-only random value (NOT a login or API key). Must match the receiver. Create ONE alert: condition = this indicator, 'Any alert() function call', webhook URL = receiver. Re-create the alert after changing any input.")
+alertToken  = input.string("", "Webhook token", group = grpAlert, display = display.none, tooltip = "Webhook-only random value (NOT a login or API key). Must match the receiver. Create ONE alert: condition = this indicator, 'Any alert() function call', webhook URL = receiver, and tick ONLY 'Webhook URL' under Notifications. Re-create the alert after changing any input.")
 intervalMin = input.int(60, "Heartbeat interval (minutes)", minval = 1, maxval = 60, group = grpAlert, tooltip = "One message each time the New York clock crosses a multiple of this many minutes. Keep 60: the receiver warns after 75 minutes of silence.")
 showBeats   = input.bool(true, "Highlight heartbeat bars", group = grpAlert)
 

@@ -226,7 +226,9 @@ Her strateji için (ve heartbeat göstergesi için) **bir** alarm:
 1. Script'in **Inputs → Webhook token** alanına `.env`'deki `TV_WEBHOOK_TOKEN` değerini yaz.
 2. Alarm oluştur → Condition: strateji için **"alert() function calls only"**, `pine/heartbeat_indicator.pine` için
    **"Any alert() function call"**.
-3. Notifications → **Webhook URL**: `https://…/tv/webhook`. Mesaj kutusu kullanılmaz.
+3. Notifications → **Webhook URL**: `https://…/tv/webhook`. Mesaj kutusu kullanılmaz. **Yalnızca Webhook URL işaretli
+   olsun:** alert mesajı token'ı içerir; e-posta, uygulama bildirimi, pop-up ya da "plain text" açıksa token o kanallara
+   (posta kutusu, telefonun kilit ekranı) kopyalanır.
 4. Alarmın bitiş tarihini `config/tv_alerts.yaml` → `alerts` altına yaz; bot bitişten 7 gün önce hatırlatır:
    ```yaml
    alerts:
@@ -238,6 +240,29 @@ Her strateji için (ve heartbeat göstergesi için) **bir** alarm:
 Heartbeat göstergesini stratejilerle **aynı sembolün** 1 dakikalık grafiğine ekle. Saat başı bir mesaj gönderir; izlenen
 pencerede 75 dakika hiçbir alert gelmezse bot "TradingView alarm hattı sessiz" uyarısı yollar. Tatil ve erken kapanış
 günlerinde bu uyarı beklenen bir şeydir.
+
+### 8.1 Token'ı kimler görebilir
+- **Grafik:** strateji script'lerinde "Webhook token" girdisinin değeri, grafikte script adının yanındaki durum
+  satırında (girdi değerleri) yazar. Ekran görüntüsü, yayınlanan fikir ya da paylaşılan grafik bağlantısı token'ı
+  gösterir. Paylaşmadan önce grafik ayarlarından durum satırındaki gösterge girdilerini/argümanlarını kapat (seçeneğin
+  adı TradingView sürümüne göre değişebilir) ya da script'i grafikten kaldır. Heartbeat göstergesinde girdi
+  `display.none` ile tanımlıdır; altı strateji dosyasında aynı tek satırlık değişiklik onayını bekliyor (CHANGELOG
+  açık bulgu 45).
+- **Alarm bildirimleri:** 3. adım (yalnızca Webhook URL).
+- **TradingView Alert Log:** mesajların tamamı (token dahil) hesabında durur; hesabını 2FA ile koru.
+- Token bir giriş bilgisi değildir, ama token'ı **ve** webhook adresini bilen biri kendi TradingView alarmıyla sana
+  sahte sinyal gönderebilir (TradingView'ın dört kaynak adresi bütün kullanıcılarının ortak adresidir). Bot emir
+  vermez; risk, sahte bir mesaja bakıp elle işlem açmandır. Sızdığından şüphelenirsen hemen yenile (8.2).
+
+### 8.2 Token yenileme
+İzlenen pencerelerin dışında yap; arada gelen eski token'lı alert'ler reddedilir.
+
+1. Yeni değer üret: `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`.
+2. `nano .env` → `TV_WEBHOOK_TOKEN`'ı değiştir → `sudo systemctl restart propbot`.
+3. TradingView'da **her** script'in (stratejiler + heartbeat) "Webhook token" girdisine yeni değeri yaz.
+4. **Her alarmı sil ve yeniden kur** (alarm, oluşturulduğu andaki girdilerle çalışır; girdiyi değiştirmek yetmez).
+5. Doğrula: sonraki saat başından sonra `/saglik` → "son heartbeat" yeni olmalı. Unutulan bir alarm ilk tetiklendiğinde
+   eski token'la gönderir; bot bunu "kimliği doğrulanamadan reddedildi" alarmıyla bildirir (saatte en çok bir alarm).
 
 ## 9. Duman testi
 
@@ -267,7 +292,7 @@ Uçtan uca test TradingView'dan yapılır: heartbeat alarmını kur, saat başı
 | `/atladim [id]` | almadığın girişin riskini bütçeden düşer **ve o girişin stop/çıkış mesajlarını keser** (id yoksa: sana ulaşmış son giriş). Yanıt hangi girişin işaretlendiğini söyler |
 | `/aldim <id>` | `/atladim`'ı (ya da "iletilemedi" işaretini) geri alır |
 | `/duraklat` · `/devam` | yeni giriş sinyallerini durdurur / sürdürür (stop, çıkış ve iptal mesajları her zaman gelir) |
-| `/kill <PIN>` | yeni girişleri kalıcı keser; açık pozisyonu **sen** kapatırsın. Geri dönüş: `/devam <PIN>`. PIN içeren mesajı bot siler; silemezse uyarır |
+| `/kill <PIN>` | yeni girişleri kalıcı keser; açık pozisyonu **sen** kapatırsın. Geri dönüş: `/devam <PIN>`. PIN içeren mesajı bot siler; silemezse uyarır. 6+ haneli sayı içeren **her** mesaj da (PIN olsun olmasın) silinir |
 | `/mod` | çalışan mod (`signal`); diğer modlar bu sürümde kilitli |
 | `/saglik` | çalışma süresi, kuyruk, gecikme medyanı, reddedilen istek sayaçları, saat kontrolü, kural tazeliği |
 
@@ -279,6 +304,14 @@ Uçtan uca test TradingView'dan yapılır: heartbeat alarmını kur, saat başı
 - **Stop güncellemeleri de mesafe olarak gelir** ("stop = kendi giriş fiyatın −3.50 puan"). Bot, stop'unu genişletecek
   bir güncellemeyi iletmez; "[UYARI] … mevcut stop'unu KORU" yazar (değişmez kural 2).
 - **Stop ya da TP TradingView'da dolunca mesaj gelmez.** FTMO'daki pozisyonun hâlâ açıksa seans sonunda kendin kapat.
+- **Limit giriş (Silver Bullet):** TradingView'daki limit dolup senin FTMO emrin dolmayabilir (başka enstrüman, başka
+  fiyat). O durumda İPTAL mesajı gelmez; TradingView işlemi stop/TP ile kapanırsa hiç mesaj gelmez. Emrin İPTAL ya da
+  ÇIKIŞ mesajına kadar, en geç seans sonuna kadar bekler; o anda hâlâ bekliyorsa **sil**. MT5 bekleyen emre son kullanma
+  süresi tanımlamaya izin veriyorsa (terminalde doğrula) emri girerken seans sonunu yaz.
+- **`/atladim` ve `/aldim` mesajlarda dokunulabilir bağlantı değildir** (kopyalanır ya da elle yazılır): dokununca
+  gönderilen çıplak `/atladim` son girişin riskini bütçeden düşerdi.
+- **Yeniden başlatma alarmı:** bot izlenen pencerede yeniden başlarsa "[ALARM] Bot … yeniden başladı" yazar (en çok 30
+  dakikada bir). "… alarmından beri N. kez" diyorsa servis çöküp duruyor demektir: `journalctl -u propbot -n 100`.
 - **`/duraklat` ve `/kill` gecikmeli ulaşsa da uygulanır**; `/devam`, `/atladim`, `/aldim` 60 saniyeden eskiyse reddedilir.
 - **Yarım gün / erken kapanış:** seans sonu `exit` alert'ine güvenme; kapanıştan önce elle düzleştir (açık bulgu 18).
 - **Haftalık:** `journalctl -u propbot --since "7 days ago" | grep -c webhook_rejected`, `uv run propbot signals report`.
@@ -303,6 +336,8 @@ Uçtan uca test TradingView'dan yapılır: heartbeat alarmını kur, saat başı
 | "Sinyal işlenemedi" alarmı | o sinyalde yazılım hatası; kuyruk devam eder | `journalctl -u propbot \| grep signal_processing_failed`; Claude Code'a bildir |
 | Telegram'da "Geçersiz alert gövdesi" | script eski sürüm; desteklenmeyen zaman dilimi (günlük+); sembol adında beklenmeyen karakter | mesajdaki alan adları |
 | "TradingView alarm hattı sessiz" | alarm durmuş ya da süresi dolmuş; TradingView kesintisi; tatil | TradingView Alerts paneli |
+| "[ALARM] Bot … yeniden başladı" | servis yeniden başlatıldı (güncelleme) ya da çöktü; "N. kez" yazıyorsa çökme döngüsü | `journalctl -u propbot -n 100`; o aralıkta alert geldiyse TradingView Alert Log |
+| "[ALARM] Bot … arasında kapalıydı" | sunucu/servis 90 saniyeden uzun kapalı kaldı | `systemctl status propbot`, `journalctl -u propbot`; TradingView Alert Log |
 | "[BAYAT SİNYAL]" sık geliyor | sunucu saati kaymış; ağ gecikmesi | `chronyc tracking`, `/saglik` gecikme medyanı |
 | `/saglik` yanıt vermiyor | Telegram token/sohbet kimliği yanlış; ağ yok | `journalctl -u propbot -n 50` |
 | Mesajda "boyut hesaplanamadı" | venue profilinde `contract.*` boş | 3.3 |
