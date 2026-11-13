@@ -15,6 +15,9 @@ Ayrıntılı spesifikasyon `docs/SPEC.md`'de — bir faza başlamadan önce o fa
 | 3 | MT5 köprüsü, `paper` ve `approve` modları (yalnızca demo hesap) | §7 |
 | 4 | Ücretli sınav — yalnızca §9 Go/No-Go kapısı PASS ve kullanıcı kararıyla | §9 |
 
+Faz 2 ön dilimi (2026-11-13 kullanıcı kararı): proje iskeleti, config şemaları ve Monte Carlo prop simülatörü Faz 0
+kabulü ve Faz 1 beklenmeden yapıldı (SPEC §6 başındaki not). Faz sırası bunun dışında değişmedi.
+
 Öncelik sırası: (1) sermaye ve prop kuralı koruma → (2) Pine ile parite → (3) gözlemlenebilirlik → (4) özellik/hız.
 
 ## Çalışma şekli
@@ -58,7 +61,7 @@ Ayrıntılı spesifikasyon `docs/SPEC.md`'de — bir faza başlamadan önce o fa
   Faz 1 sinyali ve araştırma içindir; webhook yürütme yolunda kullanılmaz.
 
 ## Teknoloji
-Python 3.12 · uv · ruff · mypy --strict (`src/`) · pytest + hypothesis · pydantic v2 + pydantic-settings ·
+Python 3.12 · uv · ruff · mypy --strict (`src/`) · pytest + hypothesis · pydantic v2 + pydantic-settings · PyYAML ·
 FastAPI + uvicorn (Faz 1) · python-telegram-bot (async) · SQLite (WAL) · pandas/numpy · exchange_calendars ·
 structlog · MQL5 (Faz 3, ince köprü EA). Dağıtım: Ubuntu · systemd · Caddy (TLS) · ufw · chrony.
 
@@ -86,6 +89,9 @@ docs/                 SPEC.md, adr/, runbook.md, tv-verification-checklist.md
 uv sync
 uv run pytest -q
 uv run ruff check . && uv run mypy src
+uv run propbot config check
+uv run propbot montecarlo --trades <trades.csv> --venue config/venues/ftmo_2step_100k.yaml --cost-r 0.05
+# Henüz yok (kendi fazında):
 uv run propbot backtest --strategy ny_orb_fvg --data data/<file>.parquet --oos-start 2025-01-01
 uv run propbot serve --mode signal
 ```

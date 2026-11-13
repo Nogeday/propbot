@@ -382,6 +382,10 @@ systemd (`Restart=always`) · chrony · log rotasyonu.
 
 ## 6. Faz 2 — Python motoru ve backtest
 
+> **Ön dilim (kullanıcı kararı, 2026-11-13):** proje iskeleti, `config/` şemaları (§8.1, §8.3) ve Monte Carlo prop
+> simülatörü (§6.5) Faz 0 kabulü ve Faz 1 beklenmeden yapıldı; fiyat verisi ve derlenmiş Pine tabanı gerektirmezler.
+> §6.1–6.4 ve §6.6, veri ve doğrulanmış Pine tabanı gelince "Faz 2'ye geç" kararıyla yapılır; §6.7 kabulü o zaman aranır.
+
 ### 6.1 Veri
 - İçe aktarma: CSV/Parquet (MT5 "Bars → Export", TradingView grafik verisi dışa aktarımı, tedarikçi verisi).
   MT5 bar saatleri **sunucu saatindedir** → `server_tz` ile UTC'ye çevir (VERIFY: terminalde bilinen bir 09:30 NY mumuyla karşılaştır).
@@ -402,9 +406,14 @@ beklentinin t-istatistiği, IS/OOS ayrımı, hafta günü ve saat tabloları (Pi
 walk-forward (kayan pencereler). Parametre optimizasyonu varsayılan olarak kapalı; açılırsa yalnızca IS'te ve deneme sayısı raporlanır.
 
 ### 6.5 Monte Carlo prop simülatörü
-- Girdi: işlem R dizisi (gün bazında blok bootstrap — aynı günün işlemleri birlikte örneklenir), venue profili, risk %, maliyetler.
+- Girdi: giriş/çıkış zamanlı işlem R listesi (CSV; biçim `docs/monte-carlo.md`), venue profili, risk %, maliyetler,
+  isteğe bağlı rastgele işlem atlama olasılığı. Gün bazında blok bootstrap (yerine koyarak): aynı prop gününün işlemleri
+  birlikte örneklenir; işlemsiz hafta içi günler de havuzdadır.
 - Kurallar: günlük kayıp (reset saati ve baz), toplam kayıp (statik / gün sonu trailing), hedef(ler), minimum gün, faz sırası.
-- Çıktı: P(geçme), P(ihlal), geçme süresi dağılımı (işlem günü), ihlal nedeni dağılımı.
+  İhlal özsermayeyle denetlenir: işlem içi yüzen zarar varsayılan olarak stop'a kadar (−1R) sayılır (`mae_r` varsa o).
+  Hedef yalnızca açık pozisyon yokken sayılır. Gün sonu trailing toplam kayıp henüz desteklenmez (profilde formül yok).
+- Çıktı: P(faz 1), P(iki faz), P(ihlal) ve faz × neden dağılımı, sonuçlanmayan yol oranı, geçme süresi dağılımı
+  (piyasa günü), maks. düşüşün %95 / %99 dilimleri ve beklenen kuyruk kaybı (ES). Modelleme kararları: ADR-0002.
 - Sağlık testi: E = 0, RR 1:2 durumunda sonuç analitik sınır-geçme olasılığıyla tutarlı (tolerans testte tanımlı).
 
 ### 6.6 Parite testi
@@ -457,6 +466,8 @@ canlı sonuçlar backtest'in %95 güven aralığında.
 - Eşzamanlılık: strateji başına 1, toplam `max_positions_total`.
 - Haber: profil `news_rule`; kaynak `data/news.yaml` (haftalık elle güncellenir; site kazıma yok).
 - `rules_verified_at` boş veya > 30 gün → `signal`/`paper` dışındaki modlar kilitli.
+- Config yüklenirken doğrulanır (`src/propbot/risk`): tavanı aşan değer, yanlış tip ya da bilinmeyen anahtar **yükleme
+  hatasıdır** (sessizce kırpılmaz); `null` yalnızca VERIFY / çalışma-anı alanlarında kabul edilir ve raporlanır (ADR-0003).
 
 ### 8.2 Zaman eşlemesi (Türkiye UTC+3, yaz saati yok)
 | Olay | ABD kış saati (EST) | ABD yaz saati (EDT) |

@@ -194,9 +194,65 @@ Commit'ler: `a5af400` E11 · `159d883` E12.
   sonuçlar bir miktar kötüleşir (daha gerçekçi). MTF Plan B'de 1,5R eşiği emir değil gözlem olduğu için
   (bar high/low ≥ TP1) değişmedi.
 
+## Faz 2 ön dilimi — iskelet, config şemaları, Monte Carlo (2026-11-13)
+
+Kullanıcı kararı: denetimin önerdiği sırayla (`docs/audits/2026-11-13-repaint-lookahead-denetimi.md`, bölüm 6) Faz 2'nin
+fiyat verisi ve derlenmiş Pine tabanı gerektirmeyen kısmı Faz 0 kabulü ve Faz 1 beklenmeden yapıldı (`docs/SPEC.md` §6
+başındaki not). `pine/` ve `config/` dosyalarına dokunulmadı. Kararlar: `docs/adr/0002-…`, `docs/adr/0003-…`.
+Kullanım: `docs/monte-carlo.md`.
+
+Commit'ler: `5d9f2ac` iskelet · `79d7ecc` config şemaları · `1a5a365` prop günü · `063fc42` işlem listesi ·
+`a45432e` Monte Carlo · `5f0e222` CLI ve rapor.
+
+### Proje iskeleti
+- Python 3.12 (uv kendi kopyasını yönetir; sistemdeki 3.14'e dokunulmaz), `uv_build`, ruff, mypy --strict (`src/`),
+  pytest + hypothesis; sürümler `uv.lock` ile sabit. `uv` bu makineye `pipx install uv` ile kuruldu (0.13.8).
+- Çalışma zamanı bağımlılıkları: pydantic, PyYAML, numpy. pandas, pydantic-settings ve diğerleri onlara ihtiyaç duyan
+  faza bırakıldı. Yalnızca içinde kod olan paketler açıldı (`core`, `risk`, `backtest`).
+- ruff Markdown dosyalarına dokunmaz (biçimleyicisi kod bloklarını yeniden yazıyor); pytest uyarıları hata sayar.
+
+### Config şemaları (`src/propbot/risk/`) — denetim Y1, Y7–Y9
+- `config/risk.yaml` ve `config/venues/*.yaml` için pydantic v2 modelleri: katı tipler (`true` ya da `"0.25"` sayı
+  olmaz), bilinmeyen / eksik / yinelenen anahtar hatadır, bütün anahtarlar zorunludur.
+- Enum'lar: `platform` (`mt5`), `max_loss_type` (`static`, `trailing_eod`), `daily_loss_basis`
+  (`max_balance_equity_at_reset`, `balance_at_reset`). `daily_reset`: tırnaklı `"HH:MM"` + `zoneinfo` ile çözülen saat
+  dilimi (tırnaksız `22:30` YAML'da 1350 sayısıdır; açıklayıcı hata verir).
+- Kod tavanları: `risk_per_trade_pct ≤ 0,5` · `max_positions_per_strategy = 1` · `self_request_budget_per_day ≤ 300`.
+  Dosyalar arası: `daily_cap_pct ≤ 0,5 × daily_loss_limit_pct` · `daily_loss_limit_pct < max_loss_pct` · istek bütçesi
+  ≤ firma eşiği. Tavanı aşan değer **yükleme hatasıdır**, sessizce kırpılmaz (ADR-0003); günlük bütçe yine `min(…)`.
+- `null` yalnızca VERIFY (`rules_verified_at`, `min_trading_days`, `server_tz`) ve çalışma-anı (`contract.*`)
+  alanlarında; `unresolved_fields()` raporlar. `rules_freshness()`: boş / bayat (> 30 gün) / ileri tarihli / taze.
+- `uv run propbot config check`: şema, çapraz kurallar, günlük bütçe, mod kilidi ve boş alanlar; sorun varsa çıkış kodu 1.
+
+### Prop günü (`src/propbot/core/propday.py`)
+- `prop_day()`: UTC anını venue'nun `daily_reset` saat dilimi ve saatine göre prop gününe çevirir (değişmez kural 9).
+  ABD ve AB yaz saati geçişlerinin farklı haftaları (2026-03-08 / 03-29, 2026-10-25 / 11-01) testlidir: Prag gece
+  yarısı New York'ta 18:00, yalnızca bir taraf yaz saatindeyken 19:00'dır.
+
+### Monte Carlo prop simülatörü (`src/propbot/backtest/`) — SPEC §6.5
+- Girdi: belgelenmiş genel CSV (`entry_time, exit_time, r` + isteğe bağlı `strategy_id, mae_r`). Gün bazında blok
+  bootstrap (işlemsiz hafta içi günler havuzda), isteğe bağlı rastgele işlem atlama, işlem başına sabit R maliyet.
+- Kurallar yalnızca venue profilinden: günlük kayıp (reset'teki bakiyeden), statik toplam kayıp, faz hedefleri, minimum
+  işlem günü. İhlal özsermayeyle denetlenir; işlem içi yüzen zarar varsayılan olarak stop'a kadar sayılır (kötümser).
+- Çıktı: P(faz 1), P(iki faz), P(ihlal) faz × neden, sonuçlanmayan yollar, geçme süresi (piyasa günü), maks. düşüşün
+  %95 / %99 dilimleri ve beklenen kuyruk kaybı. Türkçe rapor: `uv run propbot montecarlo …`.
+- Aynı tohum aynı raporu verir (varsayılan 10 000 yol). Sağlık testi: E = 0, RR 1:2 durumunda faz 1 için analitik
+  0,4959, iki faz için 0,3270; simülasyon 4 standart hata içinde. Modelleme kararları ve sınırlar: ADR-0002.
+- Rapor olasılık verir, Go/No-Go hükmü vermez. `tests/fixtures/trades/synthetic_trades.csv` uydurma bir listedir;
+  yalnızca aracın çalıştığını gösterir.
+
+### Bu dilimdeki kullanıcı kararları (2026-11-13)
+- **Düzleştirme eşiği:** istekteki "günlük limitin %80'inde düzleştir" değerlendirildi; daha sıkı olan
+  `flatten_when_daily_buffer_below_pct: 40` (limitin %60'ında) korundu. `config/risk.yaml` değişmedi.
+- **Erimeye göre risk küçültme ("dinamik Kelly"):** yalnızca simülatörde, varsayılanı kapalı deneysel seçenek
+  (`--dd-risk-steps`); bot kuralı değil → açık bulgu 27.
+- **`min_trading_days`:** profilde boş kaldı; simülatör `--assume-min-trading-days N` olmadan çalışmaz ve raporda
+  VARSAYIM yazar.
+- **İşlem listesi:** şimdilik genel CSV → açık bulgu 26.
+
 ## Açık bulgular
 
-Durum (2026-11-13): 1 ve 3–11 kapandı; 2 kısmen. 12–23 açık (18–23 denetimden).
+Durum (2026-11-13): 1 ve 3–11 kapandı; 2 ve 23 kısmen. 12–27 açık (18–23 denetimden, 24–27 Faz 2 ön diliminden).
 
 1. ~~**MTF derleme riski:** `riskPts := ...` bildirimi olmayan değişkene atama.~~ **Çözüldü** (`e997dd5`).
 2. **B4 sayısal değerleri — kısmen:** kod varsayılanı artık MES test profili (E9). FTMO `US500.cash` spread'i/komisyonu
@@ -233,5 +289,18 @@ Durum (2026-11-13): 1 ve 3–11 kapandı; 2 kısmen. 12–23 açık (18–23 den
     doğrulanmadı.
 22. **MTF hacim filtresi (D10):** MES'te gerçek hacim, FTMO CFD'sinde tick hacmi; yürütme sinyali venue verisinde
     hesaplanacağı için (ADR-0000) parite ve G1 açısından izlenmeli.
-23. **Config doğrulaması (denetim Y1–Y10):** `config/*.yaml` için şema/doğrulama kodu ve `config/strategies.yaml` yok;
-    `cost_buffer`, spread koruması ve strateji önceliği için anahtar tanımlı değil. Python iskeletiyle birlikte gelecek.
+23. **Config doğrulaması (denetim Y1–Y10) — kısmen:** şema ve doğrulama geldi (`src/propbot/risk`, ADR-0003). Açık
+    kalanlar: `config/strategies.yaml` (Y2); `cost_buffer`, spread koruması ve strateji önceliği anahtarları (Y6, Y10) —
+    risk motoruyla birlikte, karar gerekir.
+24. **FTMO kuralları doğrulanmadı (VERIFY):** `rules_verified_at` boş. Resmi "Trading Objectives" sayfasının 2026-11-13
+    tarihli otomatik okumasında 2-Step için en az 4 işlem günü ve günlük limitin "00:00 CE(S)T'deki **bakiyeden**"
+    hesaplandığı görünüyor; profil ise `min_trading_days: null` ve `daily_loss_basis: max_balance_equity_at_reset`
+    (temkinli varsayım). İkisi de kullanıcı doğrulaması bekliyor; şema iki baz değerini de kabul eder. Stratejiler
+    reset'te pozisyon taşımadığı için simülasyon sonucu baz seçiminden etkilenmez.
+25. **Monte Carlo sınırları:** botun kendi günlük bütçesi / haftalık tavanı / ardışık kayıp duraklaması / düzleştirme
+    eşiği, günler arası bağımlılık, lot yuvarlama ve gün sonu trailing toplam kayıp modellenmiyor (ADR-0002). Risk motoru
+    yazılınca simülatör aynı ön kontrol kodunu çağırmalı.
+26. **TradingView dönüştürücüsü yok:** simülatör belgelenmiş genel CSV okur (`docs/monte-carlo.md`). "List of Trades"
+    dışa aktarımı için dönüştürücü, v2 script'ler derlenip örnek dosya gelince yazılacak.
+27. **Risk küçültme kademesi deneysel:** `--dd-risk-steps` yalnızca simülatörde karşılaştırma içindir. Bot kuralı olması
+    ADR ve SPEC §8.1 değişikliği ister; değişmez kural 4 gereği yalnızca küçültme olabilir.
