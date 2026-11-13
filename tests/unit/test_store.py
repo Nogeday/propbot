@@ -169,6 +169,9 @@ def raw_execute(path: Path, sql: str, *, ignore_checks: bool = False) -> list[tu
                 "rejected_widen",
                 "no_active_trade",
                 "heartbeat",
+                "skip_clock",
+                "superseded",
+                "error",
             ],
         ),
         (OutboxKind, ["signal", "alarm", "notice"]),
@@ -185,6 +188,7 @@ def raw_execute(path: Path, sql: str, *, ignore_checks: bool = False) -> list[tu
                 "heartbeat_alarm_ms",
                 "heartbeat_silent",
                 "expiry_reminder_day",
+                "last_alive_ms",
             ],
         ),
     ],
@@ -651,7 +655,12 @@ TX_CALLS: dict[str, Callable[[Tx], object]] = {
     "get_message": lambda tx: tx.get_message(1),
     "messages_for_signal": lambda tx: tx.messages_for_signal(1),
     "mark_message_sent": lambda tx: tx.mark_message_sent(1, NOW_MS),
-    "mark_message_retry": lambda tx: tx.mark_message_retry(1, next_attempt_ms=NOW_MS, error="e"),
+    "mark_message_retry": lambda tx: tx.mark_message_retry(
+        1, next_attempt_ms=NOW_MS, error="e", uncertain=False
+    ),
+    "flag_pending_deadlines_uncertain": lambda tx: tx.flag_pending_deadlines_uncertain(),
+    "pending_expired_messages": lambda tx: tx.pending_expired_messages(NOW_MS),
+    "messages_created_between": lambda tx: tx.messages_created_between(0, NOW_MS + 1),
     "mark_message_failed": lambda tx: tx.mark_message_failed(1, error="e", now_ms=NOW_MS),
     "mark_message_expired": lambda tx: tx.mark_message_expired(1, NOW_MS),
     "outbox_counts": lambda tx: tx.outbox_counts(),
@@ -1485,6 +1494,7 @@ def test_enqueued_message_is_pending_and_due_immediately(store: Store) -> None:
         next_attempt_ms=NOW_MS,
         sent_at_ms=None,
         last_error=None,
+        delivery_uncertain=False,
     )
 
 
@@ -1537,7 +1547,9 @@ def test_outbox_is_first_in_first_out_whatever_the_retry_time(store: Store) -> N
         assert head is not None
         assert head.id == first
         # A head waiting for its retry still blocks the queue: order is never changed.
-        tx.mark_message_retry(first, next_attempt_ms=NOW_MS + 300_000, error="timeout")
+        tx.mark_message_retry(
+            first, next_attempt_ms=NOW_MS + 300_000, error="timeout", uncertain=False
+        )
         head = tx.next_pending_message()
         assert head is not None
         assert (head.id, head.next_attempt_ms) == (first, NOW_MS + 300_000)
@@ -1594,9 +1606,13 @@ def test_mark_retry_counts_attempts_and_keeps_the_message_pending(store: Store) 
 
     with store.transaction() as tx:
         before = tx.get_message(message_id)
-        tx.mark_message_retry(message_id, next_attempt_ms=NOW_MS + 2000, error="Timed out")
+        tx.mark_message_retry(
+            message_id, next_attempt_ms=NOW_MS + 2000, error="Timed out", uncertain=False
+        )
         once = tx.get_message(message_id)
-        tx.mark_message_retry(message_id, next_attempt_ms=NOW_MS + 6000, error="Flood control")
+        tx.mark_message_retry(
+            message_id, next_attempt_ms=NOW_MS + 6000, error="Flood control", uncertain=False
+        )
         twice = tx.get_message(message_id)
 
     assert before is not None
@@ -1612,7 +1628,9 @@ def test_sending_after_retries_keeps_the_attempt_count_and_last_error(store: Sto
     message_id = enqueue(store)
 
     with store.transaction() as tx:
-        tx.mark_message_retry(message_id, next_attempt_ms=NOW_MS + 2000, error="Timed out")
+        tx.mark_message_retry(
+            message_id, next_attempt_ms=NOW_MS + 2000, error="Timed out", uncertain=False
+        )
         tx.mark_message_sent(message_id, NOW_MS + 2500)
         row = tx.get_message(message_id)
 
@@ -1630,7 +1648,9 @@ def test_mark_failed(file_store: Store, db_path: Path) -> None:
 
     with file_store.transaction() as tx:
         before = tx.get_message(message_id)
-        tx.mark_message_retry(message_id, next_attempt_ms=NOW_MS + 2000, error="Timed out")
+        tx.mark_message_retry(
+            message_id, next_attempt_ms=NOW_MS + 2000, error="Timed out", uncertain=False
+        )
         tx.mark_message_failed(message_id, error="Forbidden: bot was blocked", now_ms=NOW_MS + 9)
         after = tx.get_message(message_id)
 
@@ -1667,7 +1687,7 @@ def test_stored_error_text_is_bounded(store: Store) -> None:
     long_error = "x" * (MAX_ERROR_CHARS - 1) + "YZ" + "tail" * 100
 
     with store.transaction() as tx:
-        tx.mark_message_retry(retried, next_attempt_ms=NOW_MS, error=long_error)
+        tx.mark_message_retry(retried, next_attempt_ms=NOW_MS, error=long_error, uncertain=False)
         tx.mark_message_failed(failed, error=long_error, now_ms=NOW_MS)
         errors = [tx.get_message(message_id).last_error for message_id in (retried, failed)]  # type: ignore[union-attr]
 
@@ -1680,7 +1700,7 @@ def test_stored_error_text_is_bounded(store: Store) -> None:
 MARKS: dict[str, Callable[[Tx, int], None]] = {
     "sent": lambda tx, message_id: tx.mark_message_sent(message_id, NOW_MS + 50),
     "retry": lambda tx, message_id: tx.mark_message_retry(
-        message_id, next_attempt_ms=NOW_MS + 50, error="again"
+        message_id, next_attempt_ms=NOW_MS + 50, error="again", uncertain=False
     ),
     "failed": lambda tx, message_id: tx.mark_message_failed(
         message_id, error="again", now_ms=NOW_MS + 50
@@ -1724,6 +1744,89 @@ def test_marking_an_unknown_message_is_refused(store: Store, mark: str) -> None:
         assert tx.outbox_counts()[OutboxStatus.PENDING] == 1
 
 
+def test_a_new_message_is_not_delivery_uncertain(store: Store) -> None:
+    message_id = enqueue(store)
+
+    with store.transaction() as tx:
+        row = tx.get_message(message_id)
+
+    assert row is not None
+    assert row.delivery_uncertain is False
+
+
+def test_an_uncertain_retry_sets_a_sticky_flag(store: Store) -> None:
+    message_id = enqueue(store)
+    flags: list[bool] = []
+
+    for uncertain in (False, True, False):
+        with store.transaction() as tx:
+            tx.mark_message_retry(
+                message_id, next_attempt_ms=NOW_MS, error="e", uncertain=uncertain
+            )
+            row = tx.get_message(message_id)
+        assert row is not None
+        flags.append(row.delivery_uncertain)
+
+    # A later attempt that provably never left does not clear what an earlier one left open.
+    assert flags == [False, True, True]
+
+
+def test_startup_flags_only_pending_messages_that_have_a_deadline(store: Store) -> None:
+    signal_id = insert(store)
+    entry = enqueue(store, kind=OutboxKind.SIGNAL, signal_id=signal_id, expires_at_ms=NOW_MS + 60)
+    notice = enqueue(store)
+    sent_entry = enqueue(store, kind=OutboxKind.SIGNAL, expires_at_ms=NOW_MS + 60)
+    with store.transaction() as tx:
+        tx.mark_message_sent(sent_entry, NOW_MS)
+
+    with store.transaction() as tx:
+        first = tx.flag_pending_deadlines_uncertain()
+        second = tx.flag_pending_deadlines_uncertain()
+        flags = {
+            message_id: row.delivery_uncertain
+            for message_id in (entry, notice, sent_entry)
+            if (row := tx.get_message(message_id)) is not None
+        }
+
+    assert (first, second) == (1, 0)
+    assert flags == {entry: True, notice: False, sent_entry: False}
+
+
+def test_pending_expired_messages_are_found_anywhere_in_the_queue(store: Store) -> None:
+    head = enqueue(store, "stop update")  # no deadline: never expires
+    expired = enqueue(store, "entry 1", kind=OutboxKind.SIGNAL, expires_at_ms=NOW_MS - 1)
+    on_the_deadline = enqueue(store, "entry 2", kind=OutboxKind.SIGNAL, expires_at_ms=NOW_MS)
+    also_expired = enqueue(store, "entry 3", kind=OutboxKind.SIGNAL, expires_at_ms=NOW_MS - 500)
+    closed = enqueue(store, "entry 4", kind=OutboxKind.SIGNAL, expires_at_ms=NOW_MS - 1)
+    with store.transaction() as tx:
+        tx.mark_message_expired(closed, NOW_MS)
+
+    with store.transaction() as tx:
+        found = [row.id for row in tx.pending_expired_messages(NOW_MS)]
+        later = [row.id for row in tx.pending_expired_messages(NOW_MS + 1)]
+        still_head = tx.next_pending_message()
+
+    assert found == [expired, also_expired]  # oldest first; the deadline itself still counts
+    assert later == [expired, on_the_deadline, also_expired]
+    assert still_head is not None
+    assert still_head.id == head
+
+
+def test_messages_created_between_is_half_open_and_ordered(store: Store) -> None:
+    early = enqueue(store, "a", now_ms=NOW_MS - 10)
+    first = enqueue(store, "b", now_ms=NOW_MS)
+    second = enqueue(store, "c", kind=OutboxKind.ALARM, now_ms=NOW_MS + 5)
+    at_the_end = enqueue(store, "d", now_ms=NOW_MS + 10)
+
+    with store.transaction() as tx:
+        rows = tx.messages_created_between(NOW_MS, NOW_MS + 10)
+        everything = tx.messages_created_between(0, NOW_MS + 11)
+
+    assert [row.id for row in rows] == [first, second]
+    assert [row.kind for row in rows] == [OutboxKind.NOTICE, OutboxKind.ALARM]
+    assert [row.id for row in everything] == [early, first, second, at_the_end]
+
+
 def test_outbox_counts_has_every_status(store: Store) -> None:
     ids = [enqueue(store, str(i)) for i in range(7)]
     with store.transaction() as tx:
@@ -1731,7 +1834,7 @@ def test_outbox_counts_has_every_status(store: Store) -> None:
         tx.mark_message_sent(ids[1], NOW_MS)
         tx.mark_message_sent(ids[2], NOW_MS)
         tx.mark_message_failed(ids[3], error="e", now_ms=NOW_MS)
-        tx.mark_message_retry(ids[4], next_attempt_ms=NOW_MS, error="e")
+        tx.mark_message_retry(ids[4], next_attempt_ms=NOW_MS, error="e", uncertain=False)
 
     with store.transaction() as tx:
         counts = tx.outbox_counts()
@@ -1788,6 +1891,7 @@ def test_first_alarm_is_enqueued_and_remembered_in_the_state_table(store: Store)
         next_attempt_ms=NOW_MS,
         sent_at_ms=None,
         last_error=None,
+        delivery_uncertain=False,
     )
     assert remembered == str(NOW_MS)
     assert ALARM_STATE_PREFIX == "alarm:"
@@ -2089,7 +2193,9 @@ def test_store_errors_never_quote_row_content(store: Store) -> None:
         tx.add_budget_entry(signal_id=signal_id, prop_day=DAY, risk_amount=1.0, now_ms=NOW_MS)
         attempts: list[Callable[[], object]] = [
             lambda: tx.mark_message_sent(message_id, NOW_MS),
-            lambda: tx.mark_message_retry(message_id, next_attempt_ms=NOW_MS, error=secret),
+            lambda: tx.mark_message_retry(
+                message_id, next_attempt_ms=NOW_MS, error=secret, uncertain=False
+            ),
             lambda: tx.complete_signal(signal_id, Outcome.STALE, NOW_MS),
             lambda: tx.add_budget_entry(
                 signal_id=signal_id, prop_day=DAY, risk_amount=1.0, now_ms=NOW_MS

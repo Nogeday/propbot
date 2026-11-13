@@ -61,6 +61,7 @@ Schema version 1 (all tables STRICT; no migrations yet, another version refuses 
                     sent_at_ms       INTEGER  set exactly when status is `sent`
                     closed_at_ms     INTEGER  when the row left `pending` (audit; not in OutboxRow)
                     last_error       TEXT     nullable; at most MAX_ERROR_CHARS characters
+                    delivery_uncertain INTEGER NOT NULL; 0/1, sticky (see OutboxRow)
     state           key              TEXT     PRIMARY KEY; StateKey values and "alarm:<code>"
                     value            TEXT     NOT NULL
                     updated_at_ms    INTEGER  NOT NULL
@@ -118,6 +119,12 @@ class Outcome(StrEnum):
     REJECTED_WIDEN = "rejected_widen"
     NO_ACTIVE_TRADE = "no_active_trade"
     HEARTBEAT = "heartbeat"
+    # An entry that arrived before its bar closed: the two clocks disagree, validity is unknown.
+    SKIP_CLOCK = "skip_clock"
+    # An update older than one that was already sent to the user (out-of-order delivery).
+    SUPERSEDED = "superseded"
+    # Processing raised: the signal is set aside so it cannot block the queue (alarm sent).
+    ERROR = "error"
 
 
 class OutboxKind(StrEnum):
@@ -149,6 +156,7 @@ class StateKey(StrEnum):
     HEARTBEAT_ALARM_MS = "heartbeat_alarm_ms"
     HEARTBEAT_SILENT = "heartbeat_silent"
     EXPIRY_REMINDER_DAY = "expiry_reminder_day"
+    LAST_ALIVE_MS = "last_alive_ms"  # written by the monitor on every tick (downtime detection)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -223,6 +231,10 @@ class OutboxRow:
     next_attempt_ms: int
     sent_at_ms: int | None
     last_error: str | None
+    # True once a send may have reached Telegram without us learning the answer (a timeout
+    # after the request left, or a restart while the row was pending): "not marked sent" is
+    # then no proof that the user did not get the message.
+    delivery_uncertain: bool
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -329,6 +341,7 @@ CREATE TABLE outbox (
     sent_at_ms      INTEGER,
     closed_at_ms    INTEGER,
     last_error      TEXT,
+    delivery_uncertain INTEGER NOT NULL DEFAULT 0 CHECK (delivery_uncertain IN (0, 1)),
     CHECK ((status = '{OutboxStatus.SENT.value}') = (sent_at_ms IS NOT NULL)),
     CHECK ((status = '{OutboxStatus.PENDING.value}') = (closed_at_ms IS NULL))
 ) STRICT
@@ -452,7 +465,7 @@ UPDATE budget_entries SET counted = ?, release_reason = ?, updated_at_ms = ? WHE
 
 _OUTBOX_COLUMNS: Final = (
     "id, created_at_ms, kind, signal_id, text, expires_at_ms, expired_text, status, attempts, "
-    "next_attempt_ms, sent_at_ms, last_error"
+    "next_attempt_ms, sent_at_ms, last_error, delivery_uncertain"
 )
 
 _SQL_ENQUEUE_MESSAGE: Final = """
@@ -470,8 +483,25 @@ _SQL_MESSAGES_FOR_SIGNAL: Final = (
     f"SELECT {_OUTBOX_COLUMNS} FROM outbox WHERE signal_id = ? ORDER BY id"
 )
 _SQL_MARK_MESSAGE_RETRY: Final = f"""
-UPDATE outbox SET attempts = attempts + 1, next_attempt_ms = ?, last_error = ?
+UPDATE outbox
+SET attempts = attempts + 1, next_attempt_ms = ?, last_error = ?,
+    delivery_uncertain = MAX(delivery_uncertain, ?)
 WHERE id = ? AND status = '{OutboxStatus.PENDING.value}'
+"""
+# Rows with a deadline are the entry signals: only for them does "delivered or not" matter.
+_SQL_FLAG_PENDING_DEADLINES_UNCERTAIN: Final = f"""
+UPDATE outbox SET delivery_uncertain = 1
+WHERE status = '{OutboxStatus.PENDING.value}' AND expires_at_ms IS NOT NULL
+  AND delivery_uncertain = 0
+"""
+_SQL_PENDING_EXPIRED_MESSAGES: Final = f"""
+SELECT {_OUTBOX_COLUMNS} FROM outbox
+WHERE status = '{OutboxStatus.PENDING.value}' AND expires_at_ms IS NOT NULL AND expires_at_ms < ?
+ORDER BY id
+"""
+_SQL_MESSAGES_CREATED_BETWEEN: Final = f"""
+SELECT {_OUTBOX_COLUMNS} FROM outbox
+WHERE created_at_ms >= ? AND created_at_ms < ? ORDER BY id
 """
 # Leaves `pending` for good. A NULL error keeps the last retry error as history.
 _SQL_CLOSE_MESSAGE: Final = f"""
@@ -604,6 +634,7 @@ def _outbox_row(row: sqlite3.Row) -> OutboxRow:
         next_attempt_ms=row["next_attempt_ms"],
         sent_at_ms=row["sent_at_ms"],
         last_error=row["last_error"],
+        delivery_uncertain=bool(row["delivery_uncertain"]),
     )
 
 
@@ -875,12 +906,37 @@ class Tx:
     def mark_message_sent(self, message_id: int, now_ms: int) -> None:
         self._close_message(message_id, OutboxStatus.SENT, now_ms, sent_at_ms=now_ms, error=None)
 
-    def mark_message_retry(self, message_id: int, *, next_attempt_ms: int, error: str) -> None:
-        """Count a failed attempt and schedule the next one; the message stays pending."""
+    def mark_message_retry(
+        self, message_id: int, *, next_attempt_ms: int, error: str, uncertain: bool
+    ) -> None:
+        """Count a failed attempt and schedule the next one; the message stays pending.
+
+        `uncertain=True` records that the request may have reached Telegram (the flag is
+        sticky: a later attempt that provably never left does not clear it).
+        """
         changed = self._change(
-            _SQL_MARK_MESSAGE_RETRY, (next_attempt_ms, error[:MAX_ERROR_CHARS], message_id)
+            _SQL_MARK_MESSAGE_RETRY,
+            (next_attempt_ms, error[:MAX_ERROR_CHARS], int(uncertain), message_id),
         )
         self._require_pending_changed(message_id, changed)
+
+    def flag_pending_deadlines_uncertain(self) -> int:
+        """Mark every pending message that has a deadline as possibly delivered.
+
+        Called once at start-up: the previous process may have died between a successful
+        send and `mark_message_sent`. Returns the number of rows flagged.
+        """
+        return self._change(_SQL_FLAG_PENDING_DEADLINES_UNCERTAIN, ())
+
+    def pending_expired_messages(self, now_ms: int) -> list[OutboxRow]:
+        """Pending messages whose `expires_at_ms` lies before `now_ms`, oldest first."""
+        return [_outbox_row(row) for row in self._all(_SQL_PENDING_EXPIRED_MESSAGES, (now_ms,))]
+
+    def messages_created_between(self, start_ms: int, end_ms: int) -> list[OutboxRow]:
+        """Outbox rows created in [start_ms, end_ms), by id (reports)."""
+        return [
+            _outbox_row(row) for row in self._all(_SQL_MESSAGES_CREATED_BETWEEN, (start_ms, end_ms))
+        ]
 
     def mark_message_failed(self, message_id: int, *, error: str, now_ms: int) -> None:
         self._close_message(
