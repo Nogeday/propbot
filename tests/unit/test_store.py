@@ -189,6 +189,7 @@ def raw_execute(path: Path, sql: str, *, ignore_checks: bool = False) -> list[tu
                 "heartbeat_silent",
                 "expiry_reminder_day",
                 "last_alive_ms",
+                "restarts_unreported",
             ],
         ),
     ],

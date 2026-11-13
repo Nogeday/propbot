@@ -7,6 +7,7 @@ when it may be blind:
     silence    no valid alert for `max_silence_minutes` inside a watch window (the heartbeat
                indicator fires once an hour, so silence means the line is down)
     downtime   the bot itself was not running during a watch window
+    restart    the bot restarted inside a watch window (a short hole; a loop of them is a fault)
     expiry     a TradingView alert is about to expire, or already has
 
 The monitor only reads store state and enqueues outbox rows; it never sends anything.
@@ -33,12 +34,14 @@ _MINUTE_MS: Final = 60 * _MILLIS_PER_SECOND
 _ONE_DAY: Final = dt.timedelta(days=1)
 
 # A gap between two ticks longer than this, seen on the first tick, means the bot was down
-# (ticks are 30 s apart; a restart by systemd takes a few seconds).
+# for a while; a shorter one is a restart (ticks are 30 s apart, systemd restarts in seconds).
 DOWNTIME_THRESHOLD_MS: Final = 90 * _MILLIS_PER_SECOND
 # Any gap this long contains a whole instance of every weekly watch window.
 _ALWAYS_OVERLAPS_DAYS: Final = 8
 
 _FLAG_SET: Final = "1"
+_RESTART_ALARM_CODE: Final = "restart"
+_RESTART_ALARM_THROTTLE_MS: Final = 30 * 60 * _MILLIS_PER_SECOND
 # Istanbul wall-clock hour from which the daily expiry reminder may be sent.
 _REMINDER_FROM_HOUR: Final = 9
 
@@ -46,7 +49,7 @@ _log = structlog.get_logger(__name__)
 
 
 def _read_ms(tx: Tx, key: StateKey) -> int | None:
-    """An epoch-ms state value; None when absent or unreadable."""
+    """An integer state value (epoch ms or a count); None when absent or unreadable."""
     value = tx.get_state(key)
     if value is None:
         return None
@@ -72,16 +75,38 @@ def _overlaps_watch_window(heartbeat: HeartbeatConfig, start_ms: int, end_ms: in
 
 
 def _check_downtime(tx: Tx, heartbeat: HeartbeatConfig, now_ms: int) -> int:
-    """First tick after a start: report the gap since the previous process's last tick."""
+    """First tick after a start: report the gap since the previous process's last tick.
+
+    A long gap is always reported. A short one (an ordinary restart, or one round of a crash
+    loop) is reported too, at most once per `_RESTART_ALARM_THROTTLE_MS`: every restart is a
+    hole in which a TradingView alert is answered with an error and lost, and a loop of
+    short holes would otherwise stay invisible. The alarm says how many restarts it stands
+    for, so a loop reads differently from one planned restart.
+    """
     previous_ms = _read_ms(tx, StateKey.LAST_ALIVE_MS)
-    if previous_ms is None or now_ms - previous_ms <= DOWNTIME_THRESHOLD_MS:
+    if previous_ms is None or now_ms <= previous_ms:
         return 0
     if not _overlaps_watch_window(heartbeat, previous_ms, now_ms):
         return 0
-    tx.enqueue_message(
-        kind=OutboxKind.ALARM, text=messages.downtime_alarm(previous_ms, now_ms), now_ms=now_ms
+    if now_ms - previous_ms > DOWNTIME_THRESHOLD_MS:
+        tx.enqueue_message(
+            kind=OutboxKind.ALARM,
+            text=messages.downtime_alarm(previous_ms, now_ms),
+            now_ms=now_ms,
+        )
+        return 1
+    restarts = (_read_ms(tx, StateKey.RESTARTS_UNREPORTED) or 0) + 1
+    enqueued = tx.enqueue_alarm(
+        code=_RESTART_ALARM_CODE,
+        text=messages.restart_alarm(previous_ms, now_ms, restarts=restarts),
+        now_ms=now_ms,
+        throttle_ms=_RESTART_ALARM_THROTTLE_MS,
     )
-    return 1
+    if enqueued:
+        tx.delete_state(StateKey.RESTARTS_UNREPORTED)
+    else:
+        tx.set_state(StateKey.RESTARTS_UNREPORTED, str(restarts), now_ms)
+    return int(enqueued)
 
 
 def _check_silence(tx: Tx, heartbeat: HeartbeatConfig, now_ms: int, started_ms: int) -> int:
