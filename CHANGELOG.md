@@ -342,7 +342,7 @@ Kod bittikten sonra bağımsız mercekler kodu kırmaya çalıştı; her bulgu a
 | LIM-1 | Limit giriş mesajı "İPTAL mesajı gelene kadar bekler" diyordu; TradingView'daki limit dolup kullanıcının emri dolmazsa İPTAL hiç gelmez, emir süresiz bekler | Limit giriş: "İPTAL ya da ÇIKIŞ mesajı gelene kadar, en geç seans sonuna kadar bekler" + "seans sonunda emrin hâlâ bekliyorsa SİL"; limit girişin (ya da görülmemiş girişin) `[ÇIKIŞ]` mesajı bekleyen emri de iptal ettirir | `1f189c7` |
 | MON-1 | Kapalı kalma yalnızca 90 sn'den uzun boşlukta bildiriliyordu; birkaç saniyede bir çöküp kalkan servis (systemd `RestartSec=5`) Telegram'da görünmüyordu | İzlenen pencereye denk gelen kısa boşluk da bildirilir (en çok 30 dakikada bir); bastırılanlar sayılır, sonraki alarm "N. kez" der | `2fae82a` |
 | CMD-1 | Yardım ve kullanım satırlarındaki `/atladim [id]` Telegram'da dokunulabilir bağlantıydı; dokununca çıplak `/atladim` gider ve **son** girişin riskini bütçeden düşerdi | `/atladim` ve `/aldim` geçtiği her yerde `code` olarak gider (dokununca gönderilmez) | `df9f74d` |
-| SEC-2 | Token, grafikte script'in durum satırında ve (açıksa) alarmın e-posta/uygulama bildirimlerinde görünür | Heartbeat göstergesinde girdi `display.none` (derlenmedi, doğrulama listesi H); runbook §8.1–8.2: yalnızca Webhook URL bildirimi, paylaşım uyarısı, token yenileme adımları. Altı strateji dosyası için → açık bulgu 45 | bu commit |
+| SEC-2 | Token, grafikte script'in durum satırında ve (açıksa) alarmın e-posta/uygulama bildirimlerinde görünür | Heartbeat göstergesinde girdi `display.none` (derlenmedi, doğrulama listesi H); runbook §8.1–8.2: yalnızca Webhook URL bildirimi, paylaşım uyarısı, token yenileme adımları. Altı strateji dosyası için → açık bulgu 45 | `461abbe` |
 | SYM-1 | Alert'teki TradingView sembolü venue sembolüyle eşleştirilmiyor | Karar gerekir → açık bulgu 46 | — |
 
 ### Testler
@@ -470,9 +470,10 @@ diliminden, 28–30 FTMO doğrulamasından). 31–44 Faz 1'den, 45–46 Faz 1 uy
     maddelerinin dışında olduğu için Pine kuralı gereği uygulanmadı; onay verirsen altı dosyaya eklenir. O zamana kadar:
     runbook §8.1 (durum satırında girdileri gizle, yalnızca Webhook URL bildirimi).
 46. **Alert sembolü venue sembolüyle eşleştirilmiyor (karar gerekir):** alıcı `symbol` alanının yalnızca biçimini denetler.
-    Strateji başka bir grafiğe (ör. `CME_MINI:NQ1!` ya da bir hisse) eklenip alarm kurulursa sinyal iletilir ve lot
-    önerisi `US500.cash` sözleşmesine göre, **başka bir enstrümanın puan mesafesiyle** hesaplanır (yanlış boyut). Mesaj
-    başlığı sembolü gösterir, ama otomatik "ATLA" yok. Öneri: venue profiline (ya da `config/tv_alerts.yaml`'a) puanı
+    Strateji başka bir grafiğe (ör. `CME_MINI:NQ1!` ya da bir hisse) eklenip alarm kurulursa sinyal iletilir; stop/TP
+    mesafeleri **başka bir enstrümanın puan ölçeğinde** gelir ve `US500.cash`'e uygulanırsa anlamsız bir işlem olur (lot
+    o mesafeye göre hesaplandığı için işlem başı risk tavanı yine aşılmaz). Mesaj başlığı sembolü gösterir, ama otomatik
+    "ATLA" yok. Öneri: venue profiline (ya da `config/tv_alerts.yaml`'a) puanı
     venue sembolüyle aynı ölçekte olan TradingView sembollerinin listesi (ör. `CME_MINI:MES1!`, `CME_MINI:ES1!`);
     listede olmayan sembolün girişi "[SİNYAL — ATLA]" olur. Hangi sembollerde çalıştıracağını bilmeden liste
     uydurulmadı; 10 günlük kabul koşusundan önce karar verilmeli.
