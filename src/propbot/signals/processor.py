@@ -40,7 +40,7 @@ from propbot.risk.config import RiskConfig
 from propbot.risk.rules import daily_budget_amount
 from propbot.risk.sizing import SizeSkip, suggest_size
 from propbot.risk.venue import VenueProfile, rules_freshness
-from propbot.signals.schema import BAR_TIME_MAX_MS, Action, Side
+from propbot.signals.schema import BAR_TIME_MAX_MS, Action, OrderType, Side
 from propbot.store.db import (
     BudgetRow,
     OutboxKind,
@@ -323,16 +323,19 @@ def _decide_follow_up(
 
     # An exit or cancel for the other side is still forwarded (it can only reduce risk), but
     # it is not tied to an entry it does not belong to.
-    matched = reference is not None and reference.side == signal.side
+    entry = reference if reference is not None and reference.side == signal.side else None
     link = TradeLink(
-        entry_id=reference.id if reference is not None and matched else None,
-        entry_undelivered=undelivered and matched,
+        entry_id=None if entry is None else entry.id,
+        entry_undelivered=undelivered and entry is not None,
         late_seconds=late_seconds,
     )
     if action is Action.EXIT:
-        text = messages.exit_signal(signal, venue=venue, link=link)
+        # TradingView's limit order was filled (there is a position to close); the trader's
+        # own order, on another instrument, may still be waiting. Unknown entry: assume so.
+        limit_may_rest = entry is None or entry.order_type == OrderType.LIMIT.value
+        text = messages.exit_signal(signal, venue=venue, link=link, limit_may_rest=limit_may_rest)
     else:
-        release_hint = matched and budget is not None and budget.counted
+        release_hint = entry is not None and budget is not None and budget.counted
         text = messages.cancel_signal(signal, venue=venue, link=link, release_hint=release_hint)
     return Decision(Outcome.FORWARDED, (OutboxDraft(text),))
 

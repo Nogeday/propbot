@@ -50,11 +50,18 @@ _NO_FILL_ALERTS_LINE: Final = (
     "TradingView'da stop/TP dolunca mesaj gelmez; pozisyonun hâlâ açıksa seans sonunda "
     "kendin kapat."
 )
+# A limit order can fill on TradingView and stay untouched on the venue (another instrument,
+# another price). TradingView then sends no cancel, and nothing at all if its own trade ends
+# at stop or target: the trader must not leave that order resting.
+_NO_FILL_ALERTS_LIMIT_LINE: Final = (
+    "TradingView'da emir dolup stop/TP ile kapanırsa mesaj gelmez: seans sonunda emrin hâlâ "
+    "bekliyorsa SİL, pozisyonun açıksa kendin kapat."
+)
 # Extra line of the entry message, per strategy (asian_sweep has none).
 _STRATEGY_NOTES: Final[Mapping[str, str]] = MappingProxyType(
     {
         "ny_orb_fvg": "trailing stop güncellemeleri ayrı mesajla gelir.",
-        "ict_silver_bullet": "limit dolmazsa İPTAL mesajı gelir.",
+        "ict_silver_bullet": "TradingView'daki limit dolmazsa İPTAL mesajı gelir.",
         "mr_bb_kc_rsi2": "TP dinamiktir (BB ortası, her bar değişir); TradingView'dan izle.",
         "mtf_trend_cont": (
             "TP = TP1 (kısmi çıkış seviyesi; kapatılacak pay stratejinin scale-out girdisidir, "
@@ -260,7 +267,10 @@ def entry_signal(
     order_line = f"{_venue_target(venue)} {order} emri; {bracket}: {basis} {offsets}"
 
     if is_limit:
-        validity_line = f"Emri {valid_until} TR'ye kadar gir; İPTAL mesajı gelene kadar bekler"
+        validity_line = (
+            f"Emri {valid_until} TR'ye kadar gir; İPTAL ya da ÇIKIŞ mesajı gelene kadar, en geç "
+            "seans sonuna kadar bekler"
+        )
     elif entry is not None and stop_points is not None:
         drift = risk.signal_max_drift_frac_of_stop * stop_points
         validity_line = (
@@ -286,7 +296,7 @@ def entry_signal(
             budget_cap=budget_cap,
         ),
         validity_line,
-        _NO_FILL_ALERTS_LINE,
+        _NO_FILL_ALERTS_LIMIT_LINE if is_limit else _NO_FILL_ALERTS_LINE,
     ]
     note = _STRATEGY_NOTES.get(row.strategy_id)
     if note is not None:
@@ -417,11 +427,18 @@ def stop_widen_warning(
     return _follow_up("[UYARI]", row, link, body, orphan_note=ORPHAN_NOTE)
 
 
-def exit_signal(row: SignalRow, *, venue: VenueProfile, link: TradeLink) -> str:
-    """The [ÇIKIŞ] message of a forced flatten."""
+def exit_signal(
+    row: SignalRow, *, venue: VenueProfile, link: TradeLink, limit_may_rest: bool
+) -> str:
+    """The [ÇIKIŞ] message of a forced flatten.
+
+    `limit_may_rest`: the entry was a limit order (or is unknown), so the trader's own order
+    may still be unfilled although TradingView's was filled and is now closed.
+    """
+    resting = "; limit emrin hâlâ bekliyorsa İPTAL ET" if limit_may_rest else ""
     body = [
         "Strateji pozisyonu kapattı (seans sonu / günlük zarar kesicisi / test aralığı sonu).",
-        f"{_venue_target(venue)} pozisyon açıksa PİYASADAN KAPAT.",
+        f"{_venue_target(venue)} pozisyon açıksa PİYASADAN KAPAT{resting}.",
     ]
     return _follow_up("[ÇIKIŞ]", row, link, body, orphan_note=ORPHAN_NOTE)
 
