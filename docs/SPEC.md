@@ -377,13 +377,18 @@ dilimleri reddedilir: bar kapanışı seans takvimine bağlıdır, tazelik denet
 4. Payload token'ı (`.env`, kolay rotasyon). Broker/Telegram kimlik bilgisi asla payload'da yok.
 5. Hız sınırı (dakikada ≤ 30, token'ı doğru isteklerde), gövde boyutu sınırı, yapılandırılmış log (sırlar `***`).
 6. Kimliği doğrulanamayan istekler (yanlış token, bozuk JSON, büyük gövde) sayılır; izinli adresten gelenler için en
-   fazla saatte bir Telegram uyarısı gider.
+   fazla saatte bir Telegram uyarısı gider. Sayılar uyarı gerçekten gönderilene kadar tutulur ve izinli adresten gelen
+   sonraki herhangi bir istek (geçerli bir heartbeat dahil) bekleyen uyarıyı tetikler: eski token'la gönderen kendi
+   alarmımız, kapıyı önce açmış yabancı bir isteğin arkasında kaybolmaz.
+7. Token'ın göründüğü yerler (grafik durum satırı, alarm bildirimleri, Alert Log) ve yenileme adımları:
+   `docs/runbook.md` §8.1–8.2. Alarmlarda yalnızca "Webhook URL" bildirimi açık olmalıdır.
 
 ### 5.4 Telegram
 - Yalnızca `TELEGRAM_ALLOWED_CHAT_ID` (pozitif = özel sohbet; grup/kanal kimlikleri reddedilir); diğer sohbetler yok
   sayılır ve sayılır/loglanır (metin loglanmaz).
 - Mesaj şablonu (Türkçe, düz metin; `US500.cash` gibi alan-adı görünümlü sözcükler bağlantıya dönüşmesin diye `code`
-  olarak işaretlenir):
+  olarak işaretlenir; `/atladim` ve `/aldim` de — kimlikli, yer tutuculu ya da çıplak — her geçtiği yerde `code` olur:
+  Telegram komutu bağlantı yapar ve dokununca **çıplak** gönderir, çıplak `/atladim` ise son girişin riskini düşer):
 ```
 [SİNYAL] {strateji} · {setup} · {LONG/SHORT} · {symbol}
 Referans giriş ≈ {est_entry} (TradingView bar kapanışı)
@@ -396,16 +401,22 @@ Not: {stratejiye özel not}
 id {signal_id} · bar {NY saati} NY / {TR saati} TR
 ```
   Fiyat aralığı = `est_entry ± signal_max_drift_frac_of_stop × stop mesafesi`. Limit girişte (Silver Bullet) aralık yerine
-  "Emri {TR saati}'ye kadar gir; İPTAL mesajı gelene kadar bekler" yazar. Diğer mesajlar: `[STOP GÜNCELLE]` (mesafe
-  olarak: "stop = kendi giriş fiyatın −3.50 puan"), `[ÇIKIŞ]`, `[İPTAL]`, `[SİNYAL — ATLA]` (stop çok geniş · bütçe
-  yetersiz · saat uyuşmazlığı), `[BAYAT SİNYAL — ATLA]`, `[İLETİLEMEDİ — ATLA]`, `[İLETİM BELİRSİZ]`, `[UYARI]` (stop
-  genişletme reddedildi), `[ALARM]`.
+  "Emri {TR saati}'ye kadar gir; İPTAL ya da ÇIKIŞ mesajı gelene kadar, en geç seans sonuna kadar bekler" yazar ve
+  dolum satırı "… seans sonunda emrin hâlâ bekliyorsa SİL, pozisyonun açıksa kendin kapat" olur: TradingView'daki limit
+  dolup kullanıcının kendi emri (başka enstrüman) dolmayabilir; o durumda İPTAL gelmez. Limit girişin (ya da botun
+  görmediği bir girişin) `[ÇIKIŞ]` mesajı "limit emrin hâlâ bekliyorsa İPTAL ET" der. Diğer mesajlar: `[STOP GÜNCELLE]`
+  (mesafe olarak: "stop = kendi giriş fiyatın −3.50 puan"), `[ÇIKIŞ]`, `[İPTAL]`, `[SİNYAL — ATLA]` (stop çok geniş ·
+  bütçe yetersiz · saat uyuşmazlığı), `[BAYAT SİNYAL — ATLA]`, `[İLETİLEMEDİ — ATLA]`, `[İLETİM BELİRSİZ]`, `[UYARI]`
+  (stop genişletme reddedildi), `[ALARM]`.
 - Günlük bütçe satırı temkinlidir (ADR-0005): iletilen her giriş prop günü boyunca sayılır; almadığın sinyali `/atladim`
   ile bildirirsin. Stop güncellemeleri mesafe uzayında karşılaştırılır; stop'u genişleten güncelleme iletilmez.
 - Komutlar (ASCII): `/durum`, `/pnl`, `/risk`, `/duraklat`, `/devam`, `/kill <PIN>`, `/mod`, `/saglik`, `/atladim [id]`,
   `/aldim <id>`, `/yardim`. `/duraklat` ve `/kill` yalnızca yeni girişleri keser (stop/çıkış/iptal her zaman iletilir) ve
   gecikmeli ulaşsa da uygulanır; `/devam`, `/atladim`, `/aldim` 60 sn'den eskiyse reddedilir. KILL'den dönüş
-  `/devam <PIN>`. PIN içeren mesaj silinir; 15 dk içinde 5 yanlış PIN, PIN girişini 15 dk kilitler.
+  `/devam <PIN>`. 15 dk içinde 5 yanlış PIN, PIN girişini 15 dk kilitler. Silinecek mesaj **biçimine** göre seçilir,
+  PIN ile karşılaştırılarak değil: `/kill` ya da `/devam`'dan sonra bir şey yazılmışsa ya da mesajda 6+ haneli bir sayı
+  varsa mesaj silinir ve yanıtlar o sayıyı yinelemez. PIN yalnızca bu iki komutun içinde karşılaştırılır; başka hiçbir
+  yanıt "bu PIN'di / değildi" ayrımı taşımaz.
 - Telegram hatası motoru asla bloklamaz (giden kutusu + üstel geri çekilme, en çok 30 sn).
 
 ### 5.5 Heartbeat ve alarm süresi
@@ -413,7 +424,10 @@ id {signal_id} · bar {NY saati} NY / {TR saati} TR
   İzlenen pencerelerde (`config/tv_alerts.yaml`, New York saati) 75 dk hiçbir geçerli alert gelmezse → Telegram:
   "TradingView alarm hattı sessiz". Pencerenin son saatinde kesilen hat, pencere kapandıktan sonra da bildirilir; hat
   geri gelince bilgi mesajı gider.
-- Bot bir izleme penceresine denk gelen süre boyunca kapalı kaldıysa açılışta bunu bildirir (o aralıktaki alert'ler alınmadı).
+- Bot bir izleme penceresine denk gelen süre boyunca kapalı kaldıysa açılışta bunu bildirir (o aralıktaki alert'ler
+  alınmadı): 90 sn'den uzun boşluk "Bot … arasında kapalıydı"; daha kısa boşluk (yeniden başlatma) "Bot … yeniden
+  başladı" — en çok 30 dakikada bir, bastırılan yeniden başlatmalar sayılır ve sonraki alarm "N. kez" der (çökme
+  döngüsü). Her yeniden başlatma, TradingView'ın hata yanıtı alıp alert'i yitirdiği bir deliktir.
 - Premium altı planlar için `config/tv_alerts.yaml` → `alerts` altında her alarmın bitiş tarihi (`expires_on`); bitişten
   7 gün önce ve sonrasında günde bir hatırlatma.
 

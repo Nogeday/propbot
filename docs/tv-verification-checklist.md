@@ -139,8 +139,13 @@ tablosundan (MTF'de tablo farklı: "Full trades", "Avg runner R"; Silver Bullet'
 - [ ] Stratejilerle aynı sembolün **1 dakikalık** grafiğine ekle; saat başlarında (New York saatiyle) barın arka planı
       hafif renkleniyor mu?
 - [ ] Günlük grafikte "use an intraday chart of 60 minutes or less" çalışma zamanı hatası veriyor mu (vermeli)?
+- [ ] "Webhook token" girdisi `display = display.none` ile tanımlı (doğrulanamadı: resmi belgeye bu oturumdan
+      erişilemedi). Derleyici `display` parametresini reddederse hata metnini kopyala. Derlendiyse: token'ı yazdıktan
+      sonra grafikte gösterge adının yanındaki girdi değerleri arasında token **görünmemeli** — görünüyor mu?
 - [ ] Alarm oluştur: Condition = gösterge → **"Any alert() function call"**; Webhook URL = alıcı adresi. Seçenek adı
       farklıysa ne gördüğünü yaz.
+- [ ] Alarmın Notifications sekmesinde **yalnızca Webhook URL** işaretli mi (mesaj token'ı içerir)? Aynısını altı
+      strateji alarmında da kontrol et.
 - [ ] İlk saat başında Alert Log'da şu biçimde bir mesaj görünüyor mu:
       `{"v":1,"token":"…","strategy_id":"heartbeat","symbol":"CME_MINI:MES1!","tf":"1","bar_time":…,"action":"heartbeat"}`
 - [ ] Bot çalışıyorsa Telegram'da `/saglik` → "son heartbeat" birkaç saniye/dakika önce görünüyor mu?

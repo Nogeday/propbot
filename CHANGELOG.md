@@ -332,8 +332,21 @@ Sözleşme uygulanmadan önce denetlendi; 26 bulgunun hepsi kabul edildi. Davran
 - Heartbeat: pencerenin son saatinde kesilen hat da bildirilir; yeniden başlatma sessizliği gizlemez.
 - `InvalidToken` gibi sır taşıyabilen istisnalar ham traceback olarak basılmaz.
 
+### Uygulama denetimi (yazılan kod üzerinde karşıt mercekler) — bulgular ve düzeltmeler
+Kod bittikten sonra bağımsız mercekler kodu kırmaya çalıştı; her bulgu ayrıca doğrulandıktan sonra düzeltildi.
+
+| Bulgu | Sorun | Düzeltme | Commit |
+|---|---|---|---|
+| SEC-1 | Komut işleyici her mesajı PIN ile karşılaştırıp yanıtı ona göre seçiyordu: `/kill` ve `/devam` dışında, deneme sayacına takılmadan "bu PIN mi?" sorusunu yanıtlayan bir kehanet | Silinecek mesaj biçimine göre seçilir (6+ haneli sayı ya da `/kill`·`/devam` sonrası metin); yanıt sayıyı yinelemez; PIN yalnızca iki komutun içinde karşılaştırılır. Özellik testi: iki farklı PIN için yanıtlar aynı | `191ac8a` |
+| SEC-3 | Kimliksiz istek alarmının saatlik kapısını yabancı bir istek açınca, eski token'la gönderen kendi alarmımız yalnızca sayılıyor, bir saat sonra başka bir ret gelmezse hiç bildirilmiyordu | Sayılar alarm gerçekten gidene kadar tutulur; izinli adresten gelen sonraki herhangi bir istek (geçerli heartbeat dahil) bekleyen alarmı tetikler; store reddederse 5 dk sonra yeniden denenir | `2f637cd` |
+| LIM-1 | Limit giriş mesajı "İPTAL mesajı gelene kadar bekler" diyordu; TradingView'daki limit dolup kullanıcının emri dolmazsa İPTAL hiç gelmez, emir süresiz bekler | Limit giriş: "İPTAL ya da ÇIKIŞ mesajı gelene kadar, en geç seans sonuna kadar bekler" + "seans sonunda emrin hâlâ bekliyorsa SİL"; limit girişin (ya da görülmemiş girişin) `[ÇIKIŞ]` mesajı bekleyen emri de iptal ettirir | `1f189c7` |
+| MON-1 | Kapalı kalma yalnızca 90 sn'den uzun boşlukta bildiriliyordu; birkaç saniyede bir çöküp kalkan servis (systemd `RestartSec=5`) Telegram'da görünmüyordu | İzlenen pencereye denk gelen kısa boşluk da bildirilir (en çok 30 dakikada bir); bastırılanlar sayılır, sonraki alarm "N. kez" der | `2fae82a` |
+| CMD-1 | Yardım ve kullanım satırlarındaki `/atladim [id]` Telegram'da dokunulabilir bağlantıydı; dokununca çıplak `/atladim` gider ve **son** girişin riskini bütçeden düşerdi | `/atladim` ve `/aldim` geçtiği her yerde `code` olarak gider (dokununca gönderilmez) | `df9f74d` |
+| SEC-2 | Token, grafikte script'in durum satırında ve (açıksa) alarmın e-posta/uygulama bildirimlerinde görünür | Heartbeat göstergesinde girdi `display.none` (derlenmedi, doğrulama listesi H); runbook §8.1–8.2: yalnızca Webhook URL bildirimi, paylaşım uyarısı, token yenileme adımları. Altı strateji dosyası için → açık bulgu 45 | bu commit |
+| SYM-1 | Alert'teki TradingView sembolü venue sembolüyle eşleştirilmiyor | Karar gerekir → açık bulgu 46 | — |
+
 ### Testler
-- 3416 test (`uv run pytest -q`), ruff, `mypy --strict` (36 kaynak dosya) temiz.
+- 3453 test (`uv run pytest -q`), ruff, `mypy --strict` (36 kaynak dosya) temiz (uygulama denetimi sonrası; ilk teslimde 3416).
 - Alıcının her adımı ve dalı; 33 gerçek gövde biçimi şemadan, alıcıdan ve işleyiciden geçer.
 - `/kill`, PIN kilidi, yetkisiz sohbet, grup sohbeti testleri (`tests/unit/test_commands.py`, `test_telegram.py`).
 - Uçtan uca (`tests/integration/test_service.py`): gerçek uygulama + store + işleyici + izleyici + python-telegram-bot;
@@ -350,7 +363,7 @@ Sözleşme uygulanmadan önce denetlendi; 26 bulgunun hepsi kabul edildi. Davran
 ## Açık bulgular
 
 Durum (2026-11-13): 1, 3–11 ve 24 kapandı; 2, 15 ve 23 kısmen. 12–23 ve 25–30 açık (18–23 denetimden, 25–27 Faz 2 ön
-diliminden, 28–30 FTMO doğrulamasından). 31–44 Faz 1'den.
+diliminden, 28–30 FTMO doğrulamasından). 31–44 Faz 1'den, 45–46 Faz 1 uygulama denetiminden.
 
 1. ~~**MTF derleme riski:** `riskPts := ...` bildirimi olmayan değişkene atama.~~ **Çözüldü** (`e997dd5`).
 2. **B4 sayısal değerleri — kısmen:** kod varsayılanı artık MES test profili (E9). FTMO `US500.cash` spread'i/komisyonu
@@ -431,7 +444,9 @@ diliminden, 28–30 FTMO doğrulamasından). 31–44 Faz 1'den.
     stop'unu KORU" mesajı üretir. Doğru ama sık olabilir; eşik uydurulmadı.
 36. **Stop/TP dolumu bildirilmiyor:** TradingView yalnızca zorunlu kapanışları alert eder. Bot bir pozisyonun kapandığını
     bilemez; bütçe bu yüzden temkinli sayılır ve her giriş mesajı "pozisyonun hâlâ açıksa seans sonunda kendin kapat" der.
-    TradingView'da iptal edilen bir limit emir FTMO'da dolmuşsa o pozisyon için hiçbir mesaj gelmez.
+    TradingView'da iptal edilen bir limit emir FTMO'da dolmuşsa o pozisyon için hiçbir mesaj gelmez. Tersi (TradingView'da
+    dolan, FTMO'da bekleyen limit) için giriş ve çıkış mesajları emri seans sonunda sildirir (LIM-1); bot seans sonunu
+    bilmez, saati kullanıcı izler.
 37. **Sıra dışı teslimat:** kendi giriş alert'inden önce işlenen bir takip alert'i (stop/çıkış) "ilgili işlem yok" olarak
     düşer. İşlenemeyip `error` olan bir girişin takip mesajları da iletilmez (alarm kullanıcıyı TradingView'a yönlendirir).
 38. **Heartbeat alarmı tatil bilmez:** tatil ve erken kapanış günlerinde "alarm hattı sessiz" uyarısı beklenen bir yanlış
@@ -442,8 +457,22 @@ diliminden, 28–30 FTMO doğrulamasından). 31–44 Faz 1'den.
     algılanıyor; ad değişirse yalnızca bir log satırı kalır (token reddi bir sonraki gönderimde yine fark edilir).
 41. **Budama ve göç yok:** `data/propbot.db` büyür (yılda birkaç MB); şema sürümü değişirse eski dosya açılmaz.
 42. **`pine/heartbeat_indicator.pine` derlenmedi** (doğrulama listesi H); alarm koşulunun adı ("Any alert() function
-    call") ve `timeframe.in_seconds()` davranışı TradingView'da doğrulanmalı.
+    call"), `timeframe.in_seconds()` davranışı ve token girdisindeki `display = display.none` parametresi TradingView'da
+    doğrulanmalı (resmi Pine belgesine bu ortamdan erişilemedi).
 43. **Master `exit` alert'inde `side` net pozisyondan gelir** (iki bacak aynı yönde olduğu için pratikte doğru); alıcı
     çıkışta yönü denetlemez, yön girişinkinden farklıysa çıkış mesajı girişe bağlanmadan iletilir.
 44. **Dağıtım belgesinde doğrulanamayanlar:** Tailscale ve cloudflared kurulum komutları, Cloudflare hızlı tünel
     sınırları ve DuckDNS sayfası bu ortamdan okunamadı; runbook'ta (VERIFY) olarak işaretli.
+45. **Strateji dosyalarında token girdisi durum satırında görünür (karar gerekir):** altı strateji script'inde
+    `alertToken = input.string("", "Webhook token", …)` varsayılan görünürlükle tanımlı; değer grafikte script adının
+    yanında yazar (ekran görüntüsü / paylaşılan grafik token'ı gösterir). Önerilen tek argümanlık değişiklik:
+    `display = display.none` (heartbeat göstergesinde uygulandı; giriş/çıkış mantığına ve varsayılanlara dokunmaz). B/E
+    maddelerinin dışında olduğu için Pine kuralı gereği uygulanmadı; onay verirsen altı dosyaya eklenir. O zamana kadar:
+    runbook §8.1 (durum satırında girdileri gizle, yalnızca Webhook URL bildirimi).
+46. **Alert sembolü venue sembolüyle eşleştirilmiyor (karar gerekir):** alıcı `symbol` alanının yalnızca biçimini denetler.
+    Strateji başka bir grafiğe (ör. `CME_MINI:NQ1!` ya da bir hisse) eklenip alarm kurulursa sinyal iletilir ve lot
+    önerisi `US500.cash` sözleşmesine göre, **başka bir enstrümanın puan mesafesiyle** hesaplanır (yanlış boyut). Mesaj
+    başlığı sembolü gösterir, ama otomatik "ATLA" yok. Öneri: venue profiline (ya da `config/tv_alerts.yaml`'a) puanı
+    venue sembolüyle aynı ölçekte olan TradingView sembollerinin listesi (ör. `CME_MINI:MES1!`, `CME_MINI:ES1!`);
+    listede olmayan sembolün girişi "[SİNYAL — ATLA]" olur. Hangi sembollerde çalıştıracağını bilmeden liste
+    uydurulmadı; 10 günlük kabul koşusundan önce karar verilmeli.
