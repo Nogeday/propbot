@@ -5,6 +5,7 @@ description = "Prop-firm-safe automation of TradingView Pine strategies: config 
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "numpy>=2.5,<3",
     "pydantic>=2.14,<3",
     "pyyaml>=6.0.3,<7",
 ]
