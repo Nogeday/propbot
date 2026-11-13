@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 import structlog
+from hypothesis import assume, given, settings
+from hypothesis import strategies as st
 from structlog.testing import capture_logs
 
 from propbot.notify import commands as commands_module
@@ -882,7 +884,12 @@ def test_a_stale_kill_is_still_applied_and_still_deleted(world: World) -> None:
         (f"/atladim {PIN}", True),
         (f"x{PIN}y", True),
         (f"/mod\n{PIN}", True),
-        (WRONG_PIN, False),
+        # Decided by shape, never by a match with the real PIN (that would be an oracle):
+        # any run of six or more digits is treated as a possible PIN.
+        (WRONG_PIN, True),
+        ("id 1234567 nedir", True),
+        ("12345", False),
+        ("12 345 678", False),
     ],
 )
 def test_delete_request_is_decided_from_the_raw_text(
@@ -895,8 +902,8 @@ def test_delete_request_is_decided_from_the_raw_text(
 
 def test_a_bare_pin_message_is_deleted_and_changes_nothing(world: World) -> None:
     assert world.say(PIN) == Reply(
-        "PIN tek başına bir komut değil; mesajın siliniyor. Kullanım: /kill <PIN> ya da "
-        "/devam <PIN>",
+        "Mesajındaki uzun sayı PIN olabileceği için mesajın siliniyor. PIN yalnızca /kill <PIN> "
+        "ya da /devam <PIN> içinde kullanılır.",
         delete_request=True,
     )
     assert world.state() == dict.fromkeys((key.value for key in StateKey), None)
@@ -949,6 +956,44 @@ def test_the_pin_never_appears_in_a_reply_or_a_log_line(world: World) -> None:
     for reply in replies:
         assert PIN not in reply.text
         assert reply.delete_request is True
+
+
+def test_what_the_bot_shows_never_depends_on_a_match_with_the_pin(make: type[World]) -> None:
+    # Otherwise digit strings could be tested against the PIN through the bot's visible
+    # behaviour (delete or not, which reply) without touching the failure counter.
+    for template in ("{}", "x{}y", "/atladim {}", "/aldim {}", "/durum {}", "/mod {}", "/risk\n{}"):
+        with_pin = make().say(template.format(PIN))
+        with_guess = make().say(template.format(WRONG_PIN))
+
+        assert with_guess.delete_request is with_pin.delete_request is True
+        assert with_guess.text == with_pin.text
+        assert PIN not in with_pin.text
+        assert WRONG_PIN not in with_guess.text
+
+
+@settings(max_examples=150, deadline=None)
+@given(
+    text=st.one_of(
+        st.text(alphabet=st.sampled_from("0123456789 /abdeiklmnrstuv@\n"), max_size=40),
+        st.from_regex(r"/(durum|risk|pnl|mod|saglik|atladim|aldim|duraklat|yardim)( [0-9]{1,12})?"),
+        st.from_regex(r"[a-z ]{0,6}[0-9]{6,12}[a-z ]{0,6}"),
+    )
+)
+def test_replies_are_the_same_for_any_two_pins_outside_the_two_pin_commands(text: str) -> None:
+    first_word = text.split()[0].lower() if text.split() else ""
+    # /kill X and /devam X are the only places where a PIN is checked, and there every
+    # wrong one is counted towards the lock.
+    assume(not first_word.startswith(("/kill", "/devam")))
+    replies = []
+    for pin in (PIN, "975310642"):
+        world = World()
+        try:
+            commands = Commands(dataclasses.replace(world.deps, pin=pin))
+            replies.append(commands.handle(text, sent_at_ms=NOW_MS))
+        finally:
+            world.store.close()
+
+    assert replies[0] == replies[1]
 
 
 def test_an_id_that_equals_the_pin_is_not_echoed(world: World) -> None:

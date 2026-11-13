@@ -576,8 +576,8 @@ def test_a_bare_pin_message_is_deleted() -> None:
         await h.feed(tg.private_update(PIN, sent_at_ms=NOW_MS, message_id=5))
         assert h.fake.calls_to("deleteMessage") == [{"chat_id": CHAT_ID, "message_id": 5}]
         assert h.fake.sent_texts() == [
-            "PIN tek başına bir komut değil; mesajın siliniyor. Kullanım: /kill <PIN> ya da "
-            "/devam <PIN>"
+            "Mesajındaki uzun sayı PIN olabileceği için mesajın siliniyor. PIN yalnızca "
+            "/kill <PIN> ya da /devam <PIN> içinde kullanılır."
         ]
 
     drive(scenario)
