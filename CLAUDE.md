@@ -57,8 +57,8 @@ kabulü ve Faz 1 beklenmeden yapıldı (SPEC §6 başındaki not). Faz sırası 
 - Kullanıcı Türkiye'de: Topstep uygun değil → Topstep adaptörü yazma.
 - Birincil: FTMO · MT5 · `US500.cash` (terminalde doğrula). İkincil: Funding Pips — firmadan yazılı otomasyon onayı gelene kadar devre dışı.
 - Kod mekan-bağımsız: `MarketDataFeed` ve `ExecutionAdapter` protokolleri.
-- ADR-0000 (Faz 1'de yaz): Yürütme sinyali, işlem yapılan mekanın kendi verisinde hesaplanır. TradingView yalnızca
-  Faz 1 sinyali ve araştırma içindir; webhook yürütme yolunda kullanılmaz.
+- ADR-0000 (`docs/adr/0000-yurutme-sinyali-venue-verisinde.md`): Yürütme sinyali, işlem yapılan mekanın kendi verisinde
+  hesaplanır. TradingView yalnızca Faz 1 sinyali ve araştırma içindir; webhook yürütme yolunda kullanılmaz.
 
 ## Teknoloji
 Python 3.12 · uv · ruff · mypy --strict (`src/`) · pytest + hypothesis · pydantic v2 + pydantic-settings · PyYAML ·
@@ -79,7 +79,8 @@ src/propbot/
   backtest/           motor, dolum ve maliyet modeli, IS/OOS, walk-forward, Monte Carlo, raporlar
   store/              SQLite erişimi
 mql5/                 köprü EA (Faz 3)
-config/               strategies.yaml, risk.yaml, venues/*.yaml
+config/               strategies.yaml, risk.yaml, tv_alerts.yaml, venues/*.yaml
+deploy/               systemd birimi, Caddyfile (Faz 1; adımlar docs/runbook.md)
 tests/                unit/, property/, parity/, integration/
 docs/                 SPEC.md, adr/, runbook.md, tv-verification-checklist.md
 ```
@@ -91,9 +92,10 @@ uv run pytest -q
 uv run ruff check . && uv run mypy src
 uv run propbot config check
 uv run propbot montecarlo --trades <trades.csv> --venue config/venues/ftmo_2step_100k.yaml --cost-r 0.05
+uv run propbot serve --mode signal                      # Faz 1: webhook → Telegram, emir yok (docs/runbook.md)
+uv run propbot signals report --since 2026-12-01        # Faz 1 kabul kanıtı: sayılar + gecikme
 # Henüz yok (kendi fazında):
 uv run propbot backtest --strategy ny_orb_fvg --data data/<file>.parquet --oos-start 2025-01-01
-uv run propbot serve --mode signal
 ```
 
 ## Yapma

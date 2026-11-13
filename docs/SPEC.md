@@ -1,6 +1,6 @@
 # PropBot — Teknik Spesifikasyon
 
-Sürüm 0.2 · 2026-11-12 · Sahibi: Oğuz
+Sürüm 0.3 · 2026-11-13 · Sahibi: Oğuz
 `CLAUDE.md`'nin ayrıntısıdır. Sayı içeren her prop kuralı **VERIFY** etiketlidir: kullanılmadan önce firmanın
 resmi sayfasından doğrulanır ve venue profilindeki `rules_verified_at` güncellenir.
 
@@ -21,7 +21,8 @@ resmi sayfasından doğrulanır ve venue profilindeki `rules_verified_at` günce
 - **Funding Pips:** üçüncü taraf EA yalnızca trade/risk yöneticisi olarak serbest → kendi strateji otomasyonumuz için
   firmadan yazılı onay şart.
 - **TradingView webhook:** ücretli plan + 2FA; yalnızca port 80/443; IPv4; 3 sn içinde yanıt yoksa istek iptal; dört sabit
-  kaynak IP (listeyi her kurulumda TradingView destek sayfasından kopyala, bu belgeden değil).
+  kaynak IP (listeyi her kurulumda TradingView destek sayfasından kopyala, bu belgeden değil). Değerler `config/tv_alerts.yaml`'da
+  durur (2026-11-13'te kullanıcı resmi "About webhooks" sayfasından aktardı; mTLS desteklenmiyor).
 - **TradingView alarmları:** Premium altı planlarda alarm süreli (~1–2 ay). Alarm, oluşturulduğu andaki script ve girdi
   değerleriyle çalışır → girdi değişince alarm yeniden kurulur (VERIFY).
 - **Deep Backtesting** (Premium+): sonuçlar yalnızca Strategy Report'ta; grafikteki istatistik tablosu deep moddan beslenmez.
@@ -320,67 +321,111 @@ karşılaştırmasında orijinalle fark beklenir. Ayrıntı ve gerekçe: `CHANGE
 
 ## 5. Faz 1 — TradingView → Telegram sinyal botu (emir yok)
 
+> Uygulama durumu (2026-11-13): kod `src/propbot/signals/`, `notify/`, `store/`, `risk/sizing.py`; kararlar ADR-0000,
+> ADR-0004, ADR-0005; kurulum ve işletim `docs/runbook.md`. Bu bölüm uygulanan davranışı anlatır.
+
 ### 5.1 Alert yükü (Pine `alert()` → JSON)
 | Alan | Tip | Açıklama |
 |---|---|---|
 | `v` | int | şema sürümü (1) |
 | `token` | str | yalnızca webhook'a özel rastgele değer (login bilgisi değil) |
-| `strategy_id` | str | `ny_orb_fvg`, `asian_sweep`, `ict_silver_bullet`, `mr_bb_kc_rsi2`, `mtf_trend_cont` (Master: S1 = `ny_orb_fvg`, S2 = `asian_sweep`) |
-| `symbol` | str | `syminfo.tickerid` |
-| `tf` | str | `timeframe.period` |
+| `strategy_id` | str | `ny_orb_fvg`, `asian_sweep`, `ict_silver_bullet`, `mr_bb_kc_rsi2`, `mtf_trend_cont` (Master: S1 = `ny_orb_fvg`, S2 = `asian_sweep`); heartbeat göstergesi: `heartbeat` |
+| `symbol` | str | `syminfo.tickerid` (düz `BORSA:SEMBOL`; harf, rakam, `_ . : ! -`, en çok 64 karakter) |
+| `tf` | str | `timeframe.period`; yalnızca gün içi: dakika `1`–`1440`, saniye `1S`–`59S` |
 | `bar_time` | int | sinyal barının açılış zamanı, epoch ms (`time`) |
 | `action` | str | `entry` · `stop_update` · `exit` · `cancel` (bekleyen limit girişi geri çek) · `heartbeat` |
 | `side` | str | `long` · `short` |
-| `setup` | str | `FVG` · `IFVG` · `SWEEP_FVG` · `SB_FVG` · `BB_KC_RSI2` · `MTF_PULLBACK` (`stop_update`/`exit`'te boş) |
+| `setup` | str | `FVG` · `IFVG` · `SWEEP_FVG` · `SB_FVG` · `BB_KC_RSI2` · `MTF_PULLBACK` (`stop_update`/`exit`'te boş olabilir) |
 | `order_type` | str | `market` · `limit` (limit: `est_entry` = limit fiyatı; iptalde `cancel` gelir) |
-| `est_entry` | float | sinyal barı kapanışı |
+| `est_entry` | float | `entry`: sinyal barı kapanışı (limit: limit fiyatı) · `stop_update`: TradingView ortalama dolumu · `exit`: bar kapanışı |
 | `stop`, `tp` | float | seviye |
-| `stop_dist_pts` | float | `abs(est_entry - stop)` |
-| `rr` | float | |
+| `stop_dist_pts` | float | `abs(est_entry - stop)`; bilgi amaçlı, alıcı mesafeyi kendisi hesaplar |
+| `rr` | float | bilgi amaçlı (girdi değeri ya da iki ondalıklı oran; `0` ya da `null` olabilir); mesajdaki R, seviyelerden hesaplanır |
+| `reason` | str | isteğe bağlı (v1 uzantısı, `^[a-z_]{1,32}$`); Pine dosyaları henüz göndermez (açık bulgu 15) |
 
 Fiyatları `str.tostring(x, format.mintick)` ile yaz; olmayan sayısal alan `null` (ör. `exit`'te `stop`/`tp`). Strateji başına TradingView'da bir alarm: koşul
 "alert() function calls only", webhook URL'si alıcı adresi.
 
+Kurallar (`src/propbot/signals/schema.py`): bilinmeyen anahtar, yinelenen anahtar, `NaN`/`Infinity`, sayı yerine metin ya
+da `true/false` reddedilir. `entry`: `side`, `setup`, `order_type`, `est_entry`, `stop` zorunlu; stop zarar tarafında,
+(varsa) TP kâr tarafında. `stop_update`: `side`, `est_entry`, `stop` zorunlu (stop girişe eşit ya da kâr tarafında
+olabilir). `heartbeat`: yalnızca `v`, `token`, `strategy_id`, `symbol`, `tf`, `bar_time`, `action`. Günlük ve üstü zaman
+dilimleri reddedilir: bar kapanışı seans takvimine bağlıdır, tazelik denetlenemez.
+
 ### 5.2 Alıcı
-- `POST /tv/webhook` (FastAPI). Doğrula → kuyruğa yaz → **hemen 200** (TradingView 3 sn'de yanıt alamazsa isteği iptal eder).
-  İşleme asenkron.
-- Doğrulama sırası: kaynak IP (ufw + uygulama), token (`hmac.compare_digest`), şema (pydantic, gövde ≤ 4 KB), tazelik
-  (`now − (bar_time + 60 s) ≤ 90 s`, aksi halde `STALE` kaydı + bildirim), idempotency
-  (`UNIQUE(strategy_id, symbol, bar_time, action)`).
-- Boyut önerisi: venue profili + `risk.yaml` ile lot hesabı (yalnızca öneri; Faz 1'de emir yok).
+- `POST /tv/webhook` (FastAPI). Doğrula → kuyruğa (SQLite) yaz → **hemen 200** (TradingView 3 sn'de yanıt alamazsa isteği
+  iptal eder). İşleme asenkron ve işlemsel (ADR-0004).
+- Doğrulama sırası (ilk hata yanıtı belirler): istemci IP'si → gövde ≤ 4 KB → JSON → token (`hmac.compare_digest`) →
+  hız sınırı → şema → kayıt. Hız sınırı token'dan **sonradır**: dört kaynak adres bütün TradingView kullanıcılarının
+  ortak adresidir; token'ı bilmeyen biri sınırı tüketip kendi alert'lerimizi 429'a düşürememelidir.
+- İstemci IP'si: bağlantının karşı ucu güvenilir vekilse (`127.0.0.1`, `::1`) `X-Forwarded-For`'un en sağdaki adresi;
+  değilse karşı ucun kendisi. Adres `config/tv_alerts.yaml` → `webhook.source_ips` içinde olmalı.
+- Tazelik (2026-11-13 kullanıcı kararı): `bar_kapanışı = bar_time + tf süresi`; `now ≤ bar_kapanışı +
+  signal_validity_seconds` (60) ise taze. Bayat giriş kaydedilir ve "[BAYAT SİNYAL — ATLA]" olarak bildirilir; bayat
+  stop/çıkış/iptal "[GEÇ GELDİ]" önekiyle yine iletilir (risk azaltır).
+- Giriş alert'i hesaplanan bar kapanışından > 2 sn **önce** gelirse sunucu saati TradingView ile uyuşmuyordur: sinyal
+  "ATLA" olarak iletilir (değişmez kural 3).
+- Idempotency: `UNIQUE(strategy_id, symbol, bar_time, action)`; yinelenen istek 200 `duplicate` alır, ikinci mesaj üretmez.
+- Boyut önerisi: venue profili + `risk.yaml` ile lot hesabı (yalnızca öneri; Faz 1'de emir yok). `contract.*` boşsa
+  mesajda "boyut hesaplanamadı" ve en fazla risk yazar (hata değildir).
 
 ### 5.3 Güvenlik katmanları
-1. ufw: 443'e yalnızca TradingView kaynak IP'leri; SSH yalnızca anahtar ile.
-2. Caddy: otomatik TLS. TradingView istemci sertifikası (mTLS) doğrulaması destekleniyorsa ekle (VERIFY).
-3. Payload token'ı (`.env`, kolay rotasyon). Broker/Telegram kimlik bilgisi asla payload'da yok.
-4. Rate limit (dakikada ≤ 30 istek), gövde boyutu sınırı, yapılandırılmış log (token maskeli).
+1. ufw: 443'e yalnızca TradingView kaynak IP'leri; 80 yalnızca sertifika doğrulaması (ACME) ve yönlendirme için; SSH yalnızca anahtar ile.
+2. Caddy: otomatik TLS; yalnızca TradingView adreslerinden `POST /tv/webhook`'u geçirir. TradingView istemci sertifikası
+   (mTLS) **desteklemez** (kullanıcı tarafından resmi sayfadan aktarıldı, 2026-11-13).
+3. Bot: kaynak IP'yi yeniden doğrular; yalnızca loopback'i dinler; `X-Forwarded-For` dışında başlık kabul etmez.
+4. Payload token'ı (`.env`, kolay rotasyon). Broker/Telegram kimlik bilgisi asla payload'da yok.
+5. Hız sınırı (dakikada ≤ 30, token'ı doğru isteklerde), gövde boyutu sınırı, yapılandırılmış log (sırlar `***`).
+6. Kimliği doğrulanamayan istekler (yanlış token, bozuk JSON, büyük gövde) sayılır; izinli adresten gelenler için en
+   fazla saatte bir Telegram uyarısı gider.
 
 ### 5.4 Telegram
-- Yalnızca `TELEGRAM_ALLOWED_CHAT_ID`; diğer sohbetler yok sayılır ve loglanır.
-- Mesaj şablonu (Türkçe):
+- Yalnızca `TELEGRAM_ALLOWED_CHAT_ID` (pozitif = özel sohbet; grup/kanal kimlikleri reddedilir); diğer sohbetler yok
+  sayılır ve sayılır/loglanır (metin loglanmaz).
+- Mesaj şablonu (Türkçe, düz metin; `US500.cash` gibi alan-adı görünümlü sözcükler bağlantıya dönüşmesin diye `code`
+  olarak işaretlenir):
 ```
-[SİNYAL] {strategy} · {setup} · {LONG/SHORT} · {symbol}
-Referans giriş ≈ {est_entry} (bar kapanışı)
-Stop {stop} (−{stop_dist_pts} puan) · TP {tp} ({rr}R)
-FTMO'da uygula: giriş anındaki US500 fiyatına göre stop −{stop_dist_pts}, TP +{rr × stop_dist_pts} puan
-Önerilen boyut: {lots} lot · risk ≈ ${risk_usd} (%{risk_pct}) · günlük bütçe ${used}/${cap}
-Geçerlilik: {valid_until TR} ve fiyat sapması ≤ {0.25 × stop_dist_pts} puan — aşıldıysa ATLA
-id {signal_id} · bar {NY saati} / {TR saati}
+[SİNYAL] {strateji} · {setup} · {LONG/SHORT} · {symbol}
+Referans giriş ≈ {est_entry} (TradingView bar kapanışı)
+Stop {stop} (−{mesafe} puan) · TP {tp} (+{tp mesafesi} puan, {R}R)
+{VENUE} {sembol}'te PİYASA emri; SL/TP'yi emirle BİRLİKTE gir: giriş anındaki fiyata göre stop −{mesafe} puan, TP +{tp mesafesi} puan
+Önerilen boyut: {lot} lot (≈ ${nominal} nominal, {x}× hesap) · risk ≈ ${risk} (%{risk_pct}) · günlük bütçe ${kullanılan}/${tavan} (bu sinyal dahil)
+Geçerlilik: {TR saati}'ye kadar ve TradingView'da ({symbol}) fiyat {alt}–{üst} aralığında — değilse ATLA
+TradingView'da stop/TP dolunca mesaj gelmez; pozisyonun hâlâ açıksa seans sonunda kendin kapat.
+Not: {stratejiye özel not}
+id {signal_id} · bar {NY saati} NY / {TR saati} TR
 ```
-- Komutlar (ASCII): `/durum`, `/pnl`, `/risk`, `/duraklat`, `/devam`, `/kill` (onay kodu ister), `/mod`, `/saglik`.
-- Telegram hatası motoru asla bloklamaz (kuyruk + üstel geri çekilme).
+  Fiyat aralığı = `est_entry ± signal_max_drift_frac_of_stop × stop mesafesi`. Limit girişte (Silver Bullet) aralık yerine
+  "Emri {TR saati}'ye kadar gir; İPTAL mesajı gelene kadar bekler" yazar. Diğer mesajlar: `[STOP GÜNCELLE]` (mesafe
+  olarak: "stop = kendi giriş fiyatın −3.50 puan"), `[ÇIKIŞ]`, `[İPTAL]`, `[SİNYAL — ATLA]` (stop çok geniş · bütçe
+  yetersiz · saat uyuşmazlığı), `[BAYAT SİNYAL — ATLA]`, `[İLETİLEMEDİ — ATLA]`, `[İLETİM BELİRSİZ]`, `[UYARI]` (stop
+  genişletme reddedildi), `[ALARM]`.
+- Günlük bütçe satırı temkinlidir (ADR-0005): iletilen her giriş prop günü boyunca sayılır; almadığın sinyali `/atladim`
+  ile bildirirsin. Stop güncellemeleri mesafe uzayında karşılaştırılır; stop'u genişleten güncelleme iletilmez.
+- Komutlar (ASCII): `/durum`, `/pnl`, `/risk`, `/duraklat`, `/devam`, `/kill <PIN>`, `/mod`, `/saglik`, `/atladim [id]`,
+  `/aldim <id>`, `/yardim`. `/duraklat` ve `/kill` yalnızca yeni girişleri keser (stop/çıkış/iptal her zaman iletilir) ve
+  gecikmeli ulaşsa da uygulanır; `/devam`, `/atladim`, `/aldim` 60 sn'den eskiyse reddedilir. KILL'den dönüş
+  `/devam <PIN>`. PIN içeren mesaj silinir; 15 dk içinde 5 yanlış PIN, PIN girişini 15 dk kilitler.
+- Telegram hatası motoru asla bloklamaz (giden kutusu + üstel geri çekilme, en çok 30 sn).
 
 ### 5.5 Heartbeat ve alarm süresi
-- Ayrı küçük bir Pine göstergesi saatte bir `{"action":"heartbeat"}` gönderir. İzlenen pencerelerde 75 dk sessizlik →
-  Telegram: "TradingView alarm hattı sessiz".
-- Premium altı planlar için `config/tv_alerts.yaml`'da alarm oluşturma tarihleri; bitişten 7 gün önce hatırlatma.
+- `pine/heartbeat_indicator.pine` saat başı `{"action":"heartbeat"}` gönderir (stratejilerle aynı sembol, 1m grafik).
+  İzlenen pencerelerde (`config/tv_alerts.yaml`, New York saati) 75 dk hiçbir geçerli alert gelmezse → Telegram:
+  "TradingView alarm hattı sessiz". Pencerenin son saatinde kesilen hat, pencere kapandıktan sonra da bildirilir; hat
+  geri gelince bilgi mesajı gider.
+- Bot bir izleme penceresine denk gelen süre boyunca kapalı kaldıysa açılışta bunu bildirir (o aralıktaki alert'ler alınmadı).
+- Premium altı planlar için `config/tv_alerts.yaml` → `alerts` altında her alarmın bitiş tarihi (`expires_on`); bitişten
+  7 gün önce ve sonrasında günde bir hatırlatma.
 
 ### 5.6 Dağıtım
-Ubuntu sunucu (küçük VPS; FTMO VPS'e genel olarak izin veriyor, Faz 1'de zaten emir yok) · Caddy · ufw ·
-systemd (`Restart=always`) · chrony · log rotasyonu.
+Ubuntu · systemd (`Restart=always`) · chrony · journald. İki ücretsiz yol (`docs/runbook.md`): **A** DuckDNS alt alan adı +
+Caddy (Let's Encrypt) + ufw; **B** kendi bilgisayarın + Tailscale Funnel (ya da yalnızca deneme için Cloudflare hızlı
+tünel). Örnek dosyalar `deploy/`. Yeniden başlatmalar izlenen pencerelerin dışında yapılır.
 
 ### 5.7 Kabul
 - 10 işlem günü kesintisiz; kaçan/çift sinyal 0 (TradingView Alert Log ile karşılaştırma); uçtan uca medyan gecikme < 5 sn.
+  Kanıt: `uv run propbot signals report --since <gün> --csv reports/sinyaller.csv` (gün gün sayılar, gecikme medyanı,
+  alarmlar).
 - Tüm doğrulama hata yolları testli; `/kill` ve yetkisiz sohbet testleri yeşil.
 
 ## 6. Faz 2 — Python motoru ve backtest
@@ -460,6 +505,9 @@ canlı sonuçlar backtest'in %95 güven aralığında.
 
 ### 8.1 Kurallar (kodda zorunlu)
 - `risk_per_trade_pct` varsayılan 0,25; kod tavanı 0,5. Başlangıç bakiyesi üzerinden.
+- **Faz 1 (emir yok):** bot dolumu ve gerçekleşen K/Z'yi bilmediği için ön kontrol yerine temkinli bir defter kullanır:
+  iletilen her giriş prop günü boyunca tam riskiyle sayılır, yalnızca `/atladim` ya da kanıtlanmış iletilememe serbest
+  bırakır (ADR-0005). Haftalık tavan, ardışık zarar duraklatması ve eşzamanlılık sınırı Faz 3'te risk motoruyla gelir.
 - Günlük bütçe = `min(daily_cap_pct, 0,5 × daily_loss_limit_pct) × initial_balance`.
 - Ön kontrol: `realized_today + open_risk + new_risk + cost_buffer ≤ günlük bütçe`; değilse RED.
 - Günlük taban = reset anındaki `max(balance, equity) − daily_loss_limit`. Kalan günlük tampon

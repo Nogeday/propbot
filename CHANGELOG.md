@@ -268,10 +268,89 @@ açık resmi sayfaları 2026-11-13'te okundu; alan alan sonuç ve kaynaklar:
 - Doğrulama 30 gün geçerli (2026-12-13). Yenileme tarayıcıda elle yapılır: FTMO'nun Şartlar ve Koşulları (madde 9.4.6)
   siteden otomatik araçlarla bilgi toplamayı yasaklıyor.
 
+## Faz 1 — TradingView → webhook → Telegram sinyal botu (2026-11-13)
+
+Kullanıcı kararı (2026-11-13): Faz 1 planı, dosya yapısı, ADR kararları ve commit sırası onaylandı; altı açık soru
+cevaplandı. **Emir yolu yazılmadı; tek mod `signal`.** Kararlar: `docs/adr/0000`, `0004`, `0005`. Kurulum ve işletim:
+`docs/runbook.md`. Spesifikasyon: `docs/SPEC.md` §5 (uygulanan davranışa göre güncellendi, sürüm 0.3).
+
+**Durum:** kod ve testler tamam (3416 test, ruff, mypy --strict). SPEC §5.7'deki 10 işlem günlük kabul koşusu **yapılmadı**:
+Faz 0 script'leri TradingView'da henüz derlenmedi, alarmlar kurulmadı, bot bir sunucuya kurulmadı. Hiçbir şey gerçek
+TradingView ya da gerçek Telegram'a karşı denenmedi (bu ortamdan ikisine de erişim yok).
+
+Commit'ler (sırayla): `4257211` bağımlılıklar · `d09835f` saat yardımcıları · `701e363` şema · `209b858` + `41e9973` store ·
+`e26ccee` tv_alerts config · `02c925b` sırlar ve log · `5678301` biçimleyiciler · `517d3ff` alıcı · `3380ecb` boyutlandırma ·
+`fd699f1` mod kilidi · `47f2db0` izleme pencereleri · `0bcbe8a` + `958888f` Telegram · `f30dae7` + `bb0bf4c` işleyici ve
+heartbeat · `10ef7fc` CLI serve + rapor · `fbe018e` Pine heartbeat · `7390635` dağıtım ve runbook.
+
+### Kullanıcı kararları (2026-11-13)
+- **TradingView webhook kuralları** kullanıcı tarafından resmi sayfadan aktarıldı (bu ortamdan `tradingview.com`'a erişim
+  yok): dört kaynak IPv4 adresi, yalnızca 80/443, 3 sn zaman aşımı, mTLS yok → `config/tv_alerts.yaml`.
+- **Sözleşme değerleri boşken** hata yok: mesaj "boyut hesaplanamadı", en fazla riski ve formülü yazar.
+- **Günlük bütçe temkinli:** iletilen her giriş sayılır; `/atladim` almadığın girişin riskini düşer (ADR-0005).
+- **Tazelik** yükteki `tf`'den: bar kapanışı = `bar_time` + bar süresi; `now ≤ kapanış + 60 sn`.
+- **Şema v1** kaldı; `reason` isteğe bağlı alan olarak kabul edilir. Altı Pine stratejisine dokunulmadı.
+- **Sıfır maliyetli dağıtım:** DuckDNS + Caddy ya da kendi bilgisayarın + Tailscale Funnel / Cloudflare hızlı tünel.
+
+### Ne yapıldı
+- **Alıcı** (`signals/receiver.py`): `POST /tv/webhook`; sıra: istemci IP'si → gövde ≤ 4 KB → JSON → token → hız sınırı →
+  şema → kayıt; hemen 200. Yinelenen anahtar `duplicate`, geç gelen `stale` olarak kaydedilir. Token veritabanına,
+  günlüğe ve yanıta girmez. `GET /healthz` yalnızca doğrudan yerel isteğe yanıt verir.
+- **Şema** (`signals/schema.py`, `core/timeframe.py`): altı stratejinin ve heartbeat göstergesinin alert kurucuları
+  okunarak çıkarıldı (33 gövde biçimi testlerde); katı JSON, eylem başına kurallar; hata yalnızca alan **adlarını** taşır.
+- **Store** (`store/db.py`): SQLite WAL, `synchronous=FULL`, tek transaction'da sonuç + bütçe + giden kutusu;
+  `UNIQUE(strategy_id, symbol, bar_time, action)` (değişmez kural 5).
+- **İşleyici** (`signals/processor.py`, `notify/messages.py`): karar tablosu saf fonksiyon; giriş için saat şüphesi →
+  KILL/duraklat → bayat → stop çok geniş → bütçe → iletildi. Stop güncellemeleri **mesafe uzayında** karşılaştırılır:
+  kullanıcının kendi stop'unu genişletecek güncelleme iletilmez (değişmez kural 2). İşlenemeyen sinyal `error` olarak
+  kenara alınır, alarm gider, kuyruk durmaz.
+- **Boyutlandırma** (`risk/sizing.py`): aşağı yuvarlama, `min_lot` altı "ATLA", tam (kesirli) aritmetik, özellik testleri.
+- **Telegram** (`notify/commands.py`, `notify/telegram.py`): tek özel sohbet; `/durum /pnl /risk /duraklat /devam /kill
+  /mod /saglik /atladim /aldim /yardim`; PIN kilidi ve PIN'li mesajın silinmesi; giden kutusu göndericisi (en çok 30 sn
+  geri çekilme, "iletilemedi" ile "iletim belirsiz" ayrımı); `US500.cash` ve `/atladim 126` `code` olarak gider.
+- **Alarm hattı izleyicisi** (`signals/heartbeat.py`, `signals/watch.py`): izleme penceresinde 75 dk sessizlik, hat geri
+  gelince bilgi, bot kapalı kaldıysa açılışta alarm, alarm bitiş hatırlatması (09:00 TR'den sonra, günde bir).
+- **Sırlar ve log** (`settings.py`, `logging_setup.py`): `.env` 0600 değilse başlamaz; hata metinleri değer içermez; tüm
+  kayıtlar (kütüphaneler dahil) tek zincirden geçer ve sırlar `***` olur.
+- **Servis ve CLI** (`signals/service.py`, `cli.py`): `propbot serve --mode signal` (diğer modlar gerekçesiyle
+  reddedilir, değişmez kural 1); arka plan görevi ölürse süreç hata koduyla çıkar; `propbot signals report` kabul
+  kanıtını üretir; `propbot config check` `tv_alerts.yaml`'ı da doğrular.
+- **Pine:** `pine/heartbeat_indicator.pine` (gösterge, emir yok). **Derlenmedi.**
+- **Dağıtım:** `deploy/propbot.service`, `deploy/Caddyfile`, `docs/runbook.md`.
+
+### Tasarım denetimi (üç bağımsız mercek: güvenlik · doğruluk · uygunluk) — kabul edilen bulgular
+Sözleşme uygulanmadan önce denetlendi; 26 bulgunun hepsi kabul edildi. Davranışı değiştirenler:
+- Hız sınırı token'dan **sonraya** alındı: dört kaynak adres bütün TradingView kullanıcılarının ortak adresi; yabancı biri
+  sınırı tüketip kendi alert'lerimizi 429'a düşüremesin. İzinli adresten gelen kimliksiz istekler için saatte en fazla
+  bir alarm.
+- İstemci IP başlığı yalnızca `X-Forwarded-For` olabilir (başka başlık bir tünelden olduğu gibi geçip taklit edilebilir).
+- Zaman aşımına uğrayan gönderim "iletilmedi" sayılmaz ("[İLETİM BELİRSİZ]", bütçe sayılmaya devam eder).
+- Stop genişletme denetimi TradingView seviyelerinde değil, kullanıcının uyguladığı mesafelerde yapılır.
+- Bar kapanışından önce gelen giriş alert'i saat uyuşmazlığıdır: "ATLA" (değişmez kural 3).
+- `/duraklat` ve `/kill` gecikse de uygulanır; bot kapalıyken yazılan komutlar atılmaz; `/atladim` yalnızca mesajı
+  gönderilmiş girişi seçer ve yanıtında adını söyler.
+- Heartbeat: pencerenin son saatinde kesilen hat da bildirilir; yeniden başlatma sessizliği gizlemez.
+- `InvalidToken` gibi sır taşıyabilen istisnalar ham traceback olarak basılmaz.
+
+### Testler
+- 3416 test (`uv run pytest -q`), ruff, `mypy --strict` (36 kaynak dosya) temiz.
+- Alıcının her adımı ve dalı; 33 gerçek gövde biçimi şemadan, alıcıdan ve işleyiciden geçer.
+- `/kill`, PIN kilidi, yetkisiz sohbet, grup sohbeti testleri (`tests/unit/test_commands.py`, `test_telegram.py`).
+- Uçtan uca (`tests/integration/test_service.py`): gerçek uygulama + store + işleyici + izleyici + python-telegram-bot;
+  yalnızca TradingView (test istemcisi) ve Telegram'ın HTTP katmanı (çevrimdışı sahte) değiştirilir.
+- Gerçek `propbot serve` süreci sahte sırlarla yerelde denendi (alıcı, yinelenen istek, IP ve token reddi, temiz kapanış).
+
+### SPEC §5.7 kabul durumu
+| Madde | Durum |
+|---|---|
+| 10 işlem günü kesintisiz; kaçan/çift sinyal 0; uçtan uca medyan gecikme < 5 sn | **Bekliyor** — kurulum ve TradingView alarmları gerekli (`docs/runbook.md` §12; ölçüm: `propbot signals report`) |
+| Tüm doğrulama hata yolları testli | Sağlandı (`tests/unit/test_receiver.py`, `test_alert_schema.py`) |
+| `/kill` ve yetkisiz sohbet testleri yeşil | Sağlandı (`tests/unit/test_commands.py`, `test_telegram.py`, `tests/integration/test_service.py`) |
+
 ## Açık bulgular
 
-Durum (2026-11-13): 1, 3–11 ve 24 kapandı; 2 ve 23 kısmen. 12–23 ve 25–30 açık (18–23 denetimden, 25–27 Faz 2 ön
-diliminden, 28–30 FTMO doğrulamasından).
+Durum (2026-11-13): 1, 3–11 ve 24 kapandı; 2, 15 ve 23 kısmen. 12–23 ve 25–30 açık (18–23 denetimden, 25–27 Faz 2 ön
+diliminden, 28–30 FTMO doğrulamasından). 31–44 Faz 1'den.
 
 1. ~~**MTF derleme riski:** `riskPts := ...` bildirimi olmayan değişkene atama.~~ **Çözüldü** (`e997dd5`).
 2. **B4 sayısal değerleri — kısmen:** kod varsayılanı artık MES test profili (E9). FTMO `US500.cash` spread'i/komisyonu
@@ -284,14 +363,16 @@ diliminden, 28–30 FTMO doğrulamasından).
 8. ~~**`immediately` olmayan zorunlu kapanışlar.**~~ **Çözüldü** (E6).
 9. ~~**NY/Asian/Master başlıkları "SPY/SPX".**~~ **Çözüldü** (E9).
 10. ~~**`pine/README.md` dosya adları.**~~ **Çözüldü** (E10).
-11. ~~**`stop_update` sıklığı.**~~ Pine tarafında **çözüldü** (E7); Faz 1 alıcısı aynı filtreyi ayrıca uygulamalı.
+11. ~~**`stop_update` sıklığı.**~~ Pine tarafında **çözüldü** (E7); Faz 1 işleyicisi aynı filtreyi mesafe uzayında ayrıca
+    uygular (`f30dae7`; venue `tick_size` boşken yalnızca "iyileşme yok" süzülür).
 12. **Kesiciler bar kapanışında:** yüzen günlük zarar kontrolü bar içi ihlali ancak bar kapanınca görür (Pine sınırı;
     `calc_on_every_tick` kapalı). Gerçek korumayı botun risk motoru sağlar (§8.1).
 13. **Günlük zarar tabanı dosyalar arasında farklı:** NY/Asian/Master `min(gün başı özsermaye, başlangıç sermayesi)` × %;
     SB/MR/MTF gün başı özsermaye × %. Hizalanmadı (istenmedi).
 14. **Pine %2 günlük kesici ≠ `config/risk.yaml` `daily_cap_pct: 1.0`:** botun günlük bütçesi daha sıkıdır; bilgi amaçlı.
-15. **`exit` alert'inde neden alanı yok:** seans sonu / günlük zarar ihlali / tarih sonu alıcıda ayırt edilemiyor
-    (§5.1 şema v1). Faz 1'de `reason` alanı değerlendirilebilir.
+15. **`exit` alert'inde neden alanı yok — kısmen:** seans sonu / günlük zarar ihlali / tarih sonu alıcıda ayırt
+    edilemiyor. Alıcı şeması isteğe bağlı `reason` alanını kabul ediyor (2026-11-13 kararı); Pine dosyaları Faz 0 kabulü
+    bitmeden değişmeyeceği için henüz göndermiyor.
 16. **Kaldıraç / marjin sınırı:** dar stop'larda risk-temelli boyutun notional'ı hesabın kaldıraç sınırını aşabilir;
     venue profilinde kaldıraç alanı yok (VERIFY, Faz 2/3). TradingView tarafında marjin kontrolü kapalı (E9).
 17. **Yarım günlerde 1 barlık işlem:** E5 sınırı — sondan bir önceki bardaki sinyal son barda dolup aynı barın
@@ -332,3 +413,37 @@ diliminden, 28–30 FTMO doğrulamasından).
 30. **`server_tz` biçimi:** FTMO MT5 sunucu saati New York + 7 saat (GMT+2, ABD yaz saatinde GMT+3). Şemadaki tek IANA
     dilimi bunu ifade edemiyor; alan boş kaldı. Bar içe aktarma (§6.1) yazılırken biçim kararlaştırılmalı (ör. çapa
     dilim + saat farkı) ve terminaldeki bilinen bir 09:30 NY mumuyla doğrulanmalı.
+31. **Dal geçmişinde anlık görüntü commit'i:** `b6fcbc8 WIP: uncommitted changes, moved to the cloud` (yalnızca
+    bağımlılık satırları) `main-bz6vo7` dalında kaldı; yeniden yazmak zorla push gerektirir ve bu oturumda reddedildi.
+    Birleştirirken squash edilebilir.
+32. **Kurallar bayatken sinyal davranışı (karar gerekir):** `rules_verified_at` 30 günü geçince `signal` modu çalışmaya
+    devam eder (SPEC §8.1); giriş mesajına "[KURALLAR DOĞRULANMADI …]" satırı eklenir ve günde bir alarm gider. Değişmez
+    kural 3'ün harfi "yeni giriş yok" der. Girişleri tamamen kesmek istenirse tek satırlık değişiklik (ADR-0005).
+33. **Asgari stop / azami kaldıraç kuralı yok:** çok dar stop çok büyük lot önerir (ör. 0,25 puan → 1000 lot). Mesaj
+    nominal büyüklüğü ve hesaba oranını gösterir, ama otomatik "ATLA" yok; eşik için karar + ADR gerekir (bulgu 16 ile
+    birlikte).
+34. **Alert gövdeleri gerçek çıktıyla doğrulanmadı:** şema Pine kaynağı okunarak çıkarıldı. Sayı biçimleri (`5120.00`,
+    `"rr":2`), `timeframe.period` değerleri ve özellikle `syminfo.tickerid`'nin uzatılmış seans / ayarlama açıkken
+    `={"session":…}` biçiminde gelip JSON'u bozması (→ 400, saatlik uyarı) TradingView'da kontrol edilmeli
+    (doğrulama listesi F).
+35. **Mesafe uzayı kuralının gürültüsü:** TradingView dolumu sinyal barı kapanışından kötüyken mutlak seviyesi değişmeyen
+    bir `stop_update` (MTF'de dolum barı yeniden fiyatlaması) kullanıcı için genişleme sayılır ve "[UYARI] … mevcut
+    stop'unu KORU" mesajı üretir. Doğru ama sık olabilir; eşik uydurulmadı.
+36. **Stop/TP dolumu bildirilmiyor:** TradingView yalnızca zorunlu kapanışları alert eder. Bot bir pozisyonun kapandığını
+    bilemez; bütçe bu yüzden temkinli sayılır ve her giriş mesajı "pozisyonun hâlâ açıksa seans sonunda kendin kapat" der.
+    TradingView'da iptal edilen bir limit emir FTMO'da dolmuşsa o pozisyon için hiçbir mesaj gelmez.
+37. **Sıra dışı teslimat:** kendi giriş alert'inden önce işlenen bir takip alert'i (stop/çıkış) "ilgili işlem yok" olarak
+    düşer. İşlenemeyip `error` olan bir girişin takip mesajları da iletilmez (alarm kullanıcıyı TradingView'a yönlendirir).
+38. **Heartbeat alarmı tatil bilmez:** tatil ve erken kapanış günlerinde "alarm hattı sessiz" uyarısı beklenen bir yanlış
+    alarmdır (borsa takvimi Faz 2'de `exchange_calendars` ile gelir).
+39. **Gerçek Telegram'a karşı doğrulanmayanlar:** `code` işaretinin `US500.cash` bağlantısını engellediği; botun özel
+    sohbette kullanıcının PIN'li mesajını silebildiği (silemezse uyarı gönderir); 4096 sınırı. İlk kurulumda kontrol et.
+40. **python-telegram-bot iç ayrıntısına bağımlılık:** çalışırken iptal edilen token, 22.8'in özel polling görev adından
+    algılanıyor; ad değişirse yalnızca bir log satırı kalır (token reddi bir sonraki gönderimde yine fark edilir).
+41. **Budama ve göç yok:** `data/propbot.db` büyür (yılda birkaç MB); şema sürümü değişirse eski dosya açılmaz.
+42. **`pine/heartbeat_indicator.pine` derlenmedi** (doğrulama listesi H); alarm koşulunun adı ("Any alert() function
+    call") ve `timeframe.in_seconds()` davranışı TradingView'da doğrulanmalı.
+43. **Master `exit` alert'inde `side` net pozisyondan gelir** (iki bacak aynı yönde olduğu için pratikte doğru); alıcı
+    çıkışta yönü denetlemez, yön girişinkinden farklıysa çıkış mesajı girişe bağlanmadan iletilir.
+44. **Dağıtım belgesinde doğrulanamayanlar:** Tailscale ve cloudflared kurulum komutları, Cloudflare hızlı tünel
+    sınırları ve DuckDNS sayfası bu ortamdan okunamadı; runbook'ta (VERIFY) olarak işaretli.
