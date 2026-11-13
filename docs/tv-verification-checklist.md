@@ -105,6 +105,13 @@ tablosundan (MTF'de tablo farklı: "Full trades", "Avg runner R"; Silver Bullet'
 - [ ] Aynı barda iki farklı alert gerekiyorsa (ör. Master'da iki bacağın kapanışı, ya da `stop_update` + `exit`) ikisi de
       geliyor mu? Gelmiyorsa hangisinin geldiğini yaz.
 - [ ] Girdi değiştirince alarmı yeniden kurman gerektiğini not et (alarm, oluşturulduğu andaki girdilerle çalışır).
+- [ ] `"symbol"` alanı düz `BORSA:SEMBOL` biçiminde mi (ör. `CME_MINI:MES1!`)? Grafikte uzatılmış seans ya da fiyat
+      ayarlaması açıkken TradingView sembolü `={"session":…}` gibi bir yapıyla verebilir; bu, JSON'u bozar ve alıcı
+      alert'i reddeder (400). Böyle görürsen mesajı (token maskeli) yapıştır.
+- [ ] `"tf"` alanı gün içi bir değer mi (`1`, `5`, `15`, `60` …)? Alıcı günlük ve üstü zaman dilimlerini reddeder.
+- [ ] Her strateji için **en az bir gerçek alert gövdesini** (giriş; varsa stop güncellemesi, çıkış, iptal) token'ı `***`
+      yaparak sakla: alıcının şeması Pine kaynağından çıkarıldı, sayı biçimleri (ör. `5120.00`, `"rr":2`) gerçek
+      çıktıyla doğrulanmadı.
 
 ## G. Genişletme kontrolleri (E-maddeleri)
 - [ ] **E1 Master yeniden fiyatlama:** List of Trades'ten stop'la kapanan bir S1 ve bir S2 işlemi seç: FVG Buffer
@@ -127,11 +134,24 @@ tablosundan (MTF'de tablo farklı: "Full trades", "Avg runner R"; Silver Bullet'
 - [ ] **E8 Tablolar:** MTF ve Silver Bullet'ta `Table scope` = In-Sample / Out-of-Sample → rakamlar değişiyor ve
       IS + OOS işlem sayısı = All. Silver Bullet panosunda "Tot R" satırı var.
 
+## H. Heartbeat göstergesi ve alıcı (Faz 1 — `docs/runbook.md` ile birlikte)
+- [ ] `pine/heartbeat_indicator.pine` dosyasını yeni bir **gösterge** olarak yapıştır, derle. Hata/uyarı varsa kopyala.
+- [ ] Stratejilerle aynı sembolün **1 dakikalık** grafiğine ekle; saat başlarında (New York saatiyle) barın arka planı
+      hafif renkleniyor mu?
+- [ ] Günlük grafikte "use an intraday chart of 60 minutes or less" çalışma zamanı hatası veriyor mu (vermeli)?
+- [ ] Alarm oluştur: Condition = gösterge → **"Any alert() function call"**; Webhook URL = alıcı adresi. Seçenek adı
+      farklıysa ne gördüğünü yaz.
+- [ ] İlk saat başında Alert Log'da şu biçimde bir mesaj görünüyor mu:
+      `{"v":1,"token":"…","strategy_id":"heartbeat","symbol":"CME_MINI:MES1!","tf":"1","bar_time":…,"action":"heartbeat"}`
+- [ ] Bot çalışıyorsa Telegram'da `/saglik` → "son heartbeat" birkaç saniye/dakika önce görünüyor mu?
+- [ ] Alarmın bitiş tarihini `config/tv_alerts.yaml` → `alerts` altına yazdın mı?
+
 ## Claude Code'a yapıştırılacaklar
 1. Her dosya için derleme sonucu (hata/uyarı metni + satır).
 2. Kullandığın zaman dilimi ve tarih aralığı; Properties tablosundan sapma varsa o değer.
 3. C bölümündeki önce/sonra tablosu + maliyetsiz koşu sonucu.
 4. D, E ve G maddelerinde geçen / kalan / test edilemeyen her madde.
-5. En az bir alarm yükü örneği (token maskeli).
+5. En az bir alarm yükü örneği (token maskeli); mümkünse her stratejiden bir giriş gövdesi.
+6. H bölümü: heartbeat göstergesinin derleme sonucu ve Alert Log'daki mesajı.
 
 (B4 FTMO `US500.cash` değerleri Faz 2'de istenecek; Faz 0'da gerekmez.)

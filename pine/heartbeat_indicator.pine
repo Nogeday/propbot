@@ -1,0 +1,56 @@
+//@version=5
+// =====================================================================================
+//  PROPBOT HEARTBEAT — alert-line watchdog for the signal bot   (docs/SPEC.md §5.5)
+//  Add it to the SAME symbol the strategies run on (e.g. CME_MINI:MES1!), on a 1-MINUTE chart
+//  (any intraday chart up to 60 minutes works).
+// -------------------------------------------------------------------------------------
+//  WHAT IT DOES
+//   Sends one small JSON message per interval (default: every full hour, New York time) through
+//   alert(). The receiver records when the last message arrived; if nothing arrives for 75 minutes
+//   inside a watched window it warns on Telegram: "TradingView alarm hattı sessiz".
+//   It places no orders and draws nothing but a faint background on the bars that send a beat.
+// -------------------------------------------------------------------------------------
+//  SETUP
+//   1. Inputs → "Webhook token": the SAME value as TV_WEBHOOK_TOKEN on the receiver.
+//   2. Create ONE alert: Condition = this indicator → "Any alert() function call";
+//      Webhook URL = the receiver address (https://…/tv/webhook). The message box is ignored.
+//   3. Re-create the alert after changing an input (an alert keeps the inputs it was created with).
+//   The alert counts toward the plan's alert limit and expires like any other alert: write its
+//   expiry date into config/tv_alerts.yaml (alerts → expires_on).
+// -------------------------------------------------------------------------------------
+//  NOTES
+//   • A beat is sent at the CLOSE of the bar that ends on an interval boundary: on a 1m chart the
+//     09:59 bar closes at 10:00 and sends the 10:00 beat. No bars (market closed, session break,
+//     holiday) means no beats — the receiver only watches the windows in config/tv_alerts.yaml.
+//   • The payload is schema v1 with action "heartbeat" and strategy_id "heartbeat"; it carries no
+//     prices. bar_time is the bar's OPEN time in epoch milliseconds, like every other alert.
+//   • Daily and higher charts are refused: the receiver cannot check their freshness.
+// =====================================================================================
+indicator(title = "PropBot Heartbeat", shorttitle = "PB Heartbeat", overlay = true)
+
+// ───────────────────────────── INPUTS ─────────────────────────────
+grpAlert = "Webhook Alert"
+alertToken  = input.string("", "Webhook token", group = grpAlert, tooltip = "Webhook-only random value (NOT a login or API key). Must match the receiver. Create ONE alert: condition = this indicator, 'Any alert() function call', webhook URL = receiver. Re-create the alert after changing any input.")
+intervalMin = input.int(60, "Heartbeat interval (minutes)", minval = 1, maxval = 60, group = grpAlert, tooltip = "One message each time the New York clock crosses a multiple of this many minutes. Keep 60: the receiver warns after 75 minutes of silence.")
+showBeats   = input.bool(true, "Highlight heartbeat bars", group = grpAlert)
+
+// ───────────────────────────── GUARDS ─────────────────────────────
+if not timeframe.isintraday or timeframe.in_seconds() > 3600
+    runtime.error("PropBot Heartbeat: use an intraday chart of 60 minutes or less (1m recommended).")
+
+// ───────────────────────────── BEAT ─────────────────────────────
+// Interval slot of the bar's open and of its close, in New York wall time. The bar that closes
+// on (or across) a boundary changes slot; the day roll (23:59 → 00:00) changes it too.
+tz = "America/New_York"
+slotOpen  = math.floor((hour(time, tz) * 60 + minute(time, tz)) / intervalMin)
+slotClose = math.floor((hour(time_close, tz) * 60 + minute(time_close, tz)) / intervalMin)
+beat = slotOpen != slotClose
+
+// ───────────────────────────── WEBHOOK ALERT (JSON, schema v1 — docs/SPEC.md §5.1) ─────────────────────────────
+if beat
+    string j = '{"v":1,"token":"' + alertToken + '","strategy_id":"heartbeat"'
+    j := j + ',"symbol":"' + syminfo.tickerid + '","tf":"' + timeframe.period + '","bar_time":' + str.tostring(time, "#")
+    j := j + ',"action":"heartbeat"}'
+    alert(j, alert.freq_once_per_bar_close)
+
+bgcolor(showBeats and beat ? color.new(color.teal, 88) : na, title = "Heartbeat bar")
