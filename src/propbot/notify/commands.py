@@ -93,6 +93,8 @@ _CLOCK_BEHIND_TOLERANCE_MS: Final = 2 * _SECOND_MS
 _PIN_FORMAT: Final = re.compile(r"[0-9]{6,12}")
 _ID_FORMAT: Final = re.compile(r"[0-9]{1,15}")
 _REDACTED: Final = "***"
+# A run of digits long enough to be a PIN (PROPBOT_PIN is 6 to 12 digits).
+_PIN_LIKE: Final = re.compile(r"[0-9]{6,}")
 _FLAG_SET: Final = "1"
 _FLAG_CLEAR: Final = "0"
 # Commands are ASCII, but a Turkish keyboard easily produces the dotless i or the breve g
@@ -138,8 +140,9 @@ _HELP: Final = "\n".join(
     )
 )
 _UNKNOWN_PREFIX: Final = "Bilinmeyen komut.\n"
-_BARE_PIN_REPLY: Final = (
-    "PIN tek başına bir komut değil; mesajın siliniyor. Kullanım: /kill <PIN> ya da /devam <PIN>"
+_LONG_NUMBER_REPLY: Final = (
+    "Mesajındaki uzun sayı PIN olabileceği için mesajın siliniyor. PIN yalnızca /kill <PIN> ya "
+    "da /devam <PIN> içinde kullanılır."
 )
 _KILL_USAGE: Final = (
     "Kullanım: /kill <PIN> — giriş sinyallerini keser; yalnızca /devam <PIN> yeniden açar. "
@@ -213,18 +216,31 @@ def _split_command(text: str) -> tuple[str | None, tuple[str, ...]]:
     return name, tuple(parts[1:])
 
 
-def _must_delete(text: str, pin: str) -> bool:
-    """Decide from the raw text alone whether the message may carry the PIN.
+def _must_delete(text: str) -> bool:
+    """Decide from the SHAPE of the raw text alone whether the message may carry a PIN.
 
-    True when the PIN occurs anywhere, or when the message starts like `/kill` or `/devam`
-    and holds anything beyond the bare command (a wrong, mistyped or glued-on PIN too).
+    Never by comparing with the real PIN. What the bot does with a message (deletes it or
+    not, which reply it sends) is visible to whoever writes in the chat; if that depended
+    on a match, digit strings could be tested against the PIN without ever touching the
+    failure counter or the lock.
+
+    True when the text holds a run of six or more digits anywhere (a PIN is 6 to 12
+    digits), or when it starts like `/kill` or `/devam` and holds anything beyond the bare
+    command (a wrong, mistyped or glued-on PIN too).
     """
-    if pin in text:
+    if _PIN_LIKE.search(text) is not None:
         return True
     name, args = _split_command(text)
     if name is None:
         return False
     return any(name.startswith(command) and (name != command or args) for command in _PIN_COMMANDS)
+
+
+def _scrub_echoed_numbers(reply: str, text: str) -> str:
+    """Replace in `reply` every long digit run that came from the user's own `text`."""
+    for number in set(_PIN_LIKE.findall(text)):
+        reply = reply.replace(number, _REDACTED)
+    return reply
 
 
 def _flag(tx: Tx, key: StateKey) -> bool:
@@ -302,11 +318,11 @@ class Commands:
         """Answer one message. Never raises: a failure becomes a reply and changes nothing."""
         pin = self._deps.pin
         # First, from the raw text alone: nothing below may lose this decision.
-        delete_request = _must_delete(text, pin)
+        delete_request = _must_delete(text)
         name, args = _split_command(text)
         known = name if name in self._commands else None
         try:
-            body = self._dispatch(name, args, sent_at_ms, has_pin=delete_request)
+            body = self._dispatch(name, args, sent_at_ms, pin_like=delete_request)
         except Exception as error:
             # Every command is one transaction, so whatever failed has been rolled back.
             _log.error("telegram_command_failed", command=known, error_type=type(error).__name__)
@@ -314,13 +330,16 @@ class Commands:
                 f"[HATA] Komut işlenemedi ({type(error).__name__}); hiçbir şey değiştirilmedi. "
                 "/saglik ile kontrol et; sürerse log'a bak."
             )
-        return Reply(text=body.replace(pin, _REDACTED), delete_request=delete_request)
+        # No long number of the user's own text is repeated back (it may be a PIN or a
+        # guess at one); the exact-match replacement is only a last line of defence.
+        body = _scrub_echoed_numbers(body, text).replace(pin, _REDACTED)
+        return Reply(text=body, delete_request=delete_request)
 
     def _dispatch(
-        self, name: str | None, args: tuple[str, ...], sent_at_ms: int, *, has_pin: bool
+        self, name: str | None, args: tuple[str, ...], sent_at_ms: int, *, pin_like: bool
     ) -> str:
         if name is None:
-            return _BARE_PIN_REPLY if has_pin else _HELP
+            return _LONG_NUMBER_REPLY if pin_like else _HELP
         command = self._commands.get(name)
         if command is None:
             _log.info("telegram_command", command=None)
