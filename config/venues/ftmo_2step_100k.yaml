@@ -1,24 +1,25 @@
-# FTMO 2-Step template. EVERY value marked VERIFY must be checked on the firm's official pages
-# before paper/approve/auto. Modes other than `signal`/`paper` stay locked while
-# rules_verified_at is null or older than 30 days.
+# FTMO 2-Step, 100k USD. Rule values were checked against FTMO's official pages on 2026-11-13;
+# sources and what each page says: docs/compliance/2026-11-13-ftmo-kural-dogrulamasi.md.
+# Modes other than `signal`/`paper` stay locked while rules_verified_at is null or older than
+# 30 days: re-read the official pages (by hand, in a browser) and update the date before it expires.
 venue: ftmo
 program: 2-step
-rules_verified_at: null                           # YYYY-MM-DD
+rules_verified_at: 2026-11-13                     # YYYY-MM-DD
 platform: mt5
-symbol: US500.cash                                # VERIFY in the terminal (Market Watch)
+symbol: US500.cash                                # name as used on ftmo.com; confirm in the terminal (Market Watch)
 initial_balance: 100000
 account_currency: USD
-profit_target_pct: {phase1: 10.0, phase2: 5.0}    # VERIFY
-daily_loss_limit_pct: 5.0                         # VERIFY (1-Step: 3.0)
-max_loss_pct: 10.0                                # VERIFY
-max_loss_type: static                             # VERIFY (1-Step: trailing_eod)
-daily_reset: {tz: Europe/Prague, time: "00:00"}   # VERIFY (some sources say UTC)
-daily_loss_basis: max_balance_equity_at_reset     # conservative assumption
-min_trading_days: null                            # VERIFY
-news_rule: {applies_to: [funded_standard], window_minutes: 2}   # VERIFY
-automation_allowed: true                          # VERIFY against the current EA policy
-firm_request_threshold_per_day: 2000              # VERIFY ("hyperactivity" rule)
-server_tz: null                                   # MT5 server time zone for bar export conversion — VERIFY
+profit_target_pct: {phase1: 10.0, phase2: 5.0}    # verified: Challenge 10 %, Verification 5 % of initial capital
+daily_loss_limit_pct: 5.0                         # verified: 5 % of initial capital (1-Step: 3.0)
+max_loss_pct: 10.0                                # verified: 10 % of initial capital
+max_loss_type: static                             # verified (1-Step: trailing_eod)
+daily_reset: {tz: Europe/Prague, time: "00:00"}   # verified: 00:00 CE(S)T, i.e. Prague time
+daily_loss_basis: balance_at_reset                # verified: limit = balance at the reset - 5 % of initial capital
+min_trading_days: 4                               # verified: both phases; a day counts when a position is OPENED on it
+news_rule: {applies_to: [funded_standard], window_minutes: 2}   # verified: not in Challenge/Verification, not on Swing
+automation_allowed: true                          # verified: EAs allowed unless they fall under a forbidden practice
+firm_request_threshold_per_day: 2000              # verified: more than 2,000 server requests/day counts as hyperactive
+server_tz: null                                   # official: GMT+2 with US daylight saving (New York + 7 h); no IANA zone fits
 contract:                                         # never hard-code; read from MT5 SymbolInfo at runtime
   tick_size: null
   tick_value_per_lot: null
