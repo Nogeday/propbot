@@ -1,6 +1,7 @@
 """`propbot` command line. All output is user-facing and therefore Turkish.
 
-Exit codes: 0 success, 1 invalid config or input, 2 usage error (argparse).
+Exit codes: 0 success, 1 invalid config or input (or a service that stopped on a failure),
+2 usage error (argparse).
 """
 
 import argparse
@@ -36,10 +37,12 @@ from propbot.risk.errors import ConfigError, ConfigIssue
 from propbot.risk.loader import (
     RISK_FILE_NAME,
     VENUES_DIR_NAME,
+    LoadedConfig,
     load_config_dir,
     load_risk_config,
     load_venue_profile,
 )
+from propbot.risk.modes import Mode, mode_refusal
 from propbot.risk.rules import (
     cross_check,
     daily_budget_amount,
@@ -54,9 +57,17 @@ from propbot.risk.venue import (
     rules_freshness,
     unresolved_fields,
 )
+from propbot.settings import SettingsError, load_settings
+from propbot.signals.report import ReportError, build_report, day_start_ms, signals_csv
+from propbot.signals.tvconfig import TV_ALERTS_FILE_NAME, TvAlertsConfig, load_tv_alerts_config
+from propbot.store.db import Store, StoreError
 
 EXIT_OK = 0
 EXIT_INVALID = 1
+_ISTANBUL = ZoneInfo("Europe/Istanbul")
+DEFAULT_DB_PATH = "data/propbot.db"
+_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+_WEEKDAY_LABELS = ("Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -65,14 +76,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "config":
             return run_config_check(Path(args.config_dir), _utc_today(), sys.stdout)
+        if args.command == "serve":
+            return _run_serve(args, _utc_today(), sys.stdout)
+        if args.command == "signals":
+            return _run_signals_report(args, sys.stdout)
         return _run_montecarlo(args, _utc_today(), sys.stdout)
     except ConfigError as exc:
         print(f"HATA: config geçersiz ({len(exc.issues)} sorun)", file=sys.stderr)
         for issue in exc.issues:
             print(f"  - {issue}", file=sys.stderr)
-    except (TradeListError, SimulationInputError) as exc:
+    except SettingsError as exc:
+        print(f"HATA: sırlar okunamadı ({len(exc.issues)} sorun)", file=sys.stderr)
+        for text in exc.issues:
+            print(f"  - {text}", file=sys.stderr)
+    except (TradeListError, SimulationInputError, ReportError, StoreError, ServeError) as exc:
         print(f"HATA: {exc}", file=sys.stderr)
     return EXIT_INVALID
+
+
+class ServeError(Exception):
+    """`propbot serve` cannot start as asked. The message is user-facing (Turkish)."""
 
 
 def _utc_today() -> dt.date:
@@ -81,7 +104,9 @@ def _utc_today() -> dt.date:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="propbot", description="PropBot: config doğrulama ve Monte Carlo prop simülasyonu."
+        prog="propbot",
+        description="PropBot: config doğrulama, sinyal botu (emir yok) ve Monte Carlo prop "
+        "simülasyonu.",
     )
     commands = parser.add_subparsers(dest="command", required=True, metavar="KOMUT")
 
@@ -89,9 +114,51 @@ def _build_parser() -> argparse.ArgumentParser:
     config_commands = config.add_subparsers(dest="config_command", required=True, metavar="ALT")
     check = config_commands.add_parser(
         "check",
-        help="risk.yaml ve venues/*.yaml şemasını, çapraz kuralları ve boş alanları raporla",
+        help="risk.yaml, venues/*.yaml ve tv_alerts.yaml şemasını, çapraz kuralları ve boş "
+        "alanları raporla",
     )
     check.add_argument("--config-dir", default="config", help="config klasörü (varsayılan: config)")
+
+    serve = commands.add_parser(
+        "serve",
+        help="sinyal botunu çalıştır: TradingView webhook → Telegram (emir gönderilmez)",
+        description="TradingView alert'lerini doğrular, boyut önerisi ekler ve tek bir Telegram "
+        "sohbetine iletir (SPEC §5). Emir göndermez. Kurulum: docs/runbook.md.",
+    )
+    serve.add_argument(
+        "--mode",
+        default=Mode.SIGNAL.value,
+        choices=[mode.value for mode in Mode],
+        help="çalışma modu; bu sürümde yalnızca signal (varsayılan) çalışır",
+    )
+    serve.add_argument(
+        "--venue", help="venue profili adı (config/venues/<ad>.yaml); tek profil varsa gerekmez"
+    )
+    serve.add_argument("--config-dir", default="config", help="config klasörü (varsayılan: config)")
+    serve.add_argument("--db", default=DEFAULT_DB_PATH, help=f"veritabanı ({DEFAULT_DB_PATH})")
+    env = serve.add_mutually_exclusive_group()
+    env.add_argument("--env-file", default=".env", help="sırların dosyası (chmod 600; .env)")
+    env.add_argument(
+        "--no-env-file", action="store_true", help="sırları yalnızca ortam değişkenlerinden oku"
+    )
+    serve.add_argument(
+        "--host", default="127.0.0.1", help="dinlenecek loopback adresi (127.0.0.1 ya da ::1)"
+    )
+    serve.add_argument("--port", type=int, default=8000, help="dinlenecek port (8000)")
+    serve.add_argument("--log-level", default="INFO", choices=_LOG_LEVELS, help="günlük seviyesi")
+
+    signals = commands.add_parser("signals", help="alınan sinyallerin kaydı")
+    signals_commands = signals.add_subparsers(dest="signals_command", required=True, metavar="ALT")
+    report = signals_commands.add_parser(
+        "report",
+        help="alınan / iletilen sinyaller ve gecikme raporu (SPEC §5.7 kabul kanıtı)",
+        description="Veritabanındaki sinyalleri gün gün sayar, gecikme medyanını verir. "
+        "Tarihler Türkiye saatiyle takvim günleridir.",
+    )
+    report.add_argument("--db", default=DEFAULT_DB_PATH, help=f"veritabanı ({DEFAULT_DB_PATH})")
+    report.add_argument("--since", help="ilk gün, YYYY-AA-GG (varsayılan: kayıtların başı)")
+    report.add_argument("--until", help="son gün, YYYY-AA-GG, dahil (varsayılan: bugün)")
+    report.add_argument("--csv", help="sinyal başına bir satırlık CSV dosyası yaz")
 
     mc = commands.add_parser(
         "montecarlo",
@@ -212,11 +279,211 @@ def run_config_check(config_dir: Path, today: dt.date, out: TextIO) -> int:
                 file=out,
             )
 
+    tv_valid = _check_tv_alerts(config_dir, today, out)
+
     if future_dates:
         print("Sonuç: GEÇERSİZ (rules_verified_at ileri tarihli)", file=out)
         return EXIT_INVALID
+    if not tv_valid:
+        print(f"Sonuç: GEÇERSİZ ({TV_ALERTS_FILE_NAME})", file=out)
+        return EXIT_INVALID
     print("Sonuç: GEÇERLİ", file=out)
     return EXIT_OK
+
+
+def _check_tv_alerts(config_dir: Path, today: dt.date, out: TextIO) -> bool:
+    """Report on `tv_alerts.yaml`; a missing file is fine here (only `serve` needs it)."""
+    path = config_dir / TV_ALERTS_FILE_NAME
+    if not path.exists():
+        print(f"{TV_ALERTS_FILE_NAME}: yok (yalnızca `propbot serve` için gerekir)", file=out)
+        return True
+    try:
+        tv = load_tv_alerts_config(path)
+    except ConfigError as exc:
+        print(f"{TV_ALERTS_FILE_NAME}: HATA, {len(exc.issues)} sorun bulundu", file=out)
+        for issue in exc.issues:
+            print(f"  - {issue}", file=out)
+        return False
+    print(f"{TV_ALERTS_FILE_NAME}: GEÇERLİ", file=out)
+    for line in _tv_alerts_lines(tv, today):
+        print(f"  {line}", file=out)
+    return True
+
+
+def _tv_alerts_lines(tv: TvAlertsConfig, today: dt.date) -> list[str]:
+    age_days = (today - tv.webhook.rules_verified_at).days
+    lines = [
+        f"TradingView kaynak IP'leri: {len(tv.webhook.source_ips)} adet · kurallar "
+        f"{tv.webhook.rules_verified_at} tarihinde karşılaştırıldı ({age_days} gün önce); her "
+        "kurulumda resmi sayfayla yeniden karşılaştır",
+        f"alıcı: dakikada en fazla {tv.receiver.rate_limit_per_minute} istek · gövde en fazla "
+        f"{tv.receiver.max_body_bytes} bayt · istemci IP başlığı {tv.receiver.client_ip_header}",
+        f"izlenen pencereler (New York): {_windows_text(tv)} · sessizlik sınırı "
+        f"{tv.heartbeat.max_silence_minutes} dk",
+    ]
+    if not tv.alerts:
+        lines.append("alarm bitiş tarihleri: kayıt yok → bitiş hatırlatması gönderilmez")
+    for alert in tv.alerts:
+        if alert.expires_on is None:
+            lines.append(f"alarm '{alert.name}': bitiş tarihi yok")
+            continue
+        days_left = (alert.expires_on - today).days
+        state = f"{days_left} gün kaldı" if days_left >= 0 else f"{-days_left} gün önce DOLDU"
+        lines.append(f"alarm '{alert.name}': {alert.expires_on} ({state})")
+    return lines
+
+
+def _windows_text(tv: TvAlertsConfig) -> str:
+    parts = []
+    for window in tv.heartbeat.watch_windows:
+        days = ",".join(_WEEKDAY_LABELS[index] for index in sorted(window.weekdays))
+        parts.append(f"{days} {window.start}–{window.end}")
+    return "; ".join(parts)
+
+
+def _run_serve(args: argparse.Namespace, today: dt.date, out: TextIO) -> int:
+    """Check everything that can be checked before the first request, then serve."""
+    config_dir = Path(args.config_dir)
+    config = load_config_dir(config_dir)
+    venue_name, venue = _pick_venue(config, args.venue)
+    tv = load_tv_alerts_config(config_dir / TV_ALERTS_FILE_NAME)
+
+    refusal = mode_refusal(Mode(args.mode), venue, today)
+    if refusal is not None:
+        raise ServeError(f"mod kilitli: {refusal}")
+
+    # Imported here: the web and Telegram stack is only needed by this command.
+    import structlog
+
+    from propbot.logging_setup import configure_logging
+    from propbot.signals.service import (
+        ServiceError,
+        ServiceParts,
+        install_exception_logging,
+        is_loopback_host,
+        run_service,
+    )
+
+    if not is_loopback_host(args.host):
+        raise ServeError(
+            f"--host {args.host!r} reddedildi: alıcı yalnızca loopback adresini (127.0.0.1 ya da "
+            "::1) dinler; dışarıya TLS vekili ya da tünel açar (docs/runbook.md §7)"
+        )
+    settings = load_settings(None if args.no_env_file else Path(args.env_file))
+    db_path = Path(args.db)
+    db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    for line in _serve_banner(args, venue_name, venue, tv, today):
+        print(line, file=out)
+    out.flush()
+    configure_logging(
+        secrets=[
+            settings.telegram_bot_token.get_secret_value(),
+            settings.tv_webhook_token.get_secret_value(),
+            settings.propbot_pin.get_secret_value(),
+        ],
+        level=args.log_level,
+    )
+    install_exception_logging()
+    with Store(db_path) as store:
+        parts = ServiceParts(
+            settings=settings,
+            risk=config.risk,
+            venue=venue,
+            venue_name=venue_name,
+            tv=tv,
+            store=store,
+        )
+        try:
+            return run_service(parts, host=args.host, port=args.port)
+        except ServiceError as exc:
+            raise ServeError(str(exc)) from None
+        except Exception as exc:
+            # A raw traceback may quote a secret (python-telegram-bot's InvalidToken prints
+            # the bot token): everything goes through the redacting logger instead.
+            structlog.get_logger("propbot.cli").critical(
+                "service_fatal", error_type=type(exc).__name__, exc_info=exc
+            )
+            raise ServeError(
+                "servis beklenmeyen bir hatayla durdu; ayrıntı günlükte (service_fatal)"
+            ) from None
+
+
+def _pick_venue(config: LoadedConfig, name: str | None) -> tuple[str, VenueProfile]:
+    names = ", ".join(sorted(config.venues))
+    if name is None:
+        if len(config.venues) != 1:
+            raise ServeError(f"birden çok venue profili var; --venue ile seç: {names}")
+        return next(iter(config.venues.items()))
+    venue = config.venues.get(name)
+    if venue is None:
+        raise ServeError(f"venue profili bulunamadı: {name!r}; mevcut profiller: {names}")
+    return name, venue
+
+
+def _serve_banner(
+    args: argparse.Namespace,
+    venue_name: str,
+    venue: VenueProfile,
+    tv: TvAlertsConfig,
+    today: dt.date,
+) -> list[str]:
+    risk_missing = [field.path for field in unresolved_fields(venue) if "contract." in field.path]
+    lines = [
+        "PropBot sinyal botu · mod: signal (emir GÖNDERİLMEZ; sinyaller Telegram'a iletilir)",
+        f"  venue: {venue_name} ({venue.venue.upper()} · {venue.symbol}) · kurallar: "
+        f"{_freshness_line(venue, today)}",
+        f"  alıcı: http://{_host_text(args.host)}:{args.port}/tv/webhook (TLS vekili ya da tünel "
+        "arkasında)",
+        f"  TradingView kaynak IP'leri: {len(tv.webhook.source_ips)} adet · izlenen pencereler "
+        f"(New York): {_windows_text(tv)}",
+        f"  veritabanı: {args.db}",
+    ]
+    if risk_missing:
+        lines.append(
+            f"  UYARI: {', '.join(risk_missing)} boş → mesajlarda lot yerine 'boyut hesaplanamadı' "
+            "yazacak (docs/runbook.md §3.3)"
+        )
+    return lines
+
+
+def _host_text(host: str) -> str:
+    return f"[{host}]" if ":" in host else host
+
+
+def _run_signals_report(args: argparse.Namespace, out: TextIO) -> int:
+    db_path = Path(args.db)
+    if not db_path.is_file():
+        raise ReportError(f"veritabanı bulunamadı: {db_path}")
+    start_ms = 0 if args.since is None else day_start_ms(_parse_day(args.since, "--since"))
+    last_day = (
+        dt.datetime.now(dt.UTC).astimezone(_ISTANBUL).date()
+        if args.until is None
+        else _parse_day(args.until, "--until")
+    )
+    end_ms = day_start_ms(last_day + dt.timedelta(days=1))
+    if end_ms <= start_ms:
+        raise ReportError("--until, --since tarihinden önce olamaz")
+    with Store(db_path) as store:
+        out.write(build_report(store, start_ms=start_ms, end_ms=end_ms, source=str(db_path)))
+        if args.csv is not None:
+            csv_path = Path(args.csv)
+            try:
+                csv_path.parent.mkdir(parents=True, exist_ok=True)
+                csv_path.write_text(
+                    signals_csv(store, start_ms=start_ms, end_ms=end_ms), encoding="utf-8"
+                )
+            except OSError as exc:
+                raise ReportError(f"CSV yazılamadı ({csv_path}): {type(exc).__name__}") from exc
+            print(f"CSV yazıldı: {csv_path}", file=out)
+    return EXIT_OK
+
+
+def _parse_day(text: str, option: str) -> dt.date:
+    try:
+        return dt.date.fromisoformat(text)
+    except ValueError as exc:
+        raise ReportError(f"{option} YYYY-AA-GG biçiminde olmalı; okunan: {text!r}") from exc
 
 
 def _freshness_line(venue: VenueProfile, today: dt.date) -> str:
