@@ -1,0 +1,12 @@
+# MUST FAIL: a quoted string where a number is required
+risk_per_trade_pct: "0.25"
+daily_cap_pct: 1.0
+weekly_cap_pct: 3.0
+flatten_when_daily_buffer_below_pct: 40
+max_consecutive_losses: 5
+max_positions_total: 2
+max_positions_per_strategy: 1
+self_request_budget_per_day: 300
+trail_min_step_ticks: 4
+signal_validity_seconds: 60
+signal_max_drift_frac_of_stop: 0.25

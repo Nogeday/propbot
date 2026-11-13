@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "Prop-firm-safe automation of TradingView Pine strategies: config validation, backtest tooling, signal bot."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+    "pydantic>=2.14,<3",
+    "pyyaml>=6.0.3,<7",
+]
 
 [dependency-groups]
 dev = [
@@ -12,6 +15,7 @@ dev = [
     "mypy>=2.4",
     "pytest>=9.2",
     "ruff>=0.17",
+    "types-pyyaml>=6.0.12",
 ]
 
 [build-system]
@@ -26,6 +30,8 @@ extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "PT", "RUF"]
+# User-facing strings are Turkish (CLAUDE.md): dotless i and similar letters are intended.
+ignore = ["RUF001"]
 
 [tool.mypy]
 python_version = "3.12"

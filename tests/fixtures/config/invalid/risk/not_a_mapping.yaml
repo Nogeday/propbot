@@ -1,0 +1,2 @@
+# MUST FAIL: top level is a list, not a mapping
+- risk_per_trade_pct: 0.25
