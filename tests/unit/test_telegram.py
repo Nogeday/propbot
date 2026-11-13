@@ -250,7 +250,8 @@ def test_domain_like_tokens_become_code_spans() -> None:
         "risk ≈ $250 (%0.25) · 20.00 lot · 1.0× hesap · $249.50",
         "Geçerlilik: 17:46:00 TR'ye kadar · 2026-07-21 · CME_MINI:MES1!",
         "rules_verified_at · tick_size · v1.2.3 · x.y · a.b1 · 5120.125–5126.375",
-        ".env · /atladim · /saglik · id 123 · bar 09:44 NY / 17:44 TR",
+        ".env · /saglik · /durum · id 123 · bar 09:44 NY / 17:44 TR",
+        "/atladimlar · /aldim_x · /aldim9 · atladim · aldim 12",
         "Cümle bitti. Yenisi başladı.",
         "",
     ],
@@ -271,6 +272,24 @@ def test_a_command_that_carries_an_id_becomes_one_code_span() -> None:
         "/aldim 124",
         "US500.cash",
     ]
+
+
+@pytest.mark.parametrize(
+    ("text", "tokens"),
+    [
+        ("/atladim", ["/atladim"]),
+        ("/atladim [id] — girişi almadım", ["/atladim [id]"]),
+        ("Kullanım: /aldim <id> — id, /atladim ile serbest bırakılan", ["/aldim <id>", "/atladim"]),
+        ("/aldim <id> — /atladim'ı geri al", ["/aldim <id>", "/atladim"]),
+        ("almadıysan /atladim ile serbest bırak: /atladim <id>", ["/atladim", "/atladim <id>"]),
+        ("/atladim 126\n/aldim 126.", ["/atladim 126", "/aldim 126"]),
+        ("/atladim  126 · /atladim <ID> · /atladim [1]", ["/atladim", "/atladim", "/atladim"]),
+    ],
+)
+def test_the_ledger_commands_are_never_left_tappable(text: str, tokens: list[str]) -> None:
+    # Telegram links a command and SENDS it bare on a tap: a tap on the help line
+    # "/atladim [id]" would release the last entry's risk. A code span is copied instead.
+    assert [text[start : start + length] for start, length in code_entity_spans(text)] == tokens
 
 
 @pytest.mark.parametrize(
@@ -522,6 +541,36 @@ def test_a_command_from_the_owner_is_answered_in_plain_text() -> None:
             "link_preview_options": {"is_disabled": True},
         }
         assert "parse_mode" not in params
+
+    drive(scenario)
+
+
+@pytest.mark.parametrize(
+    ("command", "marked"),
+    [
+        ("/yardim", ["/atladim [id]", "/aldim <id>", "/atladim"]),
+        ("/aldim", ["/aldim <id>", "/atladim"]),
+        ("/atladim abc", ["/atladim [id]"]),
+    ],
+)
+def test_help_and_usage_replies_leave_no_ledger_command_tappable(
+    command: str, marked: list[str]
+) -> None:
+    # A tap on a linked "/atladim" in the help would send it bare: the last entry's risk
+    # would leave the budget. Every mention goes out as a code span instead.
+    async def scenario(h: Harness) -> None:
+        await h.say(command)
+        (params,) = h.fake.calls_to("sendMessage")
+        encoded = params["text"].encode("utf-16-le")
+        spans = [
+            encoded[2 * entity["offset"] : 2 * (entity["offset"] + entity["length"])].decode(
+                "utf-16-le"
+            )
+            for entity in params["entities"]
+        ]
+        assert all(entity["type"] == "code" for entity in params["entities"])
+        assert spans == marked
+        assert params["text"].count("/atladim") + params["text"].count("/aldim") == len(marked)
 
     drive(scenario)
 
