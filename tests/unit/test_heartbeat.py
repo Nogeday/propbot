@@ -546,11 +546,15 @@ def test_expiring_and_expired_alerts_are_listed_once_per_istanbul_day(store: Sto
     assert state(store, StateKey.EXPIRY_REMINDER_DAY) == "2026-11-16"
 
 
-def test_the_reminder_returns_on_the_next_istanbul_day(store: Store) -> None:
+def test_the_reminder_returns_on_the_next_istanbul_morning(store: Store) -> None:
     tick(store, NOON_TR_MS, EXPIRY_CONFIG)
 
-    # Midnight in Istanbul is 21:00 UTC: the date in UTC is still the 16th.
-    assert tick(store, utc("2026-11-16 21:00"), EXPIRY_CONFIG) == 1
+    # Midnight in Istanbul is 21:00 UTC. A new day has begun, but nobody is woken for a
+    # reminder: it waits until 09:00 Istanbul time (06:00 UTC).
+    assert tick(store, utc("2026-11-16 21:00"), EXPIRY_CONFIG) == 0
+    assert tick(store, utc("2026-11-17 05:59:59.999"), EXPIRY_CONFIG) == 0
+    assert state(store, StateKey.EXPIRY_REMINDER_DAY) == "2026-11-16"
+    assert tick(store, utc("2026-11-17 06:00"), EXPIRY_CONFIG) == 1
 
     assert outbox(store)[1].text.splitlines()[1:4] == [
         "• heartbeat — 2026-11-14 (3 gün önce BİTTİ)",
