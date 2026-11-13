@@ -25,6 +25,8 @@ from support.paths import CONFIG_DIR, CONFIG_FIXTURES
 
 REAL = CONFIG_DIR / "venues" / "ftmo_2step_100k.yaml"
 VALID = CONFIG_FIXTURES / "valid" / "venues" / "sample_2step.yaml"
+UNVERIFIED = CONFIG_FIXTURES / "valid_unverified" / "venues" / "sample_unverified.yaml"
+TODAY = dt.date(2026, 11, 13)
 INVALID_DIR = CONFIG_FIXTURES / "invalid" / "venue"
 
 # fixture stem -> (issue location, fragment of the Turkish message)
@@ -64,19 +66,29 @@ def _valid_profile() -> VenueProfile:
 
 
 def test_real_venue_profile_loads() -> None:
+    # Values in the real profile change as the user verifies them; only invariants are pinned.
     venue = load_venue_profile(REAL)
 
-    assert venue.platform is Platform.MT5
-    assert venue.max_loss_type is MaxLossType.STATIC
-    assert venue.daily_loss_basis is DailyLossBasis.MAX_BALANCE_EQUITY_AT_RESET
+    assert isinstance(venue.platform, Platform)
+    assert isinstance(venue.max_loss_type, MaxLossType)
+    assert isinstance(venue.daily_loss_basis, DailyLossBasis)
     assert venue.daily_loss_limit_pct < venue.max_loss_pct
-    assert venue.daily_reset.zone.key == "Europe/Prague"
-    assert venue.daily_reset.time_of_day == dt.time(0, 0)
+    assert venue.daily_reset.zone.key == venue.daily_reset.tz
+    assert isinstance(venue.daily_reset.time_of_day, dt.time)
 
 
-def test_real_venue_profile_reports_its_null_fields() -> None:
-    # Guards the VERIFY workflow: these stay null until the user checks the official pages.
-    assert unresolved_fields(load_venue_profile(REAL)) == (
+def test_real_venue_profile_reports_exactly_its_null_fields() -> None:
+    raw = read_yaml_mapping(REAL)
+    null_top_level = {key for key, value in raw.items() if value is None}
+    null_contract = {f"contract.{key}" for key, value in raw["contract"].items() if value is None}
+
+    reported = {field.path for field in unresolved_fields(load_venue_profile(REAL))}
+
+    assert reported == null_top_level | null_contract
+
+
+def test_unverified_profile_reports_its_null_fields_in_file_order() -> None:
+    assert unresolved_fields(load_venue_profile(UNVERIFIED)) == (
         UnresolvedField("rules_verified_at", UnresolvedKind.VERIFY),
         UnresolvedField("min_trading_days", UnresolvedKind.VERIFY),
         UnresolvedField("server_tz", UnresolvedKind.VERIFY),
@@ -85,6 +97,13 @@ def test_real_venue_profile_reports_its_null_fields() -> None:
         UnresolvedField("contract.min_lot", UnresolvedKind.RUNTIME),
         UnresolvedField("contract.lot_step", UnresolvedKind.RUNTIME),
     )
+
+
+def test_unverified_profile_keeps_order_modes_locked() -> None:
+    freshness = rules_freshness(load_venue_profile(UNVERIFIED), TODAY)
+
+    assert freshness.state is RulesState.MISSING
+    assert freshness.order_modes_locked
 
 
 def test_fully_resolved_profile_reports_nothing() -> None:
@@ -277,9 +296,6 @@ def test_news_rule_items_must_be_text() -> None:
     assert [error["loc"] for error in excinfo.value.errors()] == [("news_rule", "applies_to", 1)]
 
 
-TODAY = dt.date(2026, 11, 13)
-
-
 @pytest.mark.parametrize(
     ("verified", "state", "age_days", "locked"),
     [
@@ -311,11 +327,3 @@ def test_rules_freshness(
 def test_rules_max_age_is_thirty_days() -> None:
     # CLAUDE.md invariant 1 / SPEC §8.1.
     assert RULES_MAX_AGE_DAYS == 30
-
-
-def test_real_venue_profile_keeps_order_modes_locked_until_verified() -> None:
-    freshness = rules_freshness(load_venue_profile(REAL), TODAY)
-
-    if load_venue_profile(REAL).rules_verified_at is None:
-        assert freshness.state is RulesState.MISSING
-        assert freshness.order_modes_locked

@@ -1,0 +1,24 @@
+# Test fixture: fictional venue whose VERIFY and runtime fields are still null.
+venue: samplefirm
+program: 2-step
+rules_verified_at: null
+platform: mt5
+symbol: US500.sample
+initial_balance: 100000
+account_currency: USD
+profit_target_pct: {phase1: 10.0, phase2: 5.0}
+daily_loss_limit_pct: 5.0
+max_loss_pct: 10.0
+max_loss_type: static
+daily_reset: {tz: Europe/Prague, time: "00:00"}
+daily_loss_basis: max_balance_equity_at_reset
+min_trading_days: null
+news_rule: {applies_to: [funded_standard], window_minutes: 2}
+automation_allowed: true
+firm_request_threshold_per_day: 2000
+server_tz: null
+contract:
+  tick_size: null
+  tick_value_per_lot: null
+  min_lot: null
+  lot_step: null

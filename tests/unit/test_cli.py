@@ -13,7 +13,7 @@ from support.paths import CONFIG_DIR, CONFIG_FIXTURES, FIXTURES
 from support.synthetic import synthetic_trades_csv
 
 SYNTHETIC = FIXTURES / "trades" / "synthetic_trades.csv"
-REAL_VENUE = CONFIG_DIR / "venues" / "ftmo_2step_100k.yaml"
+UNVERIFIED_DIR = CONFIG_FIXTURES / "valid_unverified"
 SAMPLE_VENUE = CONFIG_FIXTURES / "valid" / "venues" / "sample_2step.yaml"
 SAMPLE_RISK = CONFIG_FIXTURES / "valid" / "risk.yaml"
 TODAY = dt.date(2026, 11, 13)
@@ -76,14 +76,14 @@ def test_config_check_accepts_the_real_config(capsys: pytest.CaptureFixture[str]
     assert out.rstrip().endswith("Sonuç: GEÇERLİ")
 
 
-def test_config_check_reports_budget_lock_and_null_fields_of_the_real_profile() -> None:
-    code, out = check(CONFIG_DIR)
+def test_config_check_reports_budget_lock_and_null_fields_of_an_unverified_profile() -> None:
+    code, out = check(UNVERIFIED_DIR)
 
     assert code == 0
     assert "risk_per_trade_pct 0.25 ≤ 0.5 (kod tavanı)" in out
     assert "daily_cap_pct 1.0 ≤ 0.5 × daily_loss_limit_pct 5.0 = 2.5" in out
     assert "günlük bütçe: %1 × 100.000 USD = 1.000 USD" in out
-    assert "[ftmo_2step_100k] boş → signal/paper dışındaki modlar KİLİTLİ" in out
+    assert "[sample_unverified] boş → signal/paper dışındaki modlar KİLİTLİ" in out
     assert (
         "VERIFY (resmi sayfadan doğrulanacak): rules_verified_at, min_trading_days, server_tz"
         in out
@@ -204,8 +204,9 @@ def test_montecarlo_warns_about_a_run_without_costs(capsys: pytest.CaptureFixtur
 def test_montecarlo_refuses_a_null_min_trading_days_without_an_assumption(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    arguments = ["montecarlo", "--trades", str(SYNTHETIC), "--venue", str(REAL_VENUE)]
-    arguments += ["--risk-config", str(CONFIG_DIR / "risk.yaml"), "--paths", "200"]
+    venue = UNVERIFIED_DIR / "venues" / "sample_unverified.yaml"
+    arguments = ["montecarlo", "--trades", str(SYNTHETIC), "--venue", str(venue)]
+    arguments += ["--risk-config", str(UNVERIFIED_DIR / "risk.yaml"), "--paths", "200"]
     arguments += ["--max-days", "100", "--dd-days", "50", "--cost-r", "0.05"]
 
     refused = main(arguments)
@@ -213,12 +214,11 @@ def test_montecarlo_refuses_a_null_min_trading_days_without_an_assumption(
     assumed = main([*arguments, "--assume-min-trading-days", "4"])
     report = capsys.readouterr().out
 
-    if "min. işlem günü 4 (VARSAYIM)" not in report:
-        pytest.skip("the real profile now carries a verified min_trading_days")
     assert refused == 1
     assert refusal.out == ""
     assert "HATA: min_trading_days venue profilinde boş (VERIFY)" in refusal.err
     assert assumed == 0
+    assert "min. işlem günü 4 (VARSAYIM)" in report
     assert "Prop kuralları DOĞRULANMADI" in report
     assert "VARSAYIMDIR" in report
 

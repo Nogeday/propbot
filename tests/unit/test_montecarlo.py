@@ -32,7 +32,7 @@ from support.mc import (
     rules,
     scripted,
 )
-from support.paths import CONFIG_DIR, CONFIG_FIXTURES
+from support.paths import CONFIG_FIXTURES
 
 CLOSED = IntratradeModel.CLOSED
 STOP = IntratradeModel.STOP
@@ -454,9 +454,10 @@ def test_rules_come_from_the_venue_profile() -> None:
 
 
 def test_null_min_trading_days_needs_an_explicit_assumption() -> None:
-    venue = load_venue_profile(CONFIG_DIR / "venues" / "ftmo_2step_100k.yaml")
-    if venue.min_trading_days is not None:
-        pytest.skip("the real profile now carries a verified value")
+    venue = load_venue_profile(
+        CONFIG_FIXTURES / "valid_unverified" / "venues" / "sample_unverified.yaml"
+    )
+    assert venue.min_trading_days is None
 
     with pytest.raises(SimulationInputError, match="--assume-min-trading-days"):
         ChallengeRules.from_venue(venue)
