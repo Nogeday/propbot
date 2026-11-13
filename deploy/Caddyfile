@@ -1,0 +1,31 @@
+# Caddy site for the PropBot webhook receiver — deployment option A (docs/runbook.md §5).
+# Copy to /etc/caddy/Caddyfile and replace the host name with your DuckDNS sub-domain.
+#
+# Caddy obtains and renews the Let's Encrypt certificate by itself. With port 443 restricted to
+# TradingView by the firewall, the certificate is issued through the HTTP challenge, so port 80
+# must stay reachable from the internet (Caddy answers the challenge and redirects the rest).
+#
+# Only POST /tv/webhook from TradingView's four webhook source addresses reaches the bot;
+# every other request is dropped without an answer. The address list must be identical to
+# webhook.source_ips in config/tv_alerts.yaml (a test compares the two files).
+# Caddy overwrites any X-Forwarded-For sent by the client with the real peer address, and the
+# bot checks that address again (receiver.trusted_proxies / client_ip_header).
+
+ALT-ALAN-ADIN.duckdns.org {
+	@tradingview {
+		method POST
+		path /tv/webhook
+		remote_ip 52.89.214.238 34.212.75.30 54.218.53.128 52.32.178.7
+	}
+
+	handle @tradingview {
+		request_body {
+			max_size 4KiB
+		}
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	handle {
+		abort
+	}
+}
