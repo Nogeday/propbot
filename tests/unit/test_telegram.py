@@ -250,13 +250,27 @@ def test_domain_like_tokens_become_code_spans() -> None:
         "risk ≈ $250 (%0.25) · 20.00 lot · 1.0× hesap · $249.50",
         "Geçerlilik: 17:46:00 TR'ye kadar · 2026-07-21 · CME_MINI:MES1!",
         "rules_verified_at · tick_size · v1.2.3 · x.y · a.b1 · 5120.125–5126.375",
-        ".env · /atladim 126 · id 123 · bar 09:44 NY / 17:44 TR",
+        ".env · /atladim · /saglik · id 123 · bar 09:44 NY / 17:44 TR",
         "Cümle bitti. Yenisi başladı.",
         "",
     ],
 )
 def test_prices_times_and_plain_words_are_not_marked(text: str) -> None:
     assert code_entity_spans(text) == []
+
+
+def test_a_command_that_carries_an_id_becomes_one_code_span() -> None:
+    # Telegram turns "/atladim" into a link that SENDS the bare command when tapped; without
+    # its id the command would act on another entry. As code, a tap copies "/atladim 126".
+    text = "bütçeyi serbest bırak: /atladim 126\nYanlışsa: /aldim 124 · /saglik · US500.cash"
+
+    spans = code_entity_spans(text)
+
+    assert [text[offset : offset + length] for offset, length in spans] == [
+        "/atladim 126",
+        "/aldim 124",
+        "US500.cash",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1098,13 +1112,19 @@ def test_a_permanent_failure_is_set_aside_and_the_queue_moves_on(index: int) -> 
         good = h.enqueue("sağlam")
         h.fake.script("sendMessage", outcome)
         with capture_logs() as logs:
-            assert await h.service.send_due() is True
-            assert await h.service.send_due() is True
+            assert await h.service.send_due() is True  # "bozuk" is refused for good
+            assert await h.service.send_due() is True  # "sağlam" goes out
+            assert await h.service.send_due() is True  # the alarm about the dropped message
             assert await h.service.send_due() is False
         row = h.row(bad)
         assert (row.status, row.last_error, row.attempts) == (OutboxStatus.FAILED, error_name, 0)
         assert h.row(good).status is OutboxStatus.SENT
-        assert h.fake.sent_texts() == ["bozuk", "sağlam"]
+        assert h.fake.sent_texts() == [
+            "bozuk",
+            "sağlam",
+            f"[ALARM] Telegram bir mesaj için kalıcı hata verdi ({error_name}); mesaj "
+            "GÖNDERİLEMEDİ ve atlandı.\nTradingView Alert Log'undan ne olduğunu kontrol et.",
+        ]
         assert {
             "event": "telegram_send_failed",
             "error_type": error_name,
@@ -1135,12 +1155,73 @@ def test_a_row_that_breaks_the_sender_itself_is_quarantined(
         poisoned = h.enqueue("zehir")
         good = h.enqueue("sağlam")
         with capture_logs() as logs:
-            assert await h.drain() == 2
+            assert await h.drain() == 3  # the poisoned row, the good one, the alarm
         row = h.row(poisoned)
         assert (row.status, row.last_error) == (OutboxStatus.FAILED, "ValueError")
         assert h.row(good).status is OutboxStatus.SENT
-        assert h.fake.sent_texts() == ["sağlam"]
-        assert "zehir" not in repr(logs)
+        sent = h.fake.sent_texts()
+        assert sent[0] == "sağlam"
+        assert sent[1].startswith("[ALARM] Telegram bir mesaj için kalıcı hata verdi (ValueError)")
+        assert "zehir" not in repr(logs) + sent[1]
+
+    drive(scenario)
+
+
+def test_an_entry_that_telegram_refuses_is_released_and_reported() -> None:
+    async def scenario(h: Harness) -> None:
+        await h.first_step()
+        signal_id, message_id = tg.forwarded_entry(h.store, prop_day=TODAY, now_ms=NOW_MS)
+        h.fake.script("sendMessage", BadRequest("message is too long"))
+
+        assert await h.drain() == 2  # the refused entry, then the alarm
+
+        assert h.row(message_id).status is OutboxStatus.FAILED
+        with h.store.transaction() as tx:
+            entry = tx.get_budget_entry(signal_id)
+            used = tx.budget_used(TODAY)
+        assert entry is not None
+        assert (entry.counted, entry.release_reason) == (False, ReleaseReason.UNDELIVERED)
+        assert used == 0.0
+        assert h.fake.sent_texts()[-1] == (
+            f"[ALARM] Telegram sinyal id {signal_id} mesajı için kalıcı hata verdi (BadRequest); "
+            "mesaj GÖNDERİLEMEDİ ve atlandı.\n"
+            "TradingView Alert Log'undan ne olduğunu kontrol et. Bu bir giriş sinyaliydi: ATLA "
+            "say; bütçeden düşüldü."
+        )
+
+    drive(scenario)
+
+
+def test_dropped_messages_raise_one_alarm_per_throttle_interval() -> None:
+    async def scenario(h: Harness) -> None:
+        for text in ("bir", "iki", "üç"):
+            h.enqueue(text)
+            h.fake.script("sendMessage", Forbidden("bot was blocked by the user"))
+            await h.drain()
+        alarms = [text for text in h.fake.sent_texts() if text.startswith("[ALARM]")]
+        assert len(alarms) == 1
+
+        h.clock.now_ms += 10 * MINUTE_MS
+        h.enqueue("dört")
+        h.fake.script("sendMessage", Forbidden("bot was blocked by the user"))
+        await h.drain()
+        alarms = [text for text in h.fake.sent_texts() if text.startswith("[ALARM]")]
+        assert len(alarms) == 2
+
+    drive(scenario)
+
+
+def test_a_refused_alarm_raises_no_alarm_about_itself() -> None:
+    async def scenario(h: Harness) -> None:
+        alarm = h.enqueue("[ALARM] bir şey", kind=OutboxKind.ALARM)
+        h.fake.script("sendMessage", Forbidden("bot was blocked by the user"))
+
+        assert await h.drain() == 1
+
+        assert h.row(alarm).status is OutboxStatus.FAILED
+        with h.store.transaction() as tx:
+            assert tx.outbox_counts()[OutboxStatus.PENDING] == 0
+        assert h.fake.sent_texts() == ["[ALARM] bir şey"]
 
     drive(scenario)
 
