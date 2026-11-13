@@ -157,6 +157,7 @@ class StateKey(StrEnum):
     HEARTBEAT_SILENT = "heartbeat_silent"
     EXPIRY_REMINDER_DAY = "expiry_reminder_day"
     LAST_ALIVE_MS = "last_alive_ms"  # written by the monitor on every tick (downtime detection)
+    RESTARTS_UNREPORTED = "restarts_unreported"  # short restarts since the last restart alarm
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

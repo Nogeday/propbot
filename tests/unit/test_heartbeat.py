@@ -440,13 +440,24 @@ def test_downtime_inside_a_window_is_reported_on_the_first_tick(store: Store) ->
     assert state(store, StateKey.LAST_ALIVE_MS) == str(back_ms)
 
 
-def test_a_short_restart_is_not_downtime(store: Store) -> None:
+def test_a_short_restart_inside_a_window_is_reported_as_a_restart(store: Store) -> None:
+    # Every restart is a hole in which TradingView gets an error and the alert is lost.
     assert DOWNTIME_THRESHOLD_MS == 90 * SECOND_MS
-    down_from_ms = utc("2026-11-16 14:10")
-    alive_until(store, down_from_ms)
+    last_alive_ms = utc("2026-11-16 14:10")
+    back_ms = last_alive_ms + 90 * SECOND_MS
+    alive_until(store, last_alive_ms)
 
-    assert tick(store, down_from_ms + 90 * SECOND_MS, first_tick=True) == 0
-    assert outbox(store) == []
+    assert tick(store, back_ms, first_tick=True) == 1
+
+    (alarm,) = outbox(store)
+    assert alarm.kind is OutboxKind.ALARM
+    assert alarm.text == (
+        "[ALARM] Bot 17:11:30 TR'de yeniden başladı (en fazla 90 sn kapalı kaldı); bu arada "
+        "gelen bir TradingView alarmı alınmamış olabilir. Açık pozisyonun varsa stop/çıkışı "
+        "TradingView'dan kontrol et."
+    )
+    assert alarm.text == messages.restart_alarm(last_alive_ms, back_ms, restarts=1)
+    assert state(store, StateKey.RESTARTS_UNREPORTED) is None
 
 
 def test_ninety_one_seconds_are_downtime(store: Store) -> None:
@@ -454,6 +465,71 @@ def test_ninety_one_seconds_are_downtime(store: Store) -> None:
     alive_until(store, down_from_ms)
 
     assert tick(store, down_from_ms + 90 * SECOND_MS + 1, first_tick=True) == 1
+
+    (alarm,) = outbox(store)
+    assert alarm.text.startswith("[ALARM] Bot 17:10–17:11 TR arasında kapalıydı;")
+
+
+def test_a_crash_loop_is_reported_once_per_half_hour_with_its_restart_count(store: Store) -> None:
+    started_ms = utc("2026-11-16 14:10")
+    alive_until(store, started_ms)
+
+    # A process that dies every 10 seconds: each start is the first tick of a new process.
+    enqueued = [
+        tick(store, started_ms + round_no * 10 * SECOND_MS, first_tick=True)
+        for round_no in range(1, 181)  # 30 minutes
+    ]
+
+    assert enqueued == [1] + [0] * 179
+    assert state(store, StateKey.RESTARTS_UNREPORTED) == "179"
+
+    # 30 minutes after the first alarm the next restart is reported, with what was skipped.
+    assert tick(store, started_ms + 181 * 10 * SECOND_MS, first_tick=True) == 1
+
+    first, second = outbox(store)
+    assert "yeniden başladı (en fazla 10 sn kapalı kaldı)" in first.text
+    assert second.kind is OutboxKind.ALARM
+    assert second.text == (
+        "[ALARM] Bot 17:40:10 TR'de yeniden başladı: son yeniden başlama alarmından beri 180. "
+        "kez (çökme döngüsü olabilir; sunucuda: journalctl -u propbot). Aralarda gelen "
+        "TradingView alarmları alınmamış olabilir. Açık pozisyonun varsa stop/çıkışı "
+        "TradingView'dan kontrol et."
+    )
+    assert state(store, StateKey.RESTARTS_UNREPORTED) is None
+
+
+def test_a_restart_outside_the_watch_windows_is_silent(store: Store) -> None:
+    # Monday 22:30 UTC = 17:30 New York: the window closed at 16:00.
+    last_alive_ms = utc("2026-11-16 22:30")
+    set_state(store, StateKey.LAST_ALIVE_MS, str(last_alive_ms))
+
+    assert tick(store, last_alive_ms + 20 * SECOND_MS, first_tick=True) == 0
+    assert outbox(store) == []
+    assert state(store, StateKey.RESTARTS_UNREPORTED) is None
+
+
+@pytest.mark.parametrize("stored_count", ["garbage", "", "1.5"])
+def test_an_unreadable_restart_count_starts_again_at_one(store: Store, stored_count: str) -> None:
+    last_alive_ms = utc("2026-11-16 14:10")
+    alive_until(store, last_alive_ms)
+    set_state(store, StateKey.RESTARTS_UNREPORTED, stored_count)
+
+    assert tick(store, last_alive_ms + 5 * SECOND_MS, first_tick=True) == 1
+
+    (alarm,) = outbox(store)
+    assert alarm.text == messages.restart_alarm(
+        last_alive_ms, last_alive_ms + 5 * SECOND_MS, restarts=1
+    )
+
+
+@pytest.mark.parametrize("step_ms", [0, -1, -5 * SECOND_MS])
+def test_a_clock_that_did_not_move_forward_is_not_a_restart(store: Store, step_ms: int) -> None:
+    last_alive_ms = utc("2026-11-16 14:10")
+    alive_until(store, last_alive_ms)
+
+    assert tick(store, last_alive_ms + step_ms, first_tick=True) == 0
+    assert outbox(store) == []
+    assert state(store, StateKey.RESTARTS_UNREPORTED) is None
 
 
 def test_a_gap_between_later_ticks_is_not_reported_as_downtime(store: Store) -> None:

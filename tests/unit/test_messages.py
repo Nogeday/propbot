@@ -808,6 +808,44 @@ def test_downtime_alarm_across_midnight_adds_the_dates() -> None:
     )
 
 
+def test_restart_alarm_gives_the_longest_time_the_bot_can_have_been_away() -> None:
+    # The gap runs from the previous process's last tick, so it is an upper bound: 12.3 s -> 13.
+    text = messages.restart_alarm(
+        utc("2026-11-16 14:10:00"), utc("2026-11-16 14:10:12.300"), restarts=1
+    )
+
+    assert text == (
+        "[ALARM] Bot 17:10:12 TR'de yeniden başladı (en fazla 13 sn kapalı kaldı); bu arada "
+        "gelen bir TradingView alarmı alınmamış olabilir. Açık pozisyonun varsa stop/çıkışı "
+        "TradingView'dan kontrol et."
+    )
+
+
+def test_restart_alarm_that_stands_for_several_restarts_points_at_a_crash_loop() -> None:
+    text = messages.restart_alarm(
+        utc("2026-11-16 14:40:04"), utc("2026-11-16 14:40:10"), restarts=180
+    )
+
+    assert text == (
+        "[ALARM] Bot 17:40:10 TR'de yeniden başladı: son yeniden başlama alarmından beri 180. "
+        "kez (çökme döngüsü olabilir; sunucuda: journalctl -u propbot). Aralarda gelen "
+        "TradingView alarmları alınmamış olabilir. Açık pozisyonun varsa stop/çıkışı "
+        "TradingView'dan kontrol et."
+    )
+
+
+@given(gap_ms=st.integers(min_value=1, max_value=90_000), restarts=st.integers(1, 10_000))
+def test_restart_alarm_is_one_telegram_line_for_any_short_gap(gap_ms: int, restarts: int) -> None:
+    up_at_ms = utc("2026-11-16 14:10")
+
+    text = messages.restart_alarm(up_at_ms - gap_ms, up_at_ms, restarts=restarts)
+
+    assert text.startswith("[ALARM] Bot 17:10:00 TR'de yeniden başladı")
+    assert "\n" not in text
+    assert "(en fazla 0 sn" not in text
+    assert len(text) < 400
+
+
 def test_expiry_reminder_lists_each_alert_with_its_state() -> None:
     items = [
         ("Asian Sweep", dt.date(2026, 11, 14), -2),

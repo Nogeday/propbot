@@ -10,6 +10,7 @@ fields: an exit alert may carry no level at all.
 """
 
 import datetime as dt
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
@@ -46,6 +47,7 @@ UNDELIVERED_ENTRY_NOTE: Final = (
 EXPIRY_REMINDER_MAX_CHARS: Final = 3500
 
 _UNKNOWN: Final = "?"
+_MILLIS_PER_SECOND: Final = 1000
 _NO_FILL_ALERTS_LINE: Final = (
     "TradingView'da stop/TP dolunca mesaj gelmez; pozisyonun hâlâ açıksa seans sonunda "
     "kendin kapat."
@@ -562,6 +564,29 @@ def heartbeat_silence_alarm(silent_seconds: float, limit_minutes: int) -> str:
 
 def heartbeat_recovered_notice() -> str:
     return "[BİLGİ] TradingView alarm hattı geri geldi: yeniden alert alınıyor."
+
+
+def restart_alarm(last_alive_ms: int, up_at_ms: int, *, restarts: int) -> str:
+    """The bot came back inside a watch window after a gap too short for `downtime_alarm`.
+
+    `last_alive_ms` is the previous process's last sign of life, so the gap is an upper bound
+    of the time the bot was away. `restarts` counts this restart and the ones before it that
+    were not reported (the alarm is throttled); above one it points at a crash loop.
+    """
+    at = fmt_clock(up_at_ms, ISTANBUL, seconds=True)
+    if restarts > 1:
+        happened = (
+            f"Bot {at} TR'de yeniden başladı: son yeniden başlama alarmından beri {restarts}. "
+            "kez (çökme döngüsü olabilir; sunucuda: journalctl -u propbot). Aralarda gelen "
+            "TradingView alarmları alınmamış olabilir."
+        )
+    else:
+        seconds = max(1, math.ceil((up_at_ms - last_alive_ms) / _MILLIS_PER_SECOND))
+        happened = (
+            f"Bot {at} TR'de yeniden başladı (en fazla {seconds} sn kapalı kaldı); bu arada "
+            "gelen bir TradingView alarmı alınmamış olabilir."
+        )
+    return f"[ALARM] {happened} Açık pozisyonun varsa stop/çıkışı TradingView'dan kontrol et."
 
 
 def downtime_alarm(down_from_ms: int, down_until_ms: int) -> str:
