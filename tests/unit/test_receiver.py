@@ -990,3 +990,96 @@ def test_a_closed_store_raises_the_documented_error(make: type[Harness]) -> None
 
     with pytest.raises(StoreError), harness.store.transaction():
         pass
+
+
+# --- the unauthenticated alarm never loses what it collected ------------------------------
+
+
+def test_a_stale_token_is_reported_even_if_somebody_elses_junk_opened_the_gate_first(
+    make: type[Harness],
+) -> None:
+    harness = make()
+
+    harness.post(b"{")  # a stranger's junk from a TradingView address: alarm number one
+    harness.clock.now_ms += 5 * 60_000
+    harness.post(body_of(token="the-token-before-the-rotation"))  # our own entry: 401, held back
+    harness.clock.now_ms += 45 * 60_000
+    harness.post(body_of(action="exit", token="the-token-before-the-rotation"))
+    held_back = harness.outbox_total()
+    # Nothing else is rejected. The next VALID alert after the hour (the heartbeat, say)
+    # carries the report out.
+    harness.clock.now_ms += 11 * 60_000
+    bar_ms = 60_000 * int(alerts.HEARTBEAT_TF)
+    heartbeat = alerts.heartbeat_payload(bar_time=harness.clock.now_ms - bar_ms - 1_000)
+    answer = harness.post(json.dumps(heartbeat).encode())
+
+    assert held_back == 1
+    assert answer.status_code == 200
+    first, second = harness.drain_outbox()
+    assert "bozuk JSON: 1" in first
+    assert "2 istek kimliği doğrulanamadan" in second
+    assert "yanlış/eksik token: 2" in second
+    assert harness.messages == [1, 1]
+
+
+def test_valid_alerts_cause_no_report_while_nothing_is_pending(make: type[Harness]) -> None:
+    harness = make()
+
+    harness.post()
+    harness.clock.now_ms += HOUR_MS
+    harness.post(body_of(action="exit"))
+
+    assert harness.outbox_total() == 0
+    assert harness.messages == []
+
+
+def test_counts_survive_a_store_that_still_throttles_the_alarm_after_a_restart(
+    make: type[Harness],
+) -> None:
+    harness = make()
+    with harness.store.transaction() as tx:
+        # The previous process sent this alarm ten minutes ago.
+        tx.enqueue_alarm(
+            code="webhook_unauthenticated",
+            text="[ALARM] önceki süreç",
+            now_ms=NOW_MS - 10 * 60_000,
+            throttle_ms=HOUR_MS,
+        )
+    harness.drain_outbox()
+
+    harness.post(body_of(token="nope"))  # held back: the store refuses a second alarm so soon
+    harness.clock.now_ms += 60_000
+    harness.post(b"{")  # inside the retry pause: not even tried
+    after_two = harness.outbox_total()
+    harness.clock.now_ms += 5 * 60_000
+    harness.post(body_of(token="nope"))  # retried, still throttled by the store
+    still_throttled = harness.outbox_total()
+    harness.clock.now_ms += 50 * 60_000
+    harness.post(padded(5000))  # the hour since the previous process's alarm has passed
+
+    assert (after_two, still_throttled) == (1, 1)  # only the previous process's row
+    (report,) = harness.drain_outbox()
+    assert "4 istek kimliği doğrulanamadan" in report
+    assert "yanlış/eksik token: 2" in report
+    assert "bozuk JSON: 1" in report
+    assert "fazla büyük gövde: 1" in report
+
+
+def test_a_failing_store_keeps_the_counts_for_the_next_report(make: type[Harness]) -> None:
+    harness = make()
+    real_transaction = harness.store.transaction
+    broken = {"on": True}
+
+    def flaky_transaction() -> object:
+        if broken["on"]:
+            raise StoreError("veritabanı hatası (test)")
+        return real_transaction()
+
+    harness.store.transaction = flaky_transaction  # type: ignore[method-assign]
+    assert harness.post(body_of(token="nope")).status_code == 401
+    broken["on"] = False
+    harness.clock.now_ms += 5 * 60_000
+    assert harness.post(b"{").status_code == 400
+
+    (report,) = harness.drain_outbox()
+    assert "2 istek kimliği doğrulanamadan" in report

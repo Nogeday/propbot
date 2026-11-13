@@ -69,6 +69,9 @@ _BAD_SCHEMA_ALARM: Final = ("bad_schema", 10 * _MINUTE_MS)
 _RATE_LIMIT_ALARM: Final = ("rate_limited", 10 * _MINUTE_MS)
 _EARLY_ALARM: Final = ("clock_early", 60 * _MINUTE_MS)
 _UNAUTHENTICATED_ALARM: Final = ("webhook_unauthenticated", 60 * _MINUTE_MS)
+# When that alarm cannot be enqueued (the store still throttles it after a restart, or the
+# store failed), the collected counts are kept and offered again after this long.
+_UNAUTHENTICATED_RETRY_MS: Final = 5 * _MINUTE_MS
 
 type IPAddress = IPv4Address | IPv6Address
 
@@ -156,27 +159,45 @@ class _LogThrottle:
 
 
 class _AlarmGate:
-    """Opens for the first unauthenticated rejection and then once per interval.
+    """Collects unauthenticated rejections and decides when the user is told about them.
 
-    It lives in memory, so a flood of bad requests costs one database transaction per
-    interval, not one per request. While it is closed it keeps counting; the counts
-    travel with the next alarm.
+    At most one alarm per interval, whatever the request rate, and it lives in memory so a
+    flood costs one database transaction per interval. Counts are never lost: what arrives
+    while the gate is closed goes out with the next alarm, and ANY later request from an
+    allow-listed address (also a valid one, such as the hourly heartbeat) triggers that
+    alarm once the interval has passed. A stale token on one of our own alerts therefore
+    cannot hide behind somebody else's junk request that happened to open the gate first.
     """
 
-    def __init__(self, interval_ms: int) -> None:
+    def __init__(self, interval_ms: int, retry_ms: int) -> None:
         self._interval_ms = interval_ms
-        self._last_open_ms: int | None = None
+        self._retry_ms = retry_ms
+        self._closed_until_ms: int | None = None
         self._counts: dict[RejectCode, int] = {}
 
-    def record(self, code: RejectCode, now_ms: int) -> dict[RejectCode, int] | None:
-        """Count one rejection; return the counts since the last alarm when one is due."""
+    def record(self, code: RejectCode) -> None:
         self._counts[code] = self._counts.get(code, 0) + 1
-        last = self._last_open_ms
-        if last is not None and 0 <= now_ms - last < self._interval_ms:
+
+    def take_due(self, now_ms: int) -> dict[RejectCode, int] | None:
+        """Hand over the pending counts when an alarm may go out now, else None."""
+        if not self._counts:
             return None
-        self._last_open_ms = now_ms
+        closed_until = self._closed_until_ms
+        # A deadline further away than one interval means the clock stepped back: open.
+        if closed_until is not None and 0 < closed_until - now_ms <= self._interval_ms:
+            return None
         counts, self._counts = self._counts, {}
         return counts
+
+    def sent(self, now_ms: int) -> None:
+        """The alarm went out: stay closed for one interval."""
+        self._closed_until_ms = now_ms + self._interval_ms
+
+    def put_back(self, counts: Mapping[RejectCode, int], now_ms: int) -> None:
+        """The alarm could not be enqueued (store throttle or failure): keep the counts."""
+        for code, count in counts.items():
+            self._counts[code] = self._counts.get(code, 0) + count
+        self._closed_until_ms = now_ms + self._retry_ms
 
 
 def parse_ip_strict(text: str) -> IPAddress | None:
@@ -247,7 +268,7 @@ def create_app(deps: ReceiverDeps, *, lifespan: Lifespan[FastAPI] | None = None)
     rate_limit = receiver.rate_limit_per_minute
     limiter = SlidingWindowLimiter(rate_limit)
     log_throttle = _LogThrottle(_LOG_THROTTLE_MS)
-    unauthenticated_gate = _AlarmGate(_UNAUTHENTICATED_ALARM[1])
+    unauthenticated_gate = _AlarmGate(_UNAUTHENTICATED_ALARM[1], _UNAUTHENTICATED_RETRY_MS)
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -256,15 +277,29 @@ def create_app(deps: ReceiverDeps, *, lifespan: Lifespan[FastAPI] | None = None)
         with deps.store.transaction() as tx:
             return tx.enqueue_alarm(code=code, text=text, now_ms=now_ms, throttle_ms=throttle_ms)
 
-    async def alarm(kind: tuple[str, int], text: str, now_ms: int) -> None:
-        """Put a throttled alarm in the outbox; a store failure must not change the answer."""
+    async def alarm(kind: tuple[str, int], text: str, now_ms: int) -> bool:
+        """Put a throttled alarm in the outbox and say whether it went in.
+
+        A store failure must not change the answer to TradingView.
+        """
         try:
             enqueued = await asyncio.to_thread(enqueue_alarm, kind, text, now_ms)
         except StoreError as error:
             _log.error("webhook_alarm_failed", code=kind[0], error_type=type(error).__name__)
-            return
+            return False
         if enqueued:
             deps.on_messages()
+        return enqueued
+
+    async def report_unauthenticated(now_ms: int) -> None:
+        """Send the alarm about rejections collected so far, if one is due."""
+        counts = unauthenticated_gate.take_due(now_ms)
+        if counts is None:
+            return
+        if await alarm(_UNAUTHENTICATED_ALARM, _unauthenticated_alarm_text(counts), now_ms):
+            unauthenticated_gate.sent(now_ms)
+        else:
+            unauthenticated_gate.put_back(counts, now_ms)
 
     def reject(code: RejectCode, now_ms: int, client: str | None, **detail: object) -> JSONResponse:
         deps.stats.record(code, now_ms)
@@ -284,11 +319,10 @@ def create_app(deps: ReceiverDeps, *, lifespan: Lifespan[FastAPI] | None = None)
         """Reject a request from an allow-listed address that did not prove it knows the token.
 
         It may be our own alert with a stale token or a broken body, so the user is told,
-        but rarely: the gate opens once per hour whatever the request rate.
+        but rarely: at most one alarm per hour whatever the request rate.
         """
-        counts = unauthenticated_gate.record(code, now_ms)
-        if counts is not None:
-            await alarm(_UNAUTHENTICATED_ALARM, _unauthenticated_alarm_text(counts), now_ms)
+        unauthenticated_gate.record(code)
+        await report_unauthenticated(now_ms)
         return reject(code, now_ms, client)
 
     def insert(signal: NewSignal, early_ms: int) -> tuple[int | None, bool]:
@@ -329,7 +363,9 @@ def create_app(deps: ReceiverDeps, *, lifespan: Lifespan[FastAPI] | None = None)
         if not token or not hmac.compare_digest(token.encode("utf-8"), expected_token):
             return await reject_unauthenticated(RejectCode.BAD_TOKEN, started_ms, client)
 
-        # From here on the sender is one of our own alerts.
+        # From here on the sender is one of our own alerts. It also carries out a report
+        # about earlier rejections that had to wait for the hourly gate.
+        await report_unauthenticated(started_ms)
         if not limiter.allow(started_ms):
             await alarm(_RATE_LIMIT_ALARM, _rate_limit_alarm_text(rate_limit), started_ms)
             return reject(RejectCode.RATE_LIMITED, started_ms, client)
