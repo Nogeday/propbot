@@ -11,6 +11,7 @@ mantığının referansı bu dosyalardır (`docs/SPEC.md` §3) ve düzeltilen do
 | `ict_silver_bullet_strategy.pine` | ICT Silver Bullet (Sweep → MSS → FVG, limit giriş) | 1m / 5m | `ict_silver_bullet` | §3.4.2 |
 | `mean_reversion_bb_kc_rsi2_strategy.pine` | BB/KC + RSI(2) mean reversion | 5m–15m | `mr_bb_kc_rsi2` | §3.4.3 |
 | `mtf_trend_continuation_strategy.pine` | MTF trend continuation (5m / 1H) | 5m | `mtf_trend_cont` | §3.4.4 |
+| `heartbeat_indicator.pine` | Gösterge (strateji değil): alarm hattı için saat başı heartbeat | 1m | `heartbeat` | §5.5 |
 
 - Hepsi Pine v5, tek parça ve doğrudan yapıştırılabilir. v6'ya yükseltme yok.
 - Varsayılanlar `CME_MINI:MES1!` test profilidir: komisyon kontrat başı $0,50 (taraf başı), slipaj 1 tick, başlangıç
@@ -18,4 +19,6 @@ mantığının referansı bu dosyalardır (`docs/SPEC.md` §3) ve düzeltilen do
 - Asian Sweep ve Master'ın S2 motoru ~23 saat işlem gören enstrüman ister (MES/ES, US500 CFD); SPY/SPX'te çalışmaz.
 - TradingView'dan güncelleme: Pine Editor → script'i aç → `Ctrl+A`, `Ctrl+C` → Metin Düzenleyici → `Ctrl+V` → aynı adla
   bu klasöre kaydet.
+- `heartbeat_indicator.pine` Faz 1'de yazıldı (TradingView kaynağı yoktur, depo kaynaktır); emir üretmez, yalnızca
+  alıcının "alarm hattı sessiz" denetimi için saat başı küçük bir JSON gönderir. Henüz derlenmedi (doğrulama listesi H).
 - TradingView'da yapılacak kontroller: `docs/tv-verification-checklist.md`. Değişiklik geçmişi: `CHANGELOG.md`.
