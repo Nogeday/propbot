@@ -81,7 +81,8 @@ def _check_downtime(tx: Tx, heartbeat: HeartbeatConfig, now_ms: int) -> int:
     loop) is reported too, at most once per `_RESTART_ALARM_THROTTLE_MS`: every restart is a
     hole in which a TradingView alert is answered with an error and lost, and a loop of
     short holes would otherwise stay invisible. The alarm says how many restarts it stands
-    for, so a loop reads differently from one planned restart.
+    for, so a loop reads differently from one planned restart. Restarts that fall under
+    the throttle are counted and reported later (`_report_counted_restarts`).
     """
     previous_ms = _read_ms(tx, StateKey.LAST_ALIVE_MS)
     if previous_ms is None or now_ms <= previous_ms:
@@ -106,6 +107,27 @@ def _check_downtime(tx: Tx, heartbeat: HeartbeatConfig, now_ms: int) -> int:
         tx.delete_state(StateKey.RESTARTS_UNREPORTED)
     else:
         tx.set_state(StateKey.RESTARTS_UNREPORTED, str(restarts), now_ms)
+    return int(enqueued)
+
+
+def _report_counted_restarts(tx: Tx, now_ms: int) -> int:
+    """Every tick: report restarts that were counted while the restart alarm was throttled.
+
+    Without this the count would wait for the NEXT restart: a crash loop that ends by
+    itself would be known as one restart of a few seconds, and an ordinary restart days
+    later would be announced as the loop.
+    """
+    counted = _read_ms(tx, StateKey.RESTARTS_UNREPORTED)
+    if counted is None or counted <= 0:
+        return 0
+    enqueued = tx.enqueue_alarm(
+        code=_RESTART_ALARM_CODE,
+        text=messages.restarts_summary_alarm(counted),
+        now_ms=now_ms,
+        throttle_ms=_RESTART_ALARM_THROTTLE_MS,
+    )
+    if enqueued:
+        tx.delete_state(StateKey.RESTARTS_UNREPORTED)
     return int(enqueued)
 
 
@@ -191,6 +213,7 @@ def check_alert_line(
     enqueued = 0
     if first_tick:
         enqueued += _check_downtime(tx, config.heartbeat, now_ms)
+    enqueued += _report_counted_restarts(tx, now_ms)
     tx.set_state(StateKey.LAST_ALIVE_MS, str(now_ms), now_ms)
     enqueued += _check_silence(tx, config.heartbeat, now_ms, started_ms)
     enqueued += _check_expiry(tx, config, now_ms)

@@ -498,6 +498,79 @@ def test_a_crash_loop_is_reported_once_per_half_hour_with_its_restart_count(stor
     assert state(store, StateKey.RESTARTS_UNREPORTED) is None
 
 
+def restart_alarms(store: Store) -> list[str]:
+    return [row.text for row in outbox(store) if row.text.startswith("[ALARM] Bot ")]
+
+
+def test_a_crash_loop_that_ends_is_summarised_half_an_hour_after_its_first_alarm(
+    store: Store,
+) -> None:
+    # 120 restarts in 20 minutes, then the service stays up. The count must not wait for
+    # the next restart, which may be days away and would then be taken for the loop.
+    loop_start_ms = utc("2026-11-16 15:00")  # 10:00 New York, inside the window
+    alive_until(store, loop_start_ms)
+    for round_no in range(1, 121):
+        tick(store, loop_start_ms + round_no * 10 * SECOND_MS, first_tick=True)
+    first_alarm_ms = loop_start_ms + 10 * SECOND_MS
+    stable_from_ms = loop_start_ms + 20 * MINUTE_MS
+    assert len(restart_alarms(store)) == 1
+    assert state(store, StateKey.RESTARTS_UNREPORTED) == "119"
+
+    # Ordinary ticks: nothing until 30 minutes after the first alarm, then one summary.
+    enqueued_at = [
+        now_ms
+        for now_ms in range(stable_from_ms, stable_from_ms + 20 * MINUTE_MS, 30 * SECOND_MS)
+        if tick(store, now_ms)
+    ]
+
+    assert enqueued_at == [first_alarm_ms + 30 * MINUTE_MS + 20 * SECOND_MS]
+    first, summary = restart_alarms(store)
+    assert "yeniden başladı (en fazla 10 sn kapalı kaldı)" in first
+    assert summary == (
+        "[ALARM] Bot son yeniden başlama alarmından beri 119 kez daha yeniden başladı (çökme "
+        "döngüsü olabilir; sunucuda: journalctl -u propbot). Aralarda gelen TradingView "
+        "alarmları alınmamış olabilir. Açık pozisyonun varsa stop/çıkışı TradingView'dan "
+        "kontrol et."
+    )
+    assert summary == messages.restarts_summary_alarm(119)
+    assert state(store, StateKey.RESTARTS_UNREPORTED) is None
+
+    # The next day's single planned restart is just that.
+    next_day_ms = utc("2026-11-17 16:00")
+    set_state(store, StateKey.LAST_ALIVE_MS, str(next_day_ms - 5 * SECOND_MS))
+    assert tick(store, next_day_ms, first_tick=True) >= 1
+    assert restart_alarms(store)[-1] == messages.restart_alarm(
+        next_day_ms - 5 * SECOND_MS, next_day_ms, restarts=1
+    )
+
+
+def test_a_second_restart_under_the_throttle_is_reported_once_the_throttle_ends(
+    store: Store,
+) -> None:
+    first_ms = utc("2026-11-16 15:00")
+    alive_until(store, first_ms - 5 * SECOND_MS)
+    assert tick(store, first_ms, first_tick=True) == 1
+
+    second_ms = first_ms + 10 * MINUTE_MS
+    assert tick(store, second_ms - 30 * SECOND_MS) == 0
+    assert tick(store, second_ms, first_tick=True) == 0  # throttled: counted
+    assert tick(store, first_ms + 30 * MINUTE_MS - 1) == 0
+    assert tick(store, first_ms + 30 * MINUTE_MS) == 1
+
+    assert restart_alarms(store)[-1] == messages.restarts_summary_alarm(1)
+    assert tick(store, first_ms + 31 * MINUTE_MS) == 0  # reported once
+
+
+@pytest.mark.parametrize("stored_count", ["0", "-3", "garbage", ""])
+def test_nothing_is_summarised_without_a_positive_count(store: Store, stored_count: str) -> None:
+    now_ms = utc("2026-11-16 15:00")
+    alive_until(store, now_ms - 30 * SECOND_MS)
+    set_state(store, StateKey.RESTARTS_UNREPORTED, stored_count)
+
+    assert tick(store, now_ms) == 0
+    assert restart_alarms(store) == []
+
+
 def test_a_restart_outside_the_watch_windows_is_silent(store: Store) -> None:
     # Monday 22:30 UTC = 17:30 New York: the window closed at 16:00.
     last_alive_ms = utc("2026-11-16 22:30")

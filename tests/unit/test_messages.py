@@ -834,6 +834,15 @@ def test_restart_alarm_that_stands_for_several_restarts_points_at_a_crash_loop()
     )
 
 
+def test_restarts_summary_alarm_reports_what_the_throttle_held_back() -> None:
+    assert messages.restarts_summary_alarm(119) == (
+        "[ALARM] Bot son yeniden başlama alarmından beri 119 kez daha yeniden başladı (çökme "
+        "döngüsü olabilir; sunucuda: journalctl -u propbot). Aralarda gelen TradingView "
+        "alarmları alınmamış olabilir. Açık pozisyonun varsa stop/çıkışı TradingView'dan "
+        "kontrol et."
+    )
+
+
 @given(gap_ms=st.integers(min_value=1, max_value=90_000), restarts=st.integers(1, 10_000))
 def test_restart_alarm_is_one_telegram_line_for_any_short_gap(gap_ms: int, restarts: int) -> None:
     up_at_ms = utc("2026-11-16 14:10")

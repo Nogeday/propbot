@@ -566,6 +566,13 @@ def heartbeat_recovered_notice() -> str:
     return "[BİLGİ] TradingView alarm hattı geri geldi: yeniden alert alınıyor."
 
 
+_CRASH_LOOP_HINT: Final = (
+    "(çökme döngüsü olabilir; sunucuda: journalctl -u propbot). Aralarda gelen TradingView "
+    "alarmları alınmamış olabilir."
+)
+_CHECK_POSITION: Final = "Açık pozisyonun varsa stop/çıkışı TradingView'dan kontrol et."
+
+
 def restart_alarm(last_alive_ms: int, up_at_ms: int, *, restarts: int) -> str:
     """The bot came back inside a watch window after a gap too short for `downtime_alarm`.
 
@@ -577,8 +584,7 @@ def restart_alarm(last_alive_ms: int, up_at_ms: int, *, restarts: int) -> str:
     if restarts > 1:
         happened = (
             f"Bot {at} TR'de yeniden başladı: son yeniden başlama alarmından beri {restarts}. "
-            "kez (çökme döngüsü olabilir; sunucuda: journalctl -u propbot). Aralarda gelen "
-            "TradingView alarmları alınmamış olabilir."
+            f"kez {_CRASH_LOOP_HINT}"
         )
     else:
         seconds = max(1, math.ceil((up_at_ms - last_alive_ms) / _MILLIS_PER_SECOND))
@@ -586,7 +592,15 @@ def restart_alarm(last_alive_ms: int, up_at_ms: int, *, restarts: int) -> str:
             f"Bot {at} TR'de yeniden başladı (en fazla {seconds} sn kapalı kaldı); bu arada "
             "gelen bir TradingView alarmı alınmamış olabilir."
         )
-    return f"[ALARM] {happened} Açık pozisyonun varsa stop/çıkışı TradingView'dan kontrol et."
+    return f"[ALARM] {happened} {_CHECK_POSITION}"
+
+
+def restarts_summary_alarm(restarts: int) -> str:
+    """Restarts that happened while the restart alarm was throttled, reported afterwards."""
+    return (
+        f"[ALARM] Bot son yeniden başlama alarmından beri {restarts} kez daha yeniden başladı "
+        f"{_CRASH_LOOP_HINT} {_CHECK_POSITION}"
+    )
 
 
 def downtime_alarm(down_from_ms: int, down_until_ms: int) -> str:
