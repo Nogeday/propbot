@@ -713,16 +713,20 @@ class Commands:
         today = self._prop_day(call.now_ms)
         with self._deps.store.transaction() as tx:
             if signal_id is None:
-                entry = _latest_delivered_entry(tx, today)
-                if entry is None:
+                latest = _latest_delivered_entry(tx, today)
+                if latest.unclear_id is not None:
+                    return _unclear_entry_text(latest.unclear_id)
+                if latest.entry is None:
                     return (
                         f"Bugün (prop günü {today.isoformat()}) sana ulaşmış bir giriş sinyali "
                         "yok. Belirli bir giriş için: /atladim <id>"
                     )
+                entry = latest.entry
             else:
-                entry = tx.get_budget_entry(signal_id)
-                if entry is None:
+                named = tx.get_budget_entry(signal_id)
+                if named is None:
                     return _no_ledger_text(signal_id)
+                entry = named
             label = _entry_label(entry.signal_id, tx.get_signal(entry.signal_id))
             if not entry.counted:
                 return (
@@ -802,20 +806,42 @@ def _last_strategy_alert_ms(tx: Tx) -> int | None:
     return max((stamp for stamp in stamps if stamp is not None), default=None)
 
 
-def _latest_delivered_entry(tx: Tx, day: dt.date) -> BudgetRow | None:
+def _unclear_entry_text(signal_id: int) -> str:
+    return (
+        f"Hangi girişi atladığın belli değil: id {signal_id} mesajı sana ulaşmış da olabilir, "
+        "ulaşmamış da (iletim belirsiz). Hiçbir şey değiştirilmedi; id ile yaz: /atladim <id> "
+        "(id, sinyal mesajının son satırındaki numaradır)."
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _LatestEntry:
+    """What a bare `/atladim` refers to: at most one of the two is set."""
+
+    entry: BudgetRow | None = None  # newest entry whose signal message reached Telegram
+    unclear_id: int | None = None  # a newer entry the user may or may not have seen
+
+
+def _latest_delivered_entry(tx: Tx, day: dt.date) -> _LatestEntry:
     """Newest entry of the prop day whose signal message reached Telegram.
 
-    An entry whose message is still pending (or was never delivered) is skipped: the user
-    cannot mean a signal they have not seen.
+    An entry whose message was never attempted is skipped: the user cannot mean a signal
+    they have not seen. One whose delivery is in doubt (a send timed out after the request
+    left) may be on the user's screen: an older entry is then NOT taken instead, because
+    releasing the wrong one also silences that trade's stop and exit messages.
     """
     for entry in reversed(tx.budget_entries(day)):
-        delivered = any(
-            message.kind is OutboxKind.SIGNAL and message.status is OutboxStatus.SENT
+        signal_messages = [
+            message
             for message in tx.messages_for_signal(entry.signal_id)
-        )
-        if delivered:
-            return entry
-    return None
+            if message.kind is OutboxKind.SIGNAL
+        ]
+        if any(message.status is OutboxStatus.SENT for message in signal_messages):
+            return _LatestEntry(entry=entry)
+        # A released entry cannot be what the user wants to release now.
+        if entry.counted and any(message.delivery_uncertain for message in signal_messages):
+            return _LatestEntry(unclear_id=entry.signal_id)
+    return _LatestEntry()
 
 
 def _latency_line(samples: list[LatencySample]) -> str:

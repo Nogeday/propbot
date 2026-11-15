@@ -1206,6 +1206,65 @@ def test_atladim_never_picks_an_entry_whose_message_is_still_pending(world: Worl
     assert world.counted(pending) == (True, None)
 
 
+def signal_message_id(world: World, signal_id: int) -> int:
+    with world.store.transaction() as tx:
+        (message,) = (
+            row for row in tx.messages_for_signal(signal_id) if row.kind is OutboxKind.SIGNAL
+        )
+    return message.id
+
+
+UNCLEAR_ENTRY = (
+    "Hangi girişi atladığın belli değil: id 2 mesajı sana ulaşmış da olabilir, ulaşmamış da "
+    "(iletim belirsiz). Hiçbir şey değiştirilmedi; id ile yaz: /atladim <id> (id, sinyal "
+    "mesajının son satırındaki numaradır)."
+)
+
+
+@pytest.mark.parametrize("closed_as", [None, "expired", "failed"])
+def test_atladim_does_not_guess_past_an_entry_that_may_have_been_delivered(
+    world: World, closed_as: str | None
+) -> None:
+    # The send of entry 2 timed out after the request left: it may be on the user's screen.
+    # Taking the older entry 1 instead would also silence the stop and exit messages of a
+    # trade the user is in.
+    older = world.entry(delivered=True)
+    newer = world.entry(delivered=False, offset=13, strategy_id="asian_sweep")
+    message_id = signal_message_id(world, newer)
+    with world.store.transaction() as tx:
+        tx.mark_message_retry(
+            message_id, next_attempt_ms=NOW_MS + 30_000, error="TimedOut", uncertain=True
+        )
+        if closed_as == "expired":
+            tx.mark_message_expired(message_id, NOW_MS)
+        elif closed_as == "failed":
+            tx.mark_message_failed(message_id, error="BadRequest", now_ms=NOW_MS)
+
+    assert world.say("/atladim") == Reply(UNCLEAR_ENTRY)
+
+    assert world.counted(older) == (True, None)
+    assert world.counted(newer) == (True, None)
+    # With the id it is the user's own statement, for either entry.
+    assert world.text(f"/atladim {newer}").startswith(
+        "id 2 · Asian Sweep · LONG · bar 11:43 NY: $250"
+    )
+    assert world.counted(newer) == (False, ReleaseReason.SKIPPED)
+
+
+def test_atladim_looks_past_an_unclear_entry_that_is_already_released(world: World) -> None:
+    older = world.entry(delivered=True)
+    newer = world.entry(delivered=False, offset=13, strategy_id="asian_sweep")
+    message_id = signal_message_id(world, newer)
+    with world.store.transaction() as tx:
+        tx.mark_message_retry(
+            message_id, next_attempt_ms=NOW_MS + 30_000, error="TimedOut", uncertain=True
+        )
+    world.release(newer, ReleaseReason.SKIPPED)  # the user already answered for it
+
+    assert world.text("/atladim").startswith("id 1 · NY ORB FVG · LONG · bar 11:30 NY: $250")
+    assert world.counted(older) == (False, ReleaseReason.SKIPPED)
+
+
 def test_atladim_ignores_messages_that_are_not_the_delivered_signal(world: World) -> None:
     older = world.entry(delivered=True)
     newer = world.entry(delivered=False, offset=1)
