@@ -7,6 +7,7 @@ updates with `application.process_update`; a few start `run()` to cover the loop
 
 import asyncio
 import datetime as dt
+import io
 import traceback
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
@@ -26,12 +27,14 @@ from telegram.error import (
     TelegramError,
     TimedOut,
 )
-from telegram.ext import Application
+from telegram.ext import Application, ExtBot
 from telegram.warnings import PTBDeprecationWarning
 
+from propbot.logging_setup import configure_logging, reset_logging
 from propbot.notify import telegram as telegram_module
 from propbot.notify.commands import CommandDeps, Commands, Reply
 from propbot.notify.telegram import (
+    ResilientBot,
     TelegramFatalError,
     TelegramService,
     code_entity_spans,
@@ -1836,11 +1839,362 @@ def test_the_conflict_alarm_is_retried_when_the_store_failed() -> None:
         with capture_logs() as logs:
             h.service._on_polling_error(Conflict("x"))
             await asyncio.gather(*h.service._background)
-        assert "telegram_conflict_alarm_failed" in [entry["event"] for entry in logs]
+        failed = [entry for entry in logs if entry["event"] == "telegram_alarm_failed"]
+        assert [(entry["code"], entry["error_type"]) for entry in failed] == [
+            ("telegram_conflict", "StoreError")
+        ]
         h.service._store = real_store  # type: ignore[misc]
         h.service._on_polling_error(Conflict("x"))
         await asyncio.gather(*h.service._background)
         assert [text for _kind, _status, text in h.outbox()] == [CONFLICT_ALARM]
+
+    drive(scenario)
+
+
+# --- updates python-telegram-bot cannot build ---------------------------------------------
+
+NEAR_PIN = "246814"  # the PIN with its last digit mistyped: not a secret the redactor knows
+STRANGER_TEXT = "merhaba, ben bir yabancıyım"
+STUCK_ALARM = (
+    "[ALARM] Telegram güncellemeleri okunamıyor: komutların (/duraklat ve /kill dahil) şu an "
+    "İŞLENMEYEBİLİR; sinyal mesajları gelmeye devam eder. Sinyalleri durdurman gerekirse "
+    "sunucuda: sudo systemctl stop propbot. Ayrıntı: journalctl -u propbot"
+)
+
+
+def skipped_alarm(count: int) -> str:
+    return (
+        f"[ALARM] Telegram'dan gelen {count} mesaj okunamadı ve atlandı (kütüphanenin "
+        "tanımadığı bir mesaj biçimi). Az önce bir komut yazdıysan ve yanıt gelmediyse "
+        "yeniden gönder."
+    )
+
+
+def unbuildable_update(text: str = f"/kill {NEAR_PIN}") -> dict[str, Any]:
+    """A message whose chat has no type: python-telegram-bot raises while building it."""
+    update = tg.private_update(text, sent_at_ms=NOW_MS)
+    del update["message"]["chat"]["type"]
+    return update
+
+
+class Unparsed:
+    """Records what `ResilientBot` reports and how long it asked to sleep."""
+
+    def __init__(self) -> None:
+        self.reports: list[tuple[int, bool]] = []
+        self.sleeps: list[float] = []
+
+    def __call__(self, skipped: int, stuck: bool) -> None:
+        self.reports.append((skipped, stuck))
+
+    async def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+
+
+def with_bot[T](scenario: Callable[[ResilientBot, FakeRequest, Unparsed], Awaitable[T]]) -> T:
+    async def main() -> T:
+        fake, seen = FakeRequest(), Unparsed()
+        bot = ResilientBot(
+            BOT_TOKEN, on_unparsed=seen, request=fake, get_updates_request=fake, sleep=seen.sleep
+        )
+        await bot.initialize()
+        try:
+            return await scenario(bot, fake, seen)
+        finally:
+            await bot.shutdown()
+
+    return asyncio.run(main())
+
+
+def test_the_update_used_as_unbuildable_really_breaks_the_library() -> None:
+    with pytest.raises(TypeError, match="type"):
+        Update.de_json(unbuildable_update(), None)
+
+
+def test_an_unbuildable_update_is_skipped_and_the_updates_around_it_are_delivered() -> None:
+    async def scenario(bot: ResilientBot, fake: FakeRequest, seen: Unparsed) -> None:
+        first = tg.private_update("/duraklat", sent_at_ms=NOW_MS)
+        bad = unbuildable_update()
+        last = tg.private_update("/saglik", sent_at_ms=NOW_MS)
+        batch = tg.ok([first, bad, last])
+        fake.script("getUpdates", batch, batch)
+
+        updates = await bot.get_updates(offset=0, timeout=10, allowed_updates=["message"])
+
+        assert [update.update_id for update in updates] == [first["update_id"], last["update_id"]]
+        assert [
+            update.effective_message.text for update in updates if update.effective_message
+        ] == [
+            "/duraklat",
+            "/saglik",
+        ]
+        assert seen.reports == [(1, False)]
+        assert seen.sleeps == []  # worked around: no reason to slow down
+        long_poll, salvage = fake.calls_to("getUpdates")
+        assert long_poll == {"offset": 0, "timeout": 10, "allowed_updates": ["message"]}
+        assert salvage == {
+            "offset": 0,
+            "limit": 100,
+            "timeout": 0,
+            "allowed_updates": ["message"],
+        }
+
+    with_bot(scenario)
+
+
+def test_a_skipped_update_at_the_end_of_a_batch_is_confirmed_by_the_next_poll() -> None:
+    # The updater confirms up to the last update it was GIVEN; the skipped one comes after.
+    async def scenario(bot: ResilientBot, fake: FakeRequest, seen: Unparsed) -> None:
+        good = tg.private_update("/durum", sent_at_ms=NOW_MS)
+        bad = unbuildable_update()
+        batch = tg.ok([good, bad])
+        down = tg.error_response(502, "Bad Gateway")
+        fake.script("getUpdates", batch, batch, down, tg.ok([]), tg.ok([]))
+
+        (update,) = await bot.get_updates(offset=0, timeout=10)
+        assert update.update_id == good["update_id"]
+        updater_offset = good["update_id"] + 1  # what the library's updater asks for next
+        after_bad = bad["update_id"] + 1
+
+        with pytest.raises(NetworkError):  # the confirming poll fails: nothing is confirmed
+            await bot.get_updates(offset=updater_offset, timeout=10)
+        await bot.get_updates(offset=updater_offset, timeout=10)  # so the next one confirms
+        await bot.get_updates(offset=updater_offset, timeout=10)  # done: the library's offset
+
+        assert [params["offset"] for params in fake.calls_to("getUpdates")[2:]] == [
+            after_bad,
+            after_bad,
+            updater_offset,
+        ]
+        assert seen.reports == [(1, False)]
+
+    with_bot(scenario)
+
+
+@pytest.mark.parametrize("offset", [None, 0])
+def test_the_first_poll_after_a_salvage_confirms_even_without_an_offset(
+    offset: int | None,
+) -> None:
+    async def scenario(bot: ResilientBot, fake: FakeRequest, seen: Unparsed) -> None:
+        bad = unbuildable_update()
+        fake.script("getUpdates", tg.ok([bad]), tg.ok([bad]), tg.ok([]))
+
+        assert await bot.get_updates(offset=offset, timeout=10) == ()
+        await bot.get_updates(offset=offset, timeout=10)
+
+        assert fake.calls_to("getUpdates")[2]["offset"] == bad["update_id"] + 1
+
+    with_bot(scenario)
+
+
+def test_an_offset_that_is_already_further_on_is_left_alone() -> None:
+    async def scenario(bot: ResilientBot, fake: FakeRequest, seen: Unparsed) -> None:
+        bad = unbuildable_update()
+        fake.script("getUpdates", tg.ok([bad]), tg.ok([bad]), tg.ok([]))
+        await bot.get_updates(offset=0, timeout=10)
+
+        await bot.get_updates(offset=bad["update_id"] + 6, timeout=10)
+
+        assert fake.calls_to("getUpdates")[2]["offset"] == bad["update_id"] + 6
+
+    with_bot(scenario)
+
+
+def test_a_callback_that_raises_does_not_break_polling() -> None:
+    async def main() -> None:
+        fake = FakeRequest()
+
+        def broken(_skipped: int, _stuck: bool) -> None:
+            raise RuntimeError(f"callback saw /kill {NEAR_PIN}")
+
+        bot = ResilientBot(BOT_TOKEN, on_unparsed=broken, request=fake, get_updates_request=fake)
+        good, bad = tg.private_update("/durum", sent_at_ms=NOW_MS), unbuildable_update()
+        fake.script("getUpdates", tg.ok([good, bad]), tg.ok([good, bad]))
+        with capture_logs() as logs:
+            (update,) = await bot.get_updates(offset=0, timeout=10)
+        assert update.update_id == good["update_id"]
+        assert [(entry["event"], entry["error_type"]) for entry in logs] == [
+            ("telegram_unparsed_callback_failed", "RuntimeError")
+        ]
+        assert NEAR_PIN not in repr(logs)
+
+    structlog.reset_defaults()
+    asyncio.run(main())
+
+
+def test_a_batch_of_nothing_but_unbuildable_updates_is_confirmed_too() -> None:
+    async def scenario(bot: ResilientBot, fake: FakeRequest, seen: Unparsed) -> None:
+        bad = [unbuildable_update(), unbuildable_update(STRANGER_TEXT)]
+        fake.script("getUpdates", tg.ok(bad), tg.ok(bad), tg.ok([]))
+
+        assert await bot.get_updates(offset=0, timeout=10) == ()
+        assert seen.reports == [(2, False)]
+        assert seen.sleeps == []
+
+        await bot.get_updates(offset=0, timeout=10)
+        assert fake.calls_to("getUpdates")[2]["offset"] == bad[1]["update_id"] + 1
+
+    with_bot(scenario)
+
+
+def test_nothing_of_an_unbuildable_batch_reaches_the_log() -> None:
+    stream = io.StringIO()
+
+    async def scenario(bot: ResilientBot, fake: FakeRequest, seen: Unparsed) -> None:
+        batch = tg.ok(
+            [
+                tg.private_update(f"/kill {PIN}", sent_at_ms=NOW_MS),
+                unbuildable_update(f"/kill {NEAR_PIN}"),
+                tg.other_user_update(STRANGER_TEXT, sent_at_ms=NOW_MS),
+            ]
+        )
+        fake.script("getUpdates", batch, batch)
+        configure_logging(secrets=[BOT_TOKEN, PIN], level="DEBUG", stream=stream)
+        try:
+            assert len(await bot.get_updates(offset=0, timeout=10)) == 2
+        finally:
+            reset_logging()
+
+    with_bot(scenario)
+
+    logged = stream.getvalue()
+    # The library does log its failure, but as a template: no update, no exception text.
+    assert '"event": "Error while parsing updates! Received data was %r"' in logged
+    for fragment in (PIN, NEAR_PIN, "/kill", STRANGER_TEXT, "yabancı", "missing 1 required"):
+        assert fragment not in logged
+
+
+@pytest.mark.parametrize(
+    ("salvaged", "report", "delivered"),
+    [
+        (tg.ok({"unexpected": "shape"}), (0, True), 0),  # not a list of updates
+        (tg.ok(True), (0, True), 0),
+        (tg.ok([{"message": "no update_id here"}]), (1, True), 0),  # cannot be confirmed
+        (tg.ok(["not even an object"]), (1, True), 0),
+        (tg.ok([]), (0, True), 0),  # the failure is gone but nothing explains it
+    ],
+)
+def test_a_failure_that_cannot_be_worked_around_slows_polling_down(
+    salvaged: tg.Response, report: tuple[int, bool], delivered: int
+) -> None:
+    async def scenario(bot: ResilientBot, fake: FakeRequest, seen: Unparsed) -> None:
+        fake.script("getUpdates", tg.ok([unbuildable_update()]), salvaged)
+
+        assert len(await bot.get_updates(offset=0, timeout=10)) == delivered
+
+        assert seen.reports == [report]
+        assert seen.sleeps == [1.0]
+
+    with_bot(scenario)
+
+
+def test_polling_backs_off_up_to_thirty_seconds_and_recovers() -> None:
+    async def scenario(bot: ResilientBot, fake: FakeRequest, seen: Unparsed) -> None:
+        for _ in range(7):
+            fake.script("getUpdates", tg.ok([unbuildable_update()]), tg.ok(True))
+            assert await bot.get_updates(timeout=10) == ()
+        assert seen.sleeps == [1.0, 2.0, 4.0, 8.0, 16.0, 30.0, 30.0]
+
+        fake.script("getUpdates", tg.ok([]))  # a poll that works
+        await bot.get_updates(timeout=10)
+        fake.script("getUpdates", tg.ok([unbuildable_update()]), tg.ok(True))
+        await bot.get_updates(timeout=10)
+        assert seen.sleeps[-1] == 1.0  # counted from the start again
+
+    with_bot(scenario)
+
+
+def test_a_poll_that_fails_although_every_update_builds_still_delivers_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def broken(*_args: object, **_kwargs: object) -> tuple[Update, ...]:
+        raise ValueError(f"library bug while handling /kill {NEAR_PIN}")
+
+    monkeypatch.setattr(ExtBot, "get_updates", broken)
+
+    async def scenario(bot: ResilientBot, fake: FakeRequest, seen: Unparsed) -> None:
+        update = tg.private_update("/duraklat", sent_at_ms=NOW_MS)
+        fake.script("getUpdates", tg.ok([update]))
+
+        (delivered,) = await bot.get_updates(offset=0, timeout=10)
+
+        assert delivered.update_id == update["update_id"]
+        assert seen.reports == [(0, True)]  # nothing skipped, but not explained either
+        assert seen.sleeps == [1.0]
+
+    with_bot(scenario)
+
+
+@pytest.mark.parametrize("failing_call", [1, 2], ids=["the_poll", "the_salvage_request"])
+def test_telegram_errors_are_left_to_the_updater(failing_call: int) -> None:
+    async def scenario(bot: ResilientBot, fake: FakeRequest, seen: Unparsed) -> None:
+        outcomes: list[tg.Scripted] = [tg.ok([unbuildable_update()])] * (failing_call - 1)
+        fake.script("getUpdates", *outcomes, tg.error_response(409, "Conflict"))
+
+        with pytest.raises(Conflict):
+            await bot.get_updates(offset=0, timeout=10)
+
+        assert len(fake.calls_to("getUpdates")) == failing_call
+        assert seen.reports == []
+        assert seen.sleeps == []
+
+    with_bot(scenario)
+
+
+def test_commands_around_an_unbuildable_update_are_handled_and_the_user_is_told() -> None:
+    # Before: the updater asked for the same batch for ever, no command was handled.
+    async def scenario(h: Harness) -> None:
+        pause = tg.private_update("/duraklat", sent_at_ms=NOW_MS)
+        bad = unbuildable_update()
+        mode = tg.private_update("/mod", sent_at_ms=NOW_MS)
+        batch = tg.ok([pause, bad, mode])
+        h.fake.script("getUpdates", batch, batch)
+        stop = asyncio.Event()
+        task = asyncio.create_task(h.service.run(stop))
+        try:
+            await until(lambda: len(h.fake.sent_texts()) == 3)
+            await until(lambda: len(h.fake.calls_to("getUpdates")) == 3)
+            await asyncio.sleep(0.05)  # a spinning loop would add calls here
+            polls = h.fake.calls_to("getUpdates")
+            assert len(polls) == 3  # the poll that failed, the salvage, one waiting long poll
+            assert polls[2]["offset"] == mode["update_id"] + 1
+            assert h.flag(StateKey.PAUSED) == "1"
+            texts = h.fake.sent_texts()
+            assert skipped_alarm(1) in texts
+            assert sum(text.startswith("Mod: signal") for text in texts) == 1
+            assert NEAR_PIN not in repr(texts)
+        finally:
+            stop.set()
+            h.service.wake_sender()
+            await asyncio.wait_for(task, 5)
+        assert h.fake.chat_ids() == {CHAT_ID}
+
+    drive(scenario, polling=True)
+
+
+def test_unbuildable_updates_raise_one_alarm_of_each_kind_per_hour() -> None:
+    async def scenario(h: Harness) -> None:
+        with capture_logs() as logs:
+            # Minutes 0, 15, 30 and 45: the first of each kind raises an alarm.
+            for report in [(2, False), (1, False), (0, True), (1, True)]:
+                h.service._on_unparsed_updates(*report)
+                await asyncio.gather(*h.service._background)
+                h.clock.now_ms += 15 * MINUTE_MS
+        assert h.outbox() == [
+            (OutboxKind.ALARM, OutboxStatus.PENDING, skipped_alarm(2)),
+            (OutboxKind.ALARM, OutboxStatus.PENDING, STUCK_ALARM),
+        ]
+        h.clock.now_ms += 30 * MINUTE_MS  # minute 90: an hour after the stuck alarm
+        h.service._on_unparsed_updates(3, True)
+        await asyncio.gather(*h.service._background)
+        assert [text for _kind, _status, text in h.outbox()][2:] == [skipped_alarm(3), STUCK_ALARM]
+        unparsed = [entry for entry in logs if entry["event"] == "telegram_updates_unparsed"]
+        assert [(entry["skipped"], entry["stuck"]) for entry in unparsed] == [
+            (2, False),
+            (1, False),
+            (0, True),
+            (1, True),
+        ]
 
     drive(scenario)
 

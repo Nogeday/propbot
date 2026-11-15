@@ -17,7 +17,11 @@ Secrets (CLAUDE.md invariant 6): python-telegram-bot's `InvalidToken` quotes the
 token, its `Bot` prints the token in its repr and httpx errors may carry the request URL.
 So exception TEXT never leaves this module: logs and `outbox.last_error` get class names
 only, and a rejected token becomes `TelegramFatalError` with a constant message and no
-cause. Update texts are never logged (they may hold the PIN).
+cause. Update texts are never logged (they may hold the PIN); the library's own records are
+stripped of every value by `propbot.logging_setup`.
+
+An update the library cannot build must not stop the commands: `ResilientBot` drops it,
+confirms it to Telegram and the user is told (see the class).
 
 Delivery doubt: when a send fails after the request may have left (read timeout, 5xx,
 connection lost), the row is marked `delivery_uncertain`. An entry signal that later
@@ -32,6 +36,7 @@ import datetime as dt
 import math
 import re
 import warnings
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
@@ -48,8 +53,8 @@ from telegram.error import (
     RetryAfter,
     TelegramError,
 )
-from telegram.ext import Application, ApplicationBuilder, ContextTypes, TypeHandler
-from telegram.request import BaseRequest
+from telegram.ext import Application, ApplicationBuilder, ContextTypes, ExtBot, TypeHandler
+from telegram.request import BaseRequest, HTTPXRequest
 from telegram.warnings import PTBDeprecationWarning
 
 from propbot.core.clock import Clock, ms_from_datetime
@@ -77,6 +82,10 @@ _MAX_BACKOFF_MS: Final = 30 * _SECOND_MS
 _MAX_BACKOFF_EXPONENT: Final = 5
 _LOG_THROTTLE_MS: Final = 10 * _SECOND_MS
 _CONFLICT_ALARM: Final = ("telegram_conflict", 60 * _MINUTE_MS)
+_SKIPPED_ALARM: Final = ("telegram_update_skipped", 60 * _MINUTE_MS)
+_STUCK_ALARM: Final = ("telegram_updates_stuck", 60 * _MINUTE_MS)
+# The Bot API returns at most this many updates per call.
+_UPDATES_PER_CALL: Final = 100
 _ALLOWED_UPDATES: Final = ("message",)
 # Name python-telegram-bot gives the task that long-polls (telegram/ext/_updater.py).
 _POLLING_TASK_NAME: Final = "Updater:start_polling:polling_task"
@@ -120,6 +129,11 @@ _CONFLICT_ALARM_TEXT: Final = (
     "PIN'i değiştir."
 )
 _DELETE_FAILED_TEXT: Final = "PIN içeren mesajı silemedim — elle sil ve PROPBOT_PIN'i değiştir."
+_STUCK_ALARM_TEXT: Final = (
+    "[ALARM] Telegram güncellemeleri okunamıyor: komutların (/duraklat ve /kill dahil) şu an "
+    "İŞLENMEYEBİLİR; sinyal mesajları gelmeye devam eder. Sinyalleri durdurman gerekirse "
+    "sunucuda: sudo systemctl stop propbot. Ayrıntı: journalctl -u propbot"
+)
 
 _log = structlog.get_logger(__name__)
 
@@ -164,6 +178,125 @@ class TelegramFatalError(Exception):
 
     The message is one of this module's constants: never library text, never the token.
     """
+
+
+def _skipped_alarm_text(skipped: int) -> str:
+    return (
+        f"[ALARM] Telegram'dan gelen {skipped} mesaj okunamadı ve atlandı (kütüphanenin "
+        "tanımadığı bir mesaj biçimi). Az önce bir komut yazdıysan ve yanıt gelmediyse "
+        "yeniden gönder."
+    )
+
+
+class ResilientBot(ExtBot[None]):
+    """A bot whose `get_updates` survives an update python-telegram-bot cannot build.
+
+    The library builds a whole batch at once and raises when one update does not fit its
+    model. Its updater then asks for the same batch again, at once and for as long as the
+    update stays on Telegram's side (up to a day; a restart changes nothing): no command
+    arrives any more, `/duraklat` and `/kill` included, and nothing says so.
+
+    Here such a batch is fetched once more as plain JSON and every update is built on its
+    own. The ones that fail are dropped and counted, and the next poll confirms the whole
+    batch to Telegram, so the commands around a bad update are still handled.
+    `on_unparsed(skipped, stuck)` is called each time; `stuck` means the failure could not
+    be worked around (polling then backs off instead of spinning). The callback must not
+    raise. Nothing about the updates themselves is kept or logged here.
+    """
+
+    __slots__ = ("_on_unparsed", "_resume_offset", "_sleep", "_stuck_polls")
+
+    def __init__(
+        self,
+        token: str,
+        *,
+        on_unparsed: Callable[[int, bool], None],
+        request: BaseRequest | None = None,
+        get_updates_request: BaseRequest | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        super().__init__(token, request=request, get_updates_request=get_updates_request)
+        # Names with a leading underscore can be set on the library's frozen objects.
+        self._on_unparsed = on_unparsed
+        self._sleep = sleep
+        # Offset for the next poll: one past the highest update of the last salvaged batch.
+        self._resume_offset: int | None = None
+        self._stuck_polls = 0
+
+    async def get_updates(
+        self, offset: int | None = None, *args: Any, **kwargs: Any
+    ) -> tuple[Update, ...]:
+        resume = self._resume_offset
+        if resume is not None and (offset is None or 0 <= offset < resume):
+            offset = resume
+        try:
+            updates = await super().get_updates(offset, *args, **kwargs)
+        except TelegramError:
+            raise  # network, token, conflict: the updater's own retry loop handles these
+        except Exception:
+            # Not chained and not inspected: the error's text may quote the update.
+            pass
+        else:
+            # That call confirmed everything salvaged before it. The override is not kept:
+            # from here on the updater's own offset is used again, as the library means it.
+            self._resume_offset = None
+            self._stuck_polls = 0
+            return updates
+        return await self._salvage(offset, kwargs.get("allowed_updates"))
+
+    async def _salvage(
+        self, offset: int | None, allowed_updates: Sequence[str] | None
+    ) -> tuple[Update, ...]:
+        """Build the pending updates one by one; skip, count and confirm the ones that fail."""
+        raw: object = None
+        try:
+            # The call `get_updates` itself makes, without the parsing. A short poll: the
+            # batch that failed is waiting.
+            raw = await self._post(
+                "getUpdates",
+                {
+                    "offset": offset,
+                    "limit": _UPDATES_PER_CALL,
+                    "timeout": 0,
+                    "allowed_updates": None if allowed_updates is None else list(allowed_updates),
+                },
+            )
+        except TelegramError:
+            raise
+        except Exception:
+            raw = None
+        built: list[Update] = []
+        skipped = 0
+        unidentified = 0
+        highest: int | None = None
+        for item in raw if isinstance(raw, list) else ():
+            update_id = item.get("update_id") if isinstance(item, dict) else None
+            if isinstance(update_id, int) and not isinstance(update_id, bool):
+                highest = update_id if highest is None else max(highest, update_id)
+            else:
+                unidentified += 1
+            try:
+                built.append(Update.de_json(item, self))
+            except Exception:
+                skipped += 1
+        if highest is not None:
+            self._resume_offset = highest + 1
+        # Worked around: we know which updates failed and the next poll confirms them all.
+        # Anything else (no list, an update without an id, a failure no single update
+        # explains) may repeat at once, so polling slows down instead of spinning.
+        stuck = not isinstance(raw, list) or skipped == 0 or unidentified > 0
+        try:
+            self._on_unparsed(skipped, stuck)
+        except Exception as error:
+            # An error leaving `get_updates` would make the updater poll again at once.
+            _log.error("telegram_unparsed_callback_failed", error_type=type(error).__name__)
+        if stuck:
+            delay_ms = _backoff_ms(self._stuck_polls)
+            self._stuck_polls += 1
+            await self._sleep(delay_ms / _SECOND_MS)
+        else:
+            self._stuck_polls = 0
+        return tuple(built)
 
 
 def code_entity_spans(text: str) -> list[tuple[int, int]]:
@@ -334,14 +467,20 @@ class TelegramService:
         self._validity_ms: Final = validity_seconds * _SECOND_MS
         self._polling: Final = polling
 
-        builder = ApplicationBuilder().token(bot_token).job_queue(None)
-        if request is not None:
-            builder = builder.request(request)
-        if get_updates_request is not None:
-            builder = builder.get_updates_request(get_updates_request)
         application: Application[Any, Any, Any, Any, Any, Any] | None = None
         with suppress(InvalidToken):
-            application = builder.build()
+            bot = ResilientBot(
+                bot_token,
+                on_unparsed=self._on_unparsed_updates,
+                request=request,
+                # One connection is all long polling needs (what ApplicationBuilder sets up).
+                get_updates_request=(
+                    HTTPXRequest(connection_pool_size=1)
+                    if get_updates_request is None
+                    else get_updates_request
+                ),
+            )
+            application = ApplicationBuilder().bot(bot).job_queue(None).build()
         if application is None:
             # Raised outside the handler: the new error must not chain to the library's.
             raise TelegramFatalError(_FATAL_TOKEN) from None
@@ -363,10 +502,11 @@ class TelegramService:
         self._polling_task: asyncio.Task[Any] | None = None
         self._stopping = False
 
-        self._conflict_alarm_ms: int | None = None
+        self._alarm_sent_ms: Final[dict[str, int]] = {}  # polling alarms, by code
         self._background: Final[set[asyncio.Task[None]]] = set()
         self._unauthorized_log: Final = _Throttle(_LOG_THROTTLE_MS)
         self._polling_log: Final = _Throttle(_LOG_THROTTLE_MS)
+        self._unparsed_log: Final = _Throttle(_LOG_THROTTLE_MS)
 
     # -- public ------------------------------------------------------------------------------
 
@@ -680,28 +820,51 @@ class TelegramService:
             )
         if not isinstance(error, Conflict):
             return  # python-telegram-bot retries with its own back-off
-        last = self._conflict_alarm_ms
-        if last is not None and 0 <= now_ms - last < _CONFLICT_ALARM[1]:
+        self._polling_alarm(_CONFLICT_ALARM, _CONFLICT_ALARM_TEXT, now_ms)
+
+    def _on_unparsed_updates(self, skipped: int, stuck: bool) -> None:
+        """Called by `ResilientBot` after a batch the library could not build; must not raise."""
+        now_ms = self._clock()
+        suppressed = self._unparsed_log.due(now_ms)
+        if suppressed is not None:
+            # Counts only: nothing of the updates themselves.
+            _log.error(
+                "telegram_updates_unparsed", skipped=skipped, stuck=stuck, suppressed=suppressed
+            )
+        if skipped:
+            self._polling_alarm(_SKIPPED_ALARM, _skipped_alarm_text(skipped), now_ms)
+        if stuck:
+            self._polling_alarm(_STUCK_ALARM, _STUCK_ALARM_TEXT, now_ms)
+
+    def _polling_alarm(self, kind: tuple[str, int], text: str, now_ms: int) -> None:
+        """Put a throttled alarm in the outbox from a callback of the polling task.
+
+        The throttle is checked in memory first (a callback can fire many times a second)
+        and again by the store (which also knows about alarms from before a restart).
+        """
+        code, throttle_ms = kind
+        last = self._alarm_sent_ms.get(code)
+        if last is not None and 0 <= now_ms - last < throttle_ms:
             return
-        self._conflict_alarm_ms = now_ms
-        task = asyncio.get_running_loop().create_task(self._conflict_alarm(now_ms))
+        self._alarm_sent_ms[code] = now_ms
+        task = asyncio.get_running_loop().create_task(self._enqueue_alarm(kind, text, now_ms))
         self._background.add(task)
         task.add_done_callback(self._background.discard)
 
-    async def _conflict_alarm(self, now_ms: int) -> None:
-        code, throttle_ms = _CONFLICT_ALARM
+    async def _enqueue_alarm(self, kind: tuple[str, int], text: str, now_ms: int) -> None:
+        code, throttle_ms = kind
 
         def enqueue() -> bool:
             with self._store.transaction() as tx:
                 return tx.enqueue_alarm(
-                    code=code, text=_CONFLICT_ALARM_TEXT, now_ms=now_ms, throttle_ms=throttle_ms
+                    code=code, text=text, now_ms=now_ms, throttle_ms=throttle_ms
                 )
 
         try:
             enqueued = await asyncio.to_thread(enqueue)
         except StoreError as error:
-            self._conflict_alarm_ms = None  # try again at the next conflict
-            _log.error("telegram_conflict_alarm_failed", error_type=type(error).__name__)
+            self._alarm_sent_ms.pop(code, None)  # try again at the next occurrence
+            _log.error("telegram_alarm_failed", code=code, error_type=type(error).__name__)
             return
         if enqueued:
             self.wake_sender()
