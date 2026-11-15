@@ -570,6 +570,8 @@ class TelegramService:
         try:
             while not stop.is_set():
                 did_something = await self.send_due()
+                if stop.is_set():
+                    break  # do not start polling for a service that is already stopping
                 await self._ensure_started()
                 self._check_polling()
                 self._raise_if_fatal()

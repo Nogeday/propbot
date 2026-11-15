@@ -15,6 +15,7 @@ import structlog
 from propbot.cli import main, run_config_check
 from propbot.logging_setup import reset_logging
 from propbot.signals.report import CSV_HEADER
+from propbot.signals.service import single_instance
 from propbot.store.db import NewSignal, Outcome, Store
 from support.paths import CONFIG_DIR, CONFIG_FIXTURES, FIXTURES
 
@@ -519,6 +520,23 @@ def test_a_service_that_crashes_is_reported_through_the_redacting_logger(
     assert '"error_type": "RuntimeError"' in captured.out
     assert "The token `***` was rejected" in captured.out
     assert BOT_TOKEN not in captured.out
+
+
+def test_a_second_serve_on_the_same_database_is_refused_before_it_touches_anything(
+    serve: Callable[[ServiceStandIn], int], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    started: list[object] = []
+    (tmp_path / "data").mkdir()
+
+    with single_instance(tmp_path / "data" / "propbot.db.lock"):  # the copy that is running
+        code = serve(lambda parts, **_kwargs: started.append(parts) or 0)
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert captured.err.startswith("HATA: bu veritabanıyla çalışan başka bir `propbot serve` var")
+    assert captured.out == ""  # no banner
+    assert started == []
+    assert not (tmp_path / "data" / "propbot.db").exists()
 
 
 def test_serve_gives_the_service_its_settings_and_a_loopback_address(

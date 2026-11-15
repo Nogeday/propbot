@@ -2337,6 +2337,24 @@ def test_run_polls_answers_sends_and_stops_cleanly() -> None:
     drive(scenario, polling=True)
 
 
+def test_a_service_that_is_already_stopping_does_not_start_polling() -> None:
+    # E.g. a copy that is shut down right after it started: polling would take updates away
+    # from the bot that keeps running (and give it a Conflict).
+    async def scenario(h: Harness) -> None:
+        stop = asyncio.Event()
+
+        async def stop_while_connecting(_call: tg.Call) -> None:
+            stop.set()
+
+        h.fake.script("getMe", stop_while_connecting)
+
+        await asyncio.wait_for(h.service.run(stop), 5)
+
+        assert [call.endpoint for call in h.fake.calls] == ["getMe"]
+
+    drive(scenario, polling=True)
+
+
 def test_run_without_polling_only_sends() -> None:
     async def scenario(h: Harness) -> None:
         stop = asyncio.Event()

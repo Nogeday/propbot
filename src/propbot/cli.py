@@ -8,6 +8,7 @@ import argparse
 import datetime as dt
 import sys
 from collections.abc import Sequence
+from contextlib import ExitStack
 from pathlib import Path
 from typing import TextIO
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -362,6 +363,7 @@ def _run_serve(args: argparse.Namespace, today: dt.date, out: TextIO) -> int:
         install_exception_logging,
         is_loopback_host,
         run_service,
+        single_instance,
     )
 
     if not is_loopback_host(args.host):
@@ -373,40 +375,47 @@ def _run_serve(args: argparse.Namespace, today: dt.date, out: TextIO) -> int:
     db_path = Path(args.db)
     db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
 
-    for line in _serve_banner(args, venue_name, venue, tv, today):
-        print(line, file=out)
-    out.flush()
-    configure_logging(
-        secrets=[
-            settings.telegram_bot_token.get_secret_value(),
-            settings.tv_webhook_token.get_secret_value(),
-            settings.propbot_pin.get_secret_value(),
-        ],
-        level=args.log_level,
-    )
-    install_exception_logging()
-    with Store(db_path) as store:
-        parts = ServiceParts(
-            settings=settings,
-            risk=config.risk,
-            venue=venue,
-            venue_name=venue_name,
-            tv=tv,
-            store=store,
+    # Before the banner and before the database is touched: a second copy changes nothing.
+    instance = ExitStack()
+    try:
+        instance.enter_context(single_instance(db_path.with_name(db_path.name + ".lock")))
+    except ServiceError as exc:
+        raise ServeError(str(exc)) from None
+    with instance:
+        for line in _serve_banner(args, venue_name, venue, tv, today):
+            print(line, file=out)
+        out.flush()
+        configure_logging(
+            secrets=[
+                settings.telegram_bot_token.get_secret_value(),
+                settings.tv_webhook_token.get_secret_value(),
+                settings.propbot_pin.get_secret_value(),
+            ],
+            level=args.log_level,
         )
-        try:
-            return run_service(parts, host=args.host, port=args.port)
-        except ServiceError as exc:
-            raise ServeError(str(exc)) from None
-        except Exception as exc:
-            # A raw traceback may quote a secret (python-telegram-bot's InvalidToken prints
-            # the bot token): everything goes through the redacting logger instead.
-            structlog.get_logger("propbot.cli").critical(
-                "service_fatal", error_type=type(exc).__name__, exc_info=exc
+        install_exception_logging()
+        with Store(db_path) as store:
+            parts = ServiceParts(
+                settings=settings,
+                risk=config.risk,
+                venue=venue,
+                venue_name=venue_name,
+                tv=tv,
+                store=store,
             )
-            raise ServeError(
-                "servis beklenmeyen bir hatayla durdu; ayrıntı günlükte (service_fatal)"
-            ) from None
+            try:
+                return run_service(parts, host=args.host, port=args.port)
+            except ServiceError as exc:
+                raise ServeError(str(exc)) from None
+            except Exception as exc:
+                # A raw traceback may quote a secret (python-telegram-bot's InvalidToken
+                # prints the bot token): everything goes through the redacting logger.
+                structlog.get_logger("propbot.cli").critical(
+                    "service_fatal", error_type=type(exc).__name__, exc_info=exc
+                )
+                raise ServeError(
+                    "servis beklenmeyen bir hatayla durdu; ayrıntı günlükte (service_fatal)"
+                ) from None
 
 
 def _pick_venue(config: LoadedConfig, name: str | None) -> tuple[str, VenueProfile]:

@@ -14,13 +14,16 @@ Nothing here can place, change or cancel an order: the mode is `signal` (ADR-000
 """
 
 import asyncio
+import fcntl
 import ipaddress
 import os
+import socket
 import sys
 import threading
-from collections.abc import AsyncIterator, Callable, Mapping
-from contextlib import asynccontextmanager, suppress
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import TracebackType
 from typing import Final
 
@@ -269,6 +272,51 @@ def uvicorn_config(app: ASGIApp, *, host: str, port: int) -> uvicorn.Config:
     )
 
 
+@contextmanager
+def single_instance(lock_path: Path) -> Iterator[None]:
+    """Hold an exclusive lock while the service runs: one `serve` per database.
+
+    A second copy (started by hand next to the systemd service, say) would send the head of
+    the same outbox, take the other one's Telegram updates and raise alarms about restarts
+    that never happened. The lock is released by the kernel when the process ends, however
+    it ends; the (empty) lock file stays.
+    """
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise ServiceError(
+                "bu veritabanıyla çalışan başka bir `propbot serve` var (kilit: "
+                f"{lock_path}). Önce onu durdur: sudo systemctl stop propbot"
+            ) from None
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def bind_listener(host: str, port: int) -> socket.socket:
+    """Bind the receiver's socket. A port that cannot be taken is an error before anything runs.
+
+    uvicorn would bind only after it has started the application (processor, alert-line
+    monitor, Telegram): a copy that cannot get its port would first act on the live
+    database and bot.
+    """
+    listener: socket.socket | None = None
+    try:
+        listener = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((host, port))
+    except OSError as error:
+        if listener is not None:
+            listener.close()
+        raise ServiceError(
+            f"{host}:{port} dinlenemiyor ({error.strerror or type(error).__name__}); port başka "
+            "bir süreçte olabilir (ikinci bir `propbot serve`?): ss -ltnp ile kontrol et"
+        ) from None
+    return listener
+
+
 def run_service(parts: ServiceParts, *, host: str, port: int) -> int:
     """Serve until a signal stops the process or a background task dies; return the exit code."""
     if not is_loopback_host(host):
@@ -276,6 +324,7 @@ def run_service(parts: ServiceParts, *, host: str, port: int) -> int:
             f"--host {host!r} reddedildi: alıcı yalnızca loopback adresini (127.0.0.1 ya da ::1) "
             "dinler; dışarıya TLS vekili ya da tünel açar (docs/runbook.md §7)"
         )
+    listener = bind_listener(host, port)
     servers: list[uvicorn.Server] = []
 
     def stop_server() -> None:
@@ -291,10 +340,13 @@ def run_service(parts: ServiceParts, *, host: str, port: int) -> int:
 
     async def serve() -> None:
         asyncio.get_running_loop().set_exception_handler(_log_loop_error)
-        await server.serve()
+        await server.serve(sockets=[listener])
 
-    with suppress(KeyboardInterrupt):
-        asyncio.run(serve())
+    try:
+        with suppress(KeyboardInterrupt):
+            asyncio.run(serve())
+    finally:
+        listener.close()  # uvicorn closes it on a clean shutdown; closing twice is harmless
     if service.failure is not None:
         _log.critical("service_exit", reason="task_died", task=service.failure)
         return EXIT_FAILED

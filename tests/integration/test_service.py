@@ -10,6 +10,7 @@ import asyncio
 import dataclasses
 import datetime as dt
 import json
+import socket
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -26,11 +27,14 @@ from propbot.risk import load_config_dir
 from propbot.settings import Settings
 from propbot.signals.receiver import WEBHOOK_PATH
 from propbot.signals.service import (
+    EXIT_FAILED,
     Service,
     ServiceError,
     ServiceParts,
+    bind_listener,
     is_loopback_host,
     run_service,
+    single_instance,
     uvicorn_config,
 )
 from propbot.signals.tvconfig import load_tv_alerts_config
@@ -433,7 +437,7 @@ def test_run_service_sends_event_loop_errors_through_the_logger(
 ) -> None:
     # asyncio's default handler writes the exception text through the "asyncio" stdlib logger;
     # here the error must arrive as our own event (type and redacted traceback).
-    async def serve_once(_server: uvicorn.Server) -> None:
+    async def serve_once(_server: uvicorn.Server, sockets: object = None) -> None:
         asyncio.get_running_loop().call_exception_handler(
             {
                 "message": "Task exception was never retrieved",
@@ -455,12 +459,113 @@ def test_run_service_sends_event_loop_errors_through_the_logger(
             telegram_updates_request=tg.FakeRequest(),
         )
         with capture_logs() as logs:
-            assert run_service(parts, host="127.0.0.1", port=8123) == 0
+            assert run_service(parts, host="127.0.0.1", port=0) == 0
 
     (entry,) = [entry for entry in logs if entry["event"] == "event_loop_error"]
     assert entry["detail"] == "Task exception was never retrieved"
     assert entry["error_type"] == "RuntimeError"
     assert isinstance(entry["exc_info"], RuntimeError)
+
+
+def service_parts(store: Store, fake: tg.FakeRequest) -> ServiceParts:
+    return ServiceParts(
+        settings=settings(),
+        risk=RISK,
+        venue=VENUE,
+        venue_name="sample_2step",
+        tv=TV,
+        store=store,
+        telegram_request=fake,
+        telegram_updates_request=fake,
+    )
+
+
+def test_a_dead_background_task_ends_the_real_service_with_a_failure_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ADR-0004: a bot that looks alive but forwards nothing must not keep running. The real
+    # server on a real loopback port; Telegram rejects the token, so the Telegram task dies.
+    monkeypatch.setenv("PTB_TIMEDELTA", "true")
+    fake = tg.FakeRequest()
+    fake.script("getMe", tg.error_response(401, "Unauthorized"))
+    outcome: list[object] = []
+    with Store(tmp_path / "propbot.db") as store:
+        parts = service_parts(store, fake)
+
+        def serve() -> None:
+            try:
+                outcome.append(run_service(parts, host="127.0.0.1", port=0))
+            except BaseException as error:
+                outcome.append(error)
+
+        thread = threading.Thread(target=serve, daemon=True)
+        with capture_logs() as logs:
+            thread.start()
+            thread.join(WAIT_SECONDS)
+        assert not thread.is_alive(), "the service kept running with a dead background task"
+
+    assert outcome == [EXIT_FAILED]
+    events = [entry["event"] for entry in logs]
+    assert "service_task_died" in events
+    assert events[-1] == "service_exit"
+    assert tg.BOT_TOKEN not in repr(logs)
+
+
+def test_a_port_that_is_taken_is_refused_before_anything_is_started(tmp_path: Path) -> None:
+    # A second copy started by mistake: it must not act on the live database or bot
+    # (uvicorn alone would start the application first and fail to bind afterwards).
+    fake = tg.FakeRequest()
+    with socket.socket() as taken, Store(tmp_path / "propbot.db") as store:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        port = taken.getsockname()[1]
+        # What the live process leaves: its last tick ten seconds ago, an entry on its way.
+        with store.transaction() as tx:
+            tx.set_state(StateKey.LAST_ALIVE_MS, str(NOW_MS - 10_000), NOW_MS)
+        signal_id, message_id = tg.forwarded_entry(
+            store, prop_day=dt.date(2026, 7, 21), now_ms=NOW_MS
+        )
+
+        with pytest.raises(ServiceError, match=f"127.0.0.1:{port} dinlenemiyor"):
+            run_service(service_parts(store, fake), host="127.0.0.1", port=port)
+
+        with store.transaction() as tx:
+            messages = tx.messages_created_between(0, 2**62)
+            last_alive = tx.get_state(StateKey.LAST_ALIVE_MS)
+    assert fake.calls == []
+    assert [(row.id, row.status, row.delivery_uncertain) for row in messages] == [
+        (message_id, OutboxStatus.PENDING, False)
+    ]
+    assert last_alive == str(NOW_MS - 10_000)
+    assert signal_id == 1
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1"])
+def test_the_listener_is_bound_to_the_loopback_address_asked_for(host: str) -> None:
+    try:
+        listener = bind_listener(host, 0)
+    except ServiceError:
+        pytest.skip(f"{host} is not available on this machine")
+    with listener:
+        bound_host, bound_port = listener.getsockname()[:2]
+        assert bound_host == host
+        assert bound_port > 0
+
+
+def test_one_database_runs_one_service(tmp_path: Path) -> None:
+    lock_path = tmp_path / "propbot.db.lock"
+
+    with single_instance(lock_path):
+        assert lock_path.stat().st_mode & 0o777 == 0o600
+        with (
+            pytest.raises(ServiceError, match="başka bir `propbot serve` var"),
+            single_instance(lock_path),
+        ):
+            raise AssertionError("a second instance got the lock")
+
+    # Released with the first instance; a lock file left behind does not block a start.
+    with single_instance(lock_path):
+        assert lock_path.exists()
 
 
 def test_uvicorn_leaves_the_peer_address_and_the_logging_alone() -> None:
