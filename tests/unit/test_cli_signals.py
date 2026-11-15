@@ -2,12 +2,18 @@
 
 import datetime as dt
 import io
+import logging
 import shutil
+import sys
+import threading
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
+import structlog
 
 from propbot.cli import main, run_config_check
+from propbot.logging_setup import reset_logging
 from propbot.signals.report import CSV_HEADER
 from propbot.store.db import NewSignal, Outcome, Store
 from support.paths import CONFIG_DIR, CONFIG_FIXTURES, FIXTURES
@@ -409,3 +415,126 @@ def test_serve_reports_malformed_secrets_without_echoing_them(
     assert "TELEGRAM_ALLOWED_CHAT_ID: pozitif olmalı" in captured.err
     for value in ("AAshort", "too-short-token", "12ab"):
         assert value not in captured.err + captured.out
+
+
+# --- serve: how the service is wired (CLAUDE.md invariant 6) ---------------------------------
+#
+# `run_service` is replaced, so nothing is served; everything `serve` does before it runs for
+# real: settings, the log redactor with its secret list, the exception hooks.
+
+BOT_TOKEN = "7000000001:AAF-fake_bot_key_0123456789abcdefghi"
+WEBHOOK_TOKEN = "wh_0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ_abc"
+PIN = "975310"
+THREE_SECRETS = (BOT_TOKEN, WEBHOOK_TOKEN, PIN)
+SERVE_ENVIRONMENT = {
+    "TELEGRAM_BOT_TOKEN": BOT_TOKEN,
+    "TELEGRAM_ALLOWED_CHAT_ID": "4242",
+    "TV_WEBHOOK_TOKEN": WEBHOOK_TOKEN,
+    "PROPBOT_PIN": PIN,
+}
+HOOKS = ((sys, "excepthook"), (threading, "excepthook"), (sys, "unraisablehook"))
+
+type ServiceStandIn = Callable[..., int]
+
+
+@pytest.fixture
+def serve(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> Iterator[Callable[[ServiceStandIn], int]]:
+    """Run `propbot serve` with made-up secrets and a stand-in for the service itself."""
+    for name, value in SERVE_ENVIRONMENT.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.chdir(tmp_path)
+    # `serve` replaces process-wide hooks and the root log handler: both come back afterwards.
+    for owner, name in HOOKS:
+        monkeypatch.setattr(owner, name, getattr(owner, name))
+
+    def run(service: ServiceStandIn) -> int:
+        monkeypatch.setattr("propbot.signals.service.run_service", service)
+        database = tmp_path / "data" / "propbot.db"
+        return main(
+            ["serve", "--config-dir", str(CONFIG_DIR), "--no-env-file", "--db", str(database)]
+        )
+
+    yield run
+    reset_logging()
+
+
+def test_serve_hands_every_secret_to_the_log_redactor(
+    serve: Callable[[ServiceStandIn], int], capsys: pytest.CaptureFixture[str]
+) -> None:
+    def service(_parts: object, *, host: str, port: int) -> int:
+        for secret in THREE_SECRETS:
+            logging.getLogger("uvicorn.error").warning("library saw %s", secret)
+            structlog.get_logger("propbot.test").warning("we_saw", value=secret)
+        return 0
+
+    assert serve(service) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out.count('"event": "library saw ***"') == len(THREE_SECRETS)
+    assert captured.out.count('"value": "***"') == len(THREE_SECRETS)
+    for secret in THREE_SECRETS:
+        assert secret not in captured.out + captured.err
+
+
+def test_serve_installs_the_exception_hooks_before_the_service_runs(
+    serve: Callable[[ServiceStandIn], int], capsys: pytest.CaptureFixture[str]
+) -> None:
+    seen: list[object] = []
+
+    def service(_parts: object, *, host: str, port: int) -> int:
+        seen.extend(getattr(owner, name) for owner, name in HOOKS)
+        error = RuntimeError(f"The token `{BOT_TOKEN}` was rejected by the server.")
+        sys.excepthook(RuntimeError, error, None)  # what an uncaught exception would do
+        return 0
+
+    assert serve(service) == 0
+
+    main_hook, thread_hook, unraisable_hook = seen
+    assert main_hook is not sys.__excepthook__
+    assert thread_hook is not threading.__excepthook__
+    assert unraisable_hook is not sys.__unraisablehook__
+    captured = capsys.readouterr()
+    assert '"event": "uncaught_exception"' in captured.out
+    assert "The token `***` was rejected" in captured.out
+    assert captured.err == ""
+    assert BOT_TOKEN not in captured.out
+
+
+def test_a_service_that_crashes_is_reported_through_the_redacting_logger(
+    serve: Callable[[ServiceStandIn], int], capsys: pytest.CaptureFixture[str]
+) -> None:
+    # python-telegram-bot's InvalidToken quotes the bot token; a raw traceback would print it.
+    def service(_parts: object, *, host: str, port: int) -> int:
+        raise RuntimeError(f"The token `{BOT_TOKEN}` was rejected by the server.")
+
+    assert serve(service) == 1
+
+    captured = capsys.readouterr()
+    assert captured.err == (
+        "HATA: servis beklenmeyen bir hatayla durdu; ayrıntı günlükte (service_fatal)\n"
+    )
+    assert '"event": "service_fatal"' in captured.out
+    assert '"error_type": "RuntimeError"' in captured.out
+    assert "The token `***` was rejected" in captured.out
+    assert BOT_TOKEN not in captured.out
+
+
+def test_serve_gives_the_service_its_settings_and_a_loopback_address(
+    serve: Callable[[ServiceStandIn], int], capsys: pytest.CaptureFixture[str]
+) -> None:
+    seen: dict[str, object] = {}
+
+    def service(parts: object, *, host: str, port: int) -> int:
+        seen.update(parts=parts, host=host, port=port)
+        return 0
+
+    assert serve(service) == 0
+
+    assert (seen["host"], seen["port"]) == ("127.0.0.1", 8000)
+    banner = capsys.readouterr().out
+    assert banner.startswith("PropBot sinyal botu · mod: signal (emir GÖNDERİLMEZ")
+    for secret in THREE_SECRETS:
+        assert secret not in repr(seen["parts"])
+        assert secret not in banner

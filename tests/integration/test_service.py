@@ -6,6 +6,7 @@ are replaced: Starlette's test client stands in for TradingView (no socket) and 
 offline `BaseRequest` fake stands in for Telegram's HTTP API.
 """
 
+import asyncio
 import dataclasses
 import datetime as dt
 import json
@@ -365,6 +366,41 @@ def test_run_service_refuses_to_listen_on_a_public_interface(tmp_path: Path) -> 
 
         with pytest.raises(ServiceError, match="yalnızca loopback"):
             run_service(parts, host="0.0.0.0", port=8000)
+
+
+def test_run_service_sends_event_loop_errors_through_the_logger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # asyncio's default handler writes the exception text through the "asyncio" stdlib logger;
+    # here the error must arrive as our own event (type and redacted traceback).
+    async def serve_once(_server: uvicorn.Server) -> None:
+        asyncio.get_running_loop().call_exception_handler(
+            {
+                "message": "Task exception was never retrieved",
+                "exception": RuntimeError("background task failed"),
+            }
+        )
+
+    monkeypatch.setattr(uvicorn.Server, "serve", serve_once)
+    monkeypatch.setenv("PTB_TIMEDELTA", "true")  # `run_service` sets it when it is missing
+    with Store(tmp_path / "propbot.db") as store:
+        parts = ServiceParts(
+            settings=settings(),
+            risk=RISK,
+            venue=VENUE,
+            venue_name="sample_2step",
+            tv=TV,
+            store=store,
+            telegram_request=tg.FakeRequest(),
+            telegram_updates_request=tg.FakeRequest(),
+        )
+        with capture_logs() as logs:
+            assert run_service(parts, host="127.0.0.1", port=8123) == 0
+
+    (entry,) = [entry for entry in logs if entry["event"] == "event_loop_error"]
+    assert entry["detail"] == "Task exception was never retrieved"
+    assert entry["error_type"] == "RuntimeError"
+    assert isinstance(entry["exc_info"], RuntimeError)
 
 
 def test_uvicorn_leaves_the_peer_address_and_the_logging_alone() -> None:
