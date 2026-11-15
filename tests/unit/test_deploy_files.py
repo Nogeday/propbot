@@ -59,6 +59,28 @@ def test_runbook_smoke_test_uses_a_configured_address() -> None:
     assert set(forwarded) <= tradingview_ips()
 
 
+def test_every_install_path_of_the_unit_is_in_the_block_the_user_is_told_to_adjust() -> None:
+    lines = (DEPLOY / "propbot.service").read_text(encoding="utf-8").splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("# --- adjust these"))
+    end = next(i for i in range(start + 1, len(lines)) if lines[i].startswith("# ---"))
+    block = dict(line.split("=", 1) for line in lines[start + 1 : end] if not line.startswith("#"))
+
+    # A path left with the default while the others were changed stops the service:
+    # a ReadWritePaths directory that does not exist is fatal under ProtectSystem=strict.
+    assert set(block) == {"User", "WorkingDirectory", "ExecStart", "ReadWritePaths"}
+    assert "four lines" in lines[start]
+    checkout = block["WorkingDirectory"]
+    assert block["ExecStart"].startswith(f"{checkout}/.venv/bin/propbot serve ")
+    assert block["ReadWritePaths"] == f"{checkout}/data"
+    outside = [
+        line
+        for index, line in enumerate(lines)
+        if checkout in line and not start < index < end and not line.startswith("#")
+    ]
+    assert outside == []
+    assert "ProtectSystem=strict" in lines
+
+
 def test_systemd_unit_runs_signal_mode_and_restarts() -> None:
     unit = (DEPLOY / "propbot.service").read_text(encoding="utf-8")
     exec_lines = [line for line in unit.splitlines() if line.startswith("ExecStart=")]

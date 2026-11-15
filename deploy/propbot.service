@@ -1,5 +1,5 @@
 # systemd unit for the PropBot signal bot (TradingView webhook -> Telegram; never places orders).
-# Install: docs/runbook.md §4. Copy to /etc/systemd/system/propbot.service and adjust the three
+# Install: docs/runbook.md §4. Copy to /etc/systemd/system/propbot.service and adjust the four
 # marked lines if the checkout is not in /opt/propbot or the service user is not "propbot".
 [Unit]
 Description=PropBot signal bot (TradingView webhook -> Telegram, no orders)
@@ -8,10 +8,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# --- adjust these three lines to your install ---
+# --- adjust these four lines to your install ---
 User=propbot
 WorkingDirectory=/opt/propbot
 ExecStart=/opt/propbot/.venv/bin/propbot serve --mode signal --venue ftmo_2step_100k
+# The only directory the service may write to (database and lock file): <checkout>/data.
+# It must exist, or the service cannot start (status=226/NAMESPACE).
+ReadWritePaths=/opt/propbot/data
 # ------------------------------------------------
 # A crashed background task makes the process exit non-zero; systemd brings it back.
 # The queue and the Telegram outbox live in data/propbot.db and are picked up again.
@@ -24,7 +27,6 @@ UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ReadWritePaths=/opt/propbot/data
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
