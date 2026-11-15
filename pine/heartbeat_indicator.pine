@@ -2,7 +2,7 @@
 // =====================================================================================
 //  PROPBOT HEARTBEAT — alert-line watchdog for the signal bot   (docs/SPEC.md §5.5)
 //  Add it to the SAME symbol the strategies run on (e.g. CME_MINI:MES1!), on a 1-MINUTE chart
-//  (any intraday chart up to 60 minutes works).
+//  (any chart whose bar length divides the interval works: 1, 2, 3, 5, 10, 15, 30 or 60 minutes).
 // -------------------------------------------------------------------------------------
 //  WHAT IT DOES
 //   Sends one small JSON message per interval (default: every full hour, New York time) through
@@ -21,12 +21,17 @@
 //   expiry date into config/tv_alerts.yaml (alerts → expires_on).
 // -------------------------------------------------------------------------------------
 //  NOTES
-//   • A beat is sent at the CLOSE of the bar that ends on an interval boundary: on a 1m chart the
-//     09:59 bar closes at 10:00 and sends the 10:00 beat. No bars (market closed, session break,
-//     holiday) means no beats — the receiver only watches the windows in config/tv_alerts.yaml.
+//   • A beat is sent at the CLOSE of the first bar that ends in a new interval: on a 1m chart the
+//     09:59 bar closes at 10:00 and sends the 10:00 beat (it is the bar BEFORE the hour that is
+//     highlighted). If that bar does not exist (a minute without a trade) the next bar sends the
+//     beat one bar late instead of skipping the hour. No bars at all (market closed, session
+//     break, holiday) means no beats — the receiver only watches the windows in
+//     config/tv_alerts.yaml.
 //   • The payload is schema v1 with action "heartbeat" and strategy_id "heartbeat"; it carries no
 //     prices. bar_time is the bar's OPEN time in epoch milliseconds, like every other alert.
-//   • Daily and higher charts are refused: the receiver cannot check their freshness.
+//   • Daily and higher charts are refused: the receiver cannot check their freshness. So are
+//     charts whose bar length does not divide the interval (45 minutes, say): their beats would
+//     come at uneven distances and trip the receiver's 75-minute silence alarm.
 //   • The token input is declared with display.none, so it is not printed in the status line
 //     next to the indicator's name (a chart screenshot would otherwise show it).
 // =====================================================================================
@@ -41,14 +46,18 @@ showBeats   = input.bool(true, "Highlight heartbeat bars", group = grpAlert)
 // ───────────────────────────── GUARDS ─────────────────────────────
 if not timeframe.isintraday or timeframe.in_seconds() > 3600
     runtime.error("PropBot Heartbeat: use an intraday chart of 60 minutes or less (1m recommended).")
+if (intervalMin * 60) % timeframe.in_seconds() != 0
+    runtime.error("PropBot Heartbeat: the chart's bar length must divide the heartbeat interval (use 1m).")
 
 // ───────────────────────────── BEAT ─────────────────────────────
-// Interval slot of the bar's open and of its close, in New York wall time. The bar that closes
-// on (or across) a boundary changes slot; the day roll (23:59 → 00:00) changes it too.
+// Interval slot in which the bar CLOSES, in New York wall time. The first bar that closes in
+// another slot than the bar before it sends the beat: normally the bar that ends on the
+// boundary, or the next existing bar when that one is missing. A new day is a new slot even if
+// the slot number repeats (no bars for exactly 24 hours).
 tz = "America/New_York"
-slotOpen  = math.floor((hour(time, tz) * 60 + minute(time, tz)) / intervalMin)
 slotClose = math.floor((hour(time_close, tz) * 60 + minute(time_close, tz)) / intervalMin)
-beat = slotOpen != slotClose
+dayClose  = dayofmonth(time_close, tz)
+beat = not na(slotClose[1]) and (slotClose != slotClose[1] or dayClose != dayClose[1])
 
 // ───────────────────────────── WEBHOOK ALERT (JSON, schema v1 — docs/SPEC.md §5.1) ─────────────────────────────
 if beat
