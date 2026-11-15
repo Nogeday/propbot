@@ -94,6 +94,15 @@ def config(
 CONFIG = config()
 UNKNOWN = config(NO_CONTRACT)  # what config/venues/*.yaml holds today: contract.* all null
 TOO_WIDE = config(INDEX_CFD | {"min_lot": 25.0})  # a 12.5 point stop allows 20 lots at most
+# A contract on which nothing is 1: one lot earns $5 per point (1.25 per 0.25 tick), whole
+# lots only. With INDEX_CFD a point value used upside down, or a tick VALUE taken for the
+# tick SIZE, would give the same numbers and no test would notice.
+FIVE_PER_POINT: dict[str, float | None] = {
+    "tick_size": 0.25,
+    "tick_value_per_lot": 1.25,
+    "min_lot": 1.0,
+    "lot_step": 1.0,
+}
 
 
 def new_signal(payload: Mapping[str, object], *, received_at_ms: int | None = None) -> NewSignal:
@@ -963,6 +972,66 @@ def test_stop_update_is_compared_with_the_last_one_that_was_sent() -> None:
     assert_silent(filtered, Outcome.FILTERED_MIN_STEP)
 
 
+@pytest.mark.parametrize(
+    ("offset", "expected"),
+    [
+        (-11.75, Outcome.FILTERED_MIN_STEP),  # 0.75 points = 3 ticks of 0.25
+        (-11.5, Outcome.FORWARDED),  # 1.00 point = 4 ticks = trail_min_step_ticks
+    ],
+)
+def test_the_minimum_trail_step_is_counted_in_ticks_of_the_tick_size(
+    offset: float, expected: Outcome
+) -> None:
+    # Invariant 8. The tick VALUE of this contract (1.25) is not its tick SIZE (0.25).
+    cfg = config(FIVE_PER_POINT)
+    assert cfg.risk.trail_min_step_ticks == 4
+    update = stored(trail(minute=18, offset=offset), signal_id=2)
+
+    decision = decide(update, follow_up(update), cfg)
+
+    assert decision.outcome is expected
+
+
+def test_size_nominal_and_risk_follow_the_value_of_a_point() -> None:
+    # 12.5 points x $5 = $62.50 per lot: 4 lots risk $250 and hold 4 x 5123.25 x $5.
+    decision = decide(ENTRY, at(budget_used=250.0), config(FIVE_PER_POINT))
+
+    assert decision.outcome is Outcome.FORWARDED
+    assert decision.budget_risk == 250.0
+    assert text_of(decision).splitlines()[4] == (
+        "Önerilen boyut: 4.00 lot (≈ $102465 nominal, 1.0× hesap) · risk ≈ $250 (%0.25) · "
+        "günlük bütçe $500/$1000 (bu sinyal dahil)"
+    )
+
+
+def test_a_size_rounded_down_counts_only_the_risk_it_really_takes() -> None:
+    # $2 per point (tick 0.5 / value 1.0), whole lots: 250 / (12.5 x 2) = 10 lots exactly;
+    # with lot_step 4 only 8 lots fit: $200 at risk, 8 x 5123.25 x $2 nominal.
+    cfg = config({"tick_size": 0.5, "tick_value_per_lot": 1.0, "min_lot": 4.0, "lot_step": 4.0})
+
+    decision = decide(ENTRY, at(), cfg)
+
+    assert decision.budget_risk == 200.0
+    assert text_of(decision).splitlines()[4] == (
+        "Önerilen boyut: 8.00 lot (≈ $81972 nominal, 0.8× hesap) · risk ≈ $200 (%0.2) · "
+        "günlük bütçe $200/$1000 (bu sinyal dahil)"
+    )
+
+
+def test_the_risk_of_the_minimum_lot_follows_the_value_of_a_point() -> None:
+    # 5 lots x 12.5 points x $5 = $312.50 > $250: not even the minimum lot fits.
+    cfg = config(FIVE_PER_POINT | {"min_lot": 5.0, "lot_step": 5.0})
+
+    decision = decide(ENTRY, at(), cfg)
+
+    assert decision.outcome is Outcome.SKIP_RISK_TOO_WIDE
+    assert decision.budget_risk is None
+    assert text_of(decision).splitlines()[1] == (
+        "Stop çok geniş (12.50 puan): en küçük lot (5.00) bile ≈ $312.50 risk taşır; işlem "
+        "başı sınır $250. Bu girişi ALMA."
+    )
+
+
 def test_stop_update_older_than_one_already_sent_is_superseded() -> None:
     newer = stored(trail(minute=18, offset=-3.5), signal_id=2, outcome=Outcome.FORWARDED)
     older = stored(trail(minute=10, offset=-1.0), signal_id=3)
@@ -1360,6 +1429,24 @@ def test_nothing_follows_a_forwarded_exit_until_the_next_entry(store: Store) -> 
     update = handle(store, trail(SHORT, minute=310, offset=3.5))
     assert (entry.outcome, update.outcome) == (Outcome.FORWARDED, Outcome.FORWARDED)
     assert f"(giriş id {entry.id})" in texts(store, update.id)[0]
+
+
+def test_a_new_entry_is_not_judged_against_the_previous_trades_stop_updates(store: Store) -> None:
+    # Trade A is trailed into profit and ends at its target on TradingView (no alert for
+    # that). Trade B starts an hour later with its own stop: A's last stop is not B's.
+    first = handle(store, alerts.ny_orb_fvg_entry())
+    trailed = handle(store, trail(minute=30, offset=2.0))
+    second = handle(store, entry_at(60))
+    update = handle(store, trail(minute=70, offset=-6.0))
+
+    outcomes = [row.outcome for row in (first, trailed, second, update)]
+    assert outcomes == [Outcome.FORWARDED] * 4
+    assert "kendi giriş fiyatına göre −12.50 → +2.00 puan" in texts(store, trailed.id)[0]
+    (text,) = texts(store, update.id)
+    # Against A's +2.00 this would be a "widening" and a [UYARI] with a stop above the market.
+    assert text.startswith("[STOP GÜNCELLE] ")
+    assert "kendi giriş fiyatına göre −12.50 → −6.00 puan" in text
+    assert f"(giriş id {second.id})" in text
 
 
 def test_follow_up_of_a_suppressed_entry_is_dropped(store: Store) -> None:
