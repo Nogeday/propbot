@@ -834,9 +834,34 @@ def test_an_unreadable_lock_fails_closed(world: World) -> None:
 
 
 def test_a_clock_jump_cannot_lock_pin_entry_for_longer_than_one_period(world: World) -> None:
+    # Locked while the server clock was a year ahead; then the clock was corrected.
     with world.store.transaction() as tx:
         tx.set_state(StateKey.PIN_LOCKED_UNTIL_MS, str(NOW_MS + 365 * 24 * 60 * MINUTE_MS), NOW_MS)
+
     assert "15 dk sonra yeniden dene" in world.text(f"/kill {PIN}")
+    assert world.flag(StateKey.PIN_LOCKED_UNTIL_MS) == str(NOW_MS + 15 * MINUTE_MS)
+
+    # The lock counts down from that first check and ends: it is not 15 minutes for ever.
+    world.clock.now_ms = NOW_MS + 5 * MINUTE_MS
+    assert "10 dk sonra yeniden dene" in world.text(f"/kill {PIN}")
+    assert world.flag(StateKey.KILLED) is None
+    world.clock.now_ms = NOW_MS + 15 * MINUTE_MS
+    assert world.text(f"/kill {PIN}").startswith("KILL etkin: ")
+    assert world.flag(StateKey.KILLED) == "1"
+    assert world.flag(StateKey.PIN_LOCKED_UNTIL_MS) is None
+
+
+def test_a_lock_that_is_due_within_one_period_is_left_as_stored(world: World) -> None:
+    locked_until = NOW_MS + 15 * MINUTE_MS
+    with world.store.transaction() as tx:
+        tx.set_state(StateKey.PIN_LOCKED_UNTIL_MS, str(locked_until), NOW_MS)
+
+    assert "15 dk sonra yeniden dene" in world.text(f"/kill {PIN}")
+    world.clock.now_ms = NOW_MS + 14 * MINUTE_MS + 59_000
+    assert "sonra yeniden dene" in world.text(f"/kill {PIN}")
+
+    assert world.flag(StateKey.PIN_LOCKED_UNTIL_MS) == str(locked_until)
+    assert world.flag(StateKey.KILLED) is None
 
 
 def test_unreadable_failure_counters_start_a_new_window(world: World) -> None:

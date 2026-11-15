@@ -416,8 +416,14 @@ class Commands:
             locked_until = now_ms + PIN_LOCK_MS  # unreadable lock: fail closed
             tx.set_state(StateKey.PIN_LOCKED_UNTIL_MS, str(locked_until), now_ms)
         if locked_until is not None:
-            # A clock that jumped must not lock PIN entry for longer than one lock period.
-            remaining_ms = min(locked_until, now_ms + PIN_LOCK_MS) - now_ms
+            if locked_until > now_ms + PIN_LOCK_MS:
+                # The clock was set back after the lock was written (a lock never lies more
+                # than one period ahead). Stored again from the clock as it is now: a value
+                # that is only compared, never rewritten, would keep PIN entry locked for
+                # as long as the clock had been wrong.
+                locked_until = now_ms + PIN_LOCK_MS
+                tx.set_state(StateKey.PIN_LOCKED_UNTIL_MS, str(locked_until), now_ms)
+            remaining_ms = locked_until - now_ms
             if remaining_ms > 0:
                 return _PinCheck(False, _pin_locked_text(remaining_ms))
             self._clear_pin_state(tx)
