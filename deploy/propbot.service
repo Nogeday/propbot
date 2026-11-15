@@ -30,7 +30,11 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
-# Uncomment only when the checkout is NOT under /home (the unit could not read it otherwise):
+# ProtectHome=true hides /home from the service. Uncomment it only when NEITHER the checkout
+# NOR the Python interpreter is under /home; check the interpreter with
+#   readlink -f /opt/propbot/.venv/bin/python
+# Where the system has no Python 3.12 (Ubuntu 22.04) uv installs one under
+# ~/.local/share/uv/python: with ProtectHome the service could not start (status=203/EXEC).
 # ProtectHome=true
 
 [Install]

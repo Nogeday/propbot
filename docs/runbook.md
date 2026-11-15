@@ -117,6 +117,10 @@ curl -s http://127.0.0.1:8000/healthz              # {"status":"ok"}
   kutusu `data/propbot.db`'de durur; kaldığı yerden devam eder. Süresi geçmiş giriş sinyalleri "BAYAT" ya da
   "İLETİLEMEDİ" olarak bildirilir, hiçbir zaman geçerli sinyal gibi iletilmez.
 - Günlükler journald'dedir; boyut sınırı için `/etc/systemd/journald.conf` → `SystemMaxUse=200M`.
+- **`User=` satırına `uv sync` çalıştıran kullanıcıyı yaz.** Sistemde Python 3.12 yoksa (Ubuntu 22.04) uv yorumlayıcıyı
+  o kullanıcının ev dizinine (`~/.local/share/uv/python`) kurar; `readlink -f .venv/bin/python` nereyi gösteriyorsa servis
+  kullanıcısı orayı okuyabilmelidir. Aynı nedenle birim dosyasındaki `ProtectHome=true` satırını yalnızca yorumlayıcı da
+  depo da `/home` dışında ise aç.
 - **Yeniden başlatmayı izlenen pencerelerin dışında yap** (varsayılan pencere: Pzt–Cum 03:00–16:00 New York):
   süreç kapalıyken gelen alert kaybolur.
 
@@ -325,6 +329,7 @@ Uçtan uca test TradingView'dan yapılır: heartbeat alarmını kur, saat başı
 | Belirti | Olası neden | Bakılacak yer |
 |---|---|---|
 | Bot başlamıyor: "chmod 600" | `.env` başkalarınca okunabilir | `chmod 600 .env` |
+| `systemctl status`: `status=203/EXEC`, servis 5 sn'de bir yeniden deniyor | servis kullanıcısı `.venv/bin/propbot`'u ya da yorumlayıcıyı çalıştıramıyor (yorumlayıcı başka kullanıcının ev dizininde; `ProtectHome=true` açık) | `readlink -f .venv/bin/python`; birimdeki `User=` ve `ProtectHome` (4. bölüm) |
 | Bot başlamıyor: config hatası | YAML'da tavan aşımı, bilinmeyen anahtar, yanlış tip | `uv run propbot config check` |
 | TradingView alert'i geliyor, Telegram'a düşmüyor | bot duraklatılmış / KILL; bütçe dolu; sinyal bayat | `/durum`, `/risk` |
 | Günlükte `ip_not_allowed` (403) | vekil başlığı yazmıyor; TradingView IP listesi değişmiş; ufw/Caddy listesi eski | 7. bölüm; `config/tv_alerts.yaml` |

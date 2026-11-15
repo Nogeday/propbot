@@ -70,3 +70,6 @@ def test_systemd_unit_runs_signal_mode_and_restarts() -> None:
     assert "Restart=always" in unit.splitlines()
     assert "UMask=0077" in unit.splitlines()
     assert "EnvironmentFile" not in unit  # secrets are read by the app from a 0600 .env
+    # Off by default: uv may have put the interpreter under the service user's home.
+    assert "# ProtectHome=true" in unit.splitlines()
+    assert "ProtectHome=true" not in unit.splitlines()
