@@ -203,6 +203,8 @@ def install_exception_logging() -> None:
 
     The interpreter's default hooks print exception text to stderr as it is, and library
     exceptions can carry a secret (python-telegram-bot's InvalidToken quotes the bot token).
+    Three hooks: the main thread, other threads, and exceptions nobody can catch (raised
+    in a finalizer, a weakref callback or a garbage-collected coroutine).
     """
 
     def log_uncaught(
@@ -223,8 +225,18 @@ def install_exception_logging() -> None:
             exc_info=args.exc_value,
         )
 
+    def log_unraisable(args: "sys.UnraisableHookArgs") -> None:
+        # Never raises: an error in this hook is printed by the interpreter's default one.
+        with suppress(Exception):
+            _log.error(
+                "unraisable_exception",
+                error_type=None if args.exc_type is None else args.exc_type.__name__,
+                exc_info=args.exc_value,
+            )
+
     sys.excepthook = log_uncaught
     threading.excepthook = log_thread
+    sys.unraisablehook = log_unraisable
 
 
 def _log_loop_error(_loop: asyncio.AbstractEventLoop, context: dict[str, object]) -> None:
