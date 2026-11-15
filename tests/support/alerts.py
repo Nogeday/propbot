@@ -340,15 +340,17 @@ def mtf_trend_cont_entry(side: str = LONG, **overrides: object) -> dict[str, obj
 
 
 def mtf_trend_cont_stop_update(
-    side: str = LONG, *, tp1_filled: bool = False, **overrides: object
+    side: str = LONG, *, trail_points: float = 0.0, **overrides: object
 ) -> dict[str, object]:
-    """Before TP1: the stop re-priced from the real fill, tp = TP1.
+    """The runner's stop after TP1; tp is always null.
 
-    After TP1 (`tp1_filled`): the runner's stop moves to breakeven, so stop == est_entry,
-    stop_dist_pts is 0 and tp is null.
+    The script alerts only when the stop CHANGES, and before TP1 it never does (the initial
+    stop is finalised on the fill bar before the "previous stop" is taken). So the first
+    update is the move to breakeven (stop == est_entry, stop_dist_pts 0); later ones trail
+    the runner on the profit side (`trail_points` beyond the fill).
     """
     fill, tp1_rr = 5140.5, 1.5
-    stop, tp1 = _levels(side, fill, 10.5, tp1_rr * 10.5)
+    stop = fill + trail_points if side == LONG else fill - trail_points
     text = pine_alert_text(
         strategy_id="mtf_trend_cont",
         action="stop_update",
@@ -356,11 +358,11 @@ def mtf_trend_cont_stop_update(
         setup="MTF_PULLBACK",
         order_type="market",
         est_entry=fill,
-        stop=fill if tp1_filled else stop,
-        tp=None if tp1_filled else tp1,
+        stop=stop,
+        tp=None,
         rr=input_rr(tp1_rr),
         tf="5",
-        bar_time=BAR_TIME_MS + (45 if tp1_filled else 5) * 60_000,
+        bar_time=BAR_TIME_MS + (75 if trail_points else 45) * 60_000,
     )
     return _parsed(text, overrides)
 
@@ -430,9 +432,9 @@ def pine_payloads() -> dict[str, dict[str, object]]:
             ),
             f"mr_bb_kc_rsi2/exit/{side}": mr_bb_kc_rsi2_exit(side),
             f"mtf_trend_cont/entry/{side}": mtf_trend_cont_entry(side),
-            f"mtf_trend_cont/stop_update/{side}/before_tp1": mtf_trend_cont_stop_update(side),
-            f"mtf_trend_cont/stop_update/{side}/breakeven": mtf_trend_cont_stop_update(
-                side, tp1_filled=True
+            f"mtf_trend_cont/stop_update/{side}/breakeven": mtf_trend_cont_stop_update(side),
+            f"mtf_trend_cont/stop_update/{side}/trail": mtf_trend_cont_stop_update(
+                side, trail_points=5.5
             ),
             f"mtf_trend_cont/exit/{side}": mtf_trend_cont_exit(side),
         }

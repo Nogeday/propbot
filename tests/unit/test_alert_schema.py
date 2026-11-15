@@ -293,13 +293,25 @@ def test_forced_exit_has_a_reference_price_and_no_levels(builder: Builder) -> No
 
 
 def test_breakeven_stop_update_has_stop_at_entry_and_no_target() -> None:
-    alert = validate_alert(untokened(alerts.mtf_trend_cont_stop_update("long", tp1_filled=True)))
+    alert = validate_alert(untokened(alerts.mtf_trend_cont_stop_update("long")))
 
     assert alert.action is Action.STOP_UPDATE
     assert alert.stop == alert.est_entry
     assert alert.stop_dist_pts == 0.0
     assert alert.stop_distance == 0.0
     assert alert.tp is None
+
+
+@pytest.mark.parametrize(("side", "stop"), [("long", 5146.0), ("short", 5135.0)])
+def test_runner_trail_update_has_its_stop_on_the_profit_side_and_no_target(
+    side: str, stop: float
+) -> None:
+    payload = alerts.mtf_trend_cont_stop_update(side, trail_points=5.5)
+
+    alert = validate_alert(untokened(payload))
+
+    assert (alert.est_entry, alert.stop, alert.tp) == (5140.5, stop, None)
+    assert alert.stop_dist_pts == 5.5
 
 
 @pytest.mark.parametrize("side", ["long", "short"])

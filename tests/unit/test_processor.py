@@ -1090,7 +1090,7 @@ def test_dead_trade_wins_over_the_side_check() -> None:
 def test_breakeven_move_without_a_target_is_forwarded(side: str) -> None:
     # MTF after TP1: stop == est_entry, tp null.
     entry = stored(alerts.mtf_trend_cont_entry(side), outcome=Outcome.FORWARDED)
-    update = stored(alerts.mtf_trend_cont_stop_update(side, tp1_filled=True), signal_id=2)
+    update = stored(alerts.mtf_trend_cont_stop_update(side), signal_id=2)
     assert update.stop == update.est_entry
     assert update.tp is None
 
@@ -1592,8 +1592,8 @@ def _sequences() -> list[list[str]]:
             [f"mr_bb_kc_rsi2/entry/{side}/target_one_tick"],
             [
                 f"mtf_trend_cont/entry/{side}",
-                f"mtf_trend_cont/stop_update/{side}/before_tp1",
                 f"mtf_trend_cont/stop_update/{side}/breakeven",
+                f"mtf_trend_cont/stop_update/{side}/trail",
                 f"mtf_trend_cont/exit/{side}",
             ],
         ]
@@ -1604,13 +1604,9 @@ SEQUENCES = _sequences()
 
 
 def expected_outcome(shape: str) -> Outcome:
-    if shape == "heartbeat/heartbeat":
-        return Outcome.HEARTBEAT
-    if shape.endswith("/before_tp1"):
-        # The stop re-priced from the real fill: entry alert 10.00 from the signal close,
-        # update 10.50 from TradingView's fill. In the trader's frame that is wider.
-        return Outcome.REJECTED_WIDEN
-    return Outcome.FORWARDED
+    # Every real sequence is forwarded message by message: no script sends a stop update
+    # that widens the stop in the trader's frame when its trade runs as designed.
+    return Outcome.HEARTBEAT if shape == "heartbeat/heartbeat" else Outcome.FORWARDED
 
 
 def test_the_sequences_cover_every_real_payload_shape() -> None:
@@ -1641,6 +1637,28 @@ def test_every_pine_payload_shape_is_processed(
         entries = tx.budget_entries(dt.date(2026, 7, 21))
     assert len(entries) == (0 if sequence == ["heartbeat/heartbeat"] else 1)
     assert all(row.kind is OutboxKind.SIGNAL for row in outbox(store))
+
+
+@pytest.mark.parametrize(
+    ("side", "breakeven", "trail"),
+    [
+        (LONG, "−10.00 → +0.00 puan", "+0.00 → +5.50 puan"),
+        (SHORT, "+10.00 → +0.00 puan", "+0.00 → −5.50 puan"),
+    ],
+)
+def test_the_mtf_runner_is_followed_from_breakeven_to_its_trail(
+    store: Store, side: str, breakeven: str, trail: str
+) -> None:
+    payloads = alerts.pine_payloads()
+    handle(store, payloads[f"mtf_trend_cont/entry/{side}"])
+
+    first = handle(store, payloads[f"mtf_trend_cont/stop_update/{side}/breakeven"])
+    second = handle(store, payloads[f"mtf_trend_cont/stop_update/{side}/trail"])
+
+    assert f"kendi giriş fiyatına göre {breakeven}" in texts(store, first.id)[0]
+    assert "(başabaş)" in texts(store, first.id)[0]
+    assert f"kendi giriş fiyatına göre {trail}" in texts(store, second.id)[0]
+    assert "(kâr kilitli)" in texts(store, second.id)[0]
 
 
 # --- process_one: prop day ----------------------------------------------------------------
