@@ -961,7 +961,22 @@ def test_the_pin_never_appears_in_a_reply_or_a_log_line(world: World) -> None:
 def test_what_the_bot_shows_never_depends_on_a_match_with_the_pin(make: type[World]) -> None:
     # Otherwise digit strings could be tested against the PIN through the bot's visible
     # behaviour (delete or not, which reply) without touching the failure counter.
-    for template in ("{}", "x{}y", "/atladim {}", "/aldim {}", "/durum {}", "/mod {}", "/risk\n{}"):
+    templates = (
+        "{}",
+        "x{}y",
+        "/atladim {}",
+        "/aldim {}",
+        "/durum {}",
+        "/mod {}",
+        "/risk\n{}",
+        # An id is printed back as a number: zeros in front of it must not get it past the
+        # scrubbing of the reply, nor may digits around it.
+        "/atladim 0{}",
+        "/aldim 00{}",
+        "/atladim 555{}9990",
+        "/aldim 1{}",
+    )
+    for template in templates:
         with_pin = make().say(template.format(PIN))
         with_guess = make().say(template.format(WRONG_PIN))
 
@@ -971,12 +986,62 @@ def test_what_the_bot_shows_never_depends_on_a_match_with_the_pin(make: type[Wor
         assert WRONG_PIN not in with_guess.text
 
 
-@settings(max_examples=150, deadline=None)
+@pytest.mark.parametrize("command", ["/atladim", "/aldim"])
+@pytest.mark.parametrize("number", ["0", "00", "07", "0246813", "000000000000001"])
+def test_an_id_with_a_leading_zero_is_refused_without_being_repeated(
+    world: World, command: str, number: str
+) -> None:
+    # The id of the entry below is 1: "01" must not release it, "0" is no id at all.
+    signal_id = world.entry()
+    usage = world.text(f"{command} abc")
+
+    reply = world.say(f"{command} {number}")
+
+    assert usage.startswith(f"Kullanım: {command} ")
+    assert reply.text == usage
+    assert world.counted(signal_id) == (True, None)
+
+
+@settings(max_examples=200, deadline=None)
+@given(
+    command=st.sampled_from(["atladim", "aldim", "durum", "risk", "mod", "pnl", "saglik", "x"]),
+    zeros=st.sampled_from(["", "0", "00", "000"]),
+    number=st.from_regex(r"[1-9][0-9]{5,11}", fullmatch=True),
+    tail=st.sampled_from(["", "9", "0042"]),
+)
+def test_no_long_number_of_the_message_comes_back_in_the_reply(
+    command: str, zeros: str, number: str, tail: str
+) -> None:
+    # Whatever is done with an argument (parsed as an id, printed as a number): six or more
+    # digits typed by the user may be a PIN, and the bot's reply stays in the chat.
+    world = World()
+    try:
+        reply = world.say(f"/{command} {zeros}{number}{tail}")
+    finally:
+        world.store.close()
+
+    assert reply.delete_request is True
+    assert number not in reply.text
+
+
+OTHER_PIN = "975310642"
+
+
+@settings(max_examples=250, deadline=None)
 @given(
     text=st.one_of(
         st.text(alphabet=st.sampled_from("0123456789 /abdeiklmnrstuv@\n"), max_size=40),
         st.from_regex(r"/(durum|risk|pnl|mod|saglik|atladim|aldim|duraklat|yardim)( [0-9]{1,12})?"),
         st.from_regex(r"[a-z ]{0,6}[0-9]{6,12}[a-z ]{0,6}"),
+        # One of the two PINs itself, where an id is expected, with digits around it: a
+        # random number would practically never hit a PIN.
+        st.builds(
+            "/{} {}{}{}".format,
+            st.sampled_from(["atladim", "aldim", "durum", "mod", "pnl"]),
+            st.sampled_from(["", "0", "00", "5", "55"]),
+            st.sampled_from([PIN, OTHER_PIN]),
+            st.sampled_from(["", "9", "9990"]),
+        ),
     )
 )
 def test_replies_are_the_same_for_any_two_pins_outside_the_two_pin_commands(text: str) -> None:
@@ -985,7 +1050,7 @@ def test_replies_are_the_same_for_any_two_pins_outside_the_two_pin_commands(text
     # wrong one is counted towards the lock.
     assume(not first_word.startswith(("/kill", "/devam")))
     replies = []
-    for pin in (PIN, "975310642"):
+    for pin in (PIN, OTHER_PIN):
         world = World()
         try:
             commands = Commands(dataclasses.replace(world.deps, pin=pin))

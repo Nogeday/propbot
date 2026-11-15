@@ -11,8 +11,10 @@ only explain why the other modes are locked (CLAUDE.md invariant 1).
 PIN hygiene (CLAUDE.md invariant 6):
 - whether the user's message must be deleted is decided first, from the raw text alone,
   and every answer keeps that decision, refusals and internal errors included;
-- a reply never repeats an argument, and the PIN is cut out of every reply as a last
-  line of defence (`/atladim <PIN>` would otherwise print it back as an id);
+- a reply never repeats a number of six or more digits from the user's message
+  (`/atladim <PIN>` would otherwise print it back as an id). That is decided by shape:
+  outside `/kill <PIN>` and `/devam <PIN>` nothing is ever compared with the PIN, so no
+  reply can tell a right guess from a wrong one without counting towards the lock;
 - nothing but the command name is logged.
 
 Age rule: commands typed while the bot was down are processed after a restart. The ones
@@ -91,7 +93,9 @@ _LATENCY_LOOKBACK_MS: Final = 7 * 24 * 60 * _MINUTE_MS
 _CLOCK_BEHIND_TOLERANCE_MS: Final = 2 * _SECOND_MS
 
 _PIN_FORMAT: Final = re.compile(r"[0-9]{6,12}")
-_ID_FORMAT: Final = re.compile(r"[0-9]{1,15}")
+# No leading zero: a reply prints an id as a number, and "0246813" printed as 246813 would
+# no longer be the text the user typed (see `_scrub_echoed_numbers`). Ids start at 1.
+_ID_FORMAT: Final = re.compile(r"[1-9][0-9]{0,14}")
 _REDACTED: Final = "***"
 # A run of digits long enough to be a PIN (PROPBOT_PIN is 6 to 12 digits).
 _PIN_LIKE: Final = re.compile(r"[0-9]{6,}")
@@ -316,7 +320,6 @@ class Commands:
 
     def handle(self, text: str, *, sent_at_ms: int) -> Reply:
         """Answer one message. Never raises: a failure becomes a reply and changes nothing."""
-        pin = self._deps.pin
         # First, from the raw text alone: nothing below may lose this decision.
         delete_request = _must_delete(text)
         name, args = _split_command(text)
@@ -330,10 +333,10 @@ class Commands:
                 f"[HATA] Komut işlenemedi ({type(error).__name__}); hiçbir şey değiştirilmedi. "
                 "/saglik ile kontrol et; sürerse log'a bak."
             )
-        # No long number of the user's own text is repeated back (it may be a PIN or a
-        # guess at one); the exact-match replacement is only a last line of defence.
-        body = _scrub_echoed_numbers(body, text).replace(pin, _REDACTED)
-        return Reply(text=body, delete_request=delete_request)
+        # No long number of the user's own text is repeated back: it may be the PIN or a
+        # guess at one. By shape only, never by comparing with the PIN: a reply that starred
+        # out exactly the PIN would say which guess was right.
+        return Reply(text=_scrub_echoed_numbers(body, text), delete_request=delete_request)
 
     def _dispatch(
         self, name: str | None, args: tuple[str, ...], sent_at_ms: int, *, pin_like: bool
