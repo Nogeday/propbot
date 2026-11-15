@@ -129,6 +129,9 @@ class Service:
     async def _lifespan(self, _app: FastAPI) -> AsyncIterator[None]:
         parts = self._parts
         stop = asyncio.Event()
+        # Before the processor can enqueue anything: only what the previous process left
+        # pending may have been delivered without being marked.
+        await asyncio.to_thread(self.telegram.flag_leftover_entries)
         tasks: dict[str, asyncio.Task[None]] = {
             "processor": asyncio.create_task(
                 run_processor(

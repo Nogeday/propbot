@@ -510,6 +510,24 @@ class TelegramService:
 
     # -- public ------------------------------------------------------------------------------
 
+    def flag_leftover_entries(self) -> int:
+        """Mark the pending entry messages of a PREVIOUS process as possibly delivered.
+
+        That process may have died between a successful send and `mark_message_sent`. Call
+        this before anything of the current process can enqueue a message (the service does
+        so before it starts the processor): a row enqueued later was provably never sent,
+        and flagging it would keep its risk counted and ask the user about a signal that
+        never left. A sender used on its own flags in its first step instead.
+        """
+        if self._flagged:
+            return 0
+        with self._store.transaction() as tx:
+            flagged = tx.flag_pending_deadlines_uncertain()
+        self._flagged = True
+        if flagged:
+            _log.warning("telegram_pending_entries_uncertain", count=flagged)
+        return flagged
+
     def wake_sender(self) -> None:
         """A row was put in the outbox: make the sender try now instead of at its next poll."""
         self._force = True

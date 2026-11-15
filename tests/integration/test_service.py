@@ -10,6 +10,7 @@ import asyncio
 import dataclasses
 import datetime as dt
 import json
+import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -33,7 +34,15 @@ from propbot.signals.service import (
     uvicorn_config,
 )
 from propbot.signals.tvconfig import load_tv_alerts_config
-from propbot.store.db import OutboxStatus, Outcome, SignalStatus, StateKey, Store
+from propbot.store.db import (
+    OutboxKind,
+    OutboxRow,
+    OutboxStatus,
+    Outcome,
+    SignalStatus,
+    StateKey,
+    Store,
+)
 from support import alerts, tg
 from support.paths import CONFIG_FIXTURES, FIXTURES
 
@@ -231,6 +240,57 @@ def test_signals_queued_before_a_restart_are_processed_on_start(
         bot.wait_for_text("[SİNYAL]")
         with bot.store.transaction() as tx:
             assert tx.queue_depth() == 0
+
+
+def signal_message(bot: Running, signal_id: int) -> OutboxRow:
+    with bot.store.transaction() as tx:
+        (row,) = (row for row in tx.messages_for_signal(signal_id) if row.kind is OutboxKind.SIGNAL)
+    return row
+
+
+def test_an_entry_of_this_process_is_never_flagged_as_possibly_delivered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Telegram is slow at start-up: the first getMe is still open when the processor
+    # forwards a fresh entry. No send of that message was attempted by anybody, so it must
+    # not be marked "may have been delivered" (its risk would stay counted for nothing).
+    fake = tg.FakeRequest()
+    connected = threading.Event()
+
+    async def slow_get_me(_call: tg.Call) -> None:
+        while not connected.is_set():
+            await asyncio.sleep(0.01)
+
+    fake.script("getMe", slow_get_me)
+    with running(tmp_path, monkeypatch, telegram=fake) as bot:
+        assert bot.post(alerts.alert_bytes()) == {"status": "queued"}
+        bot.wait_for_outcome(1, Outcome.FORWARDED)
+        assert bot.texts() == []  # still connecting
+        assert signal_message(bot, 1).delivery_uncertain is False
+
+        connected.set()
+        bot.wait_for_text("[SİNYAL]")
+
+        wait_until(lambda: signal_message(bot, 1).status is OutboxStatus.SENT, "message sent")
+        assert signal_message(bot, 1).delivery_uncertain is False
+
+
+def test_an_entry_left_pending_by_the_previous_process_is_flagged_at_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The previous process may have died between a successful send and recording it.
+    def leave_a_pending_entry(store: Store) -> None:
+        tg.forwarded_entry(store, prop_day=dt.date(2026, 7, 21), now_ms=NOW_MS)
+
+    with (
+        capture_logs() as logs,
+        running(tmp_path, monkeypatch, prepare=leave_a_pending_entry) as bot,
+    ):
+        bot.wait_for_text("[SİNYAL] id 1")
+        assert signal_message(bot, 1).delivery_uncertain is True
+
+    flagged = [entry for entry in logs if entry["event"] == "telegram_pending_entries_uncertain"]
+    assert [entry["count"] for entry in flagged] == [1]
 
 
 def test_a_late_entry_is_reported_as_stale_and_not_counted(
