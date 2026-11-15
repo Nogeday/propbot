@@ -1,8 +1,13 @@
-"""Signal report: what arrived, what was forwarded and how late (SPEC §5.7 evidence).
+"""Signal report: what arrived, what reached Telegram and how late (SPEC §5.7 evidence).
 
 Read-only view of the store for `propbot signals report`. The numbers are meant to be
 compared with TradingView's own Alert Log: every alert in that log must appear here
 (no missed signal), and the idempotency key guarantees none appears twice.
+
+Two different facts are kept apart: the processor's decision (`outcome`: "forwarded" means
+a message was written) and the delivery of that message (the outbox row: sent, still
+pending, expired, failed). A signal counts as delivered only when its message was sent,
+and the acceptance line fails when any message of the period was not.
 """
 
 import csv
@@ -69,7 +74,22 @@ CSV_HEADER: Final = (
     "outcome",
     "receive_latency_ms",
     "telegram_latency_ms",
+    "delivery",
 )
+# Delivery of the message(s) written for one signal, worst case first.
+_DELIVERY_ORDER: Final = (
+    OutboxStatus.FAILED,
+    OutboxStatus.EXPIRED,
+    OutboxStatus.PENDING,
+    OutboxStatus.SENT,
+)
+_DELIVERY_LABELS: Final[dict[OutboxStatus, str]] = {
+    OutboxStatus.SENT: "gönderildi",
+    OutboxStatus.EXPIRED: "süresi doldu",
+    OutboxStatus.FAILED: "başarısız",
+    OutboxStatus.PENDING: "bekliyor",
+}
+_UNDELIVERED: Final = frozenset({OutboxStatus.EXPIRED, OutboxStatus.FAILED})
 
 
 class ReportError(Exception):
@@ -107,17 +127,31 @@ class _Data:
     samples: list[LatencySample]
     messages: list[OutboxRow]
     counts: dict[OutboxStatus, int]
+    delivery: dict[int, OutboxStatus]
+    """Per signal id: the worst status among the messages written for it (absent: none)."""
+
+
+def _worst(statuses: Sequence[OutboxStatus]) -> OutboxStatus | None:
+    return next((status for status in _DELIVERY_ORDER if status in statuses), None)
 
 
 def _read(store: Store, start_ms: int, end_ms: int) -> _Data:
     with store.transaction() as tx:
         signals = tx.signals_received_between(start_ms, end_ms)
         samples = [s for s in tx.latency_samples(start_ms) if s.received_at_ms < end_ms]
+        delivery: dict[int, OutboxStatus] = {}
+        for signal in signals:
+            if signal.action == _HEARTBEAT_ACTION:
+                continue
+            worst = _worst([message.status for message in tx.messages_for_signal(signal.id)])
+            if worst is not None:
+                delivery[signal.id] = worst
         return _Data(
             signals=signals,
             samples=samples,
             messages=tx.messages_created_between(start_ms, end_ms),
             counts=tx.outbox_counts(),
+            delivery=delivery,
         )
 
 
@@ -133,10 +167,10 @@ def build_report(store: Store, *, start_ms: int, end_ms: int, source: str) -> st
         lines.append("Bu dönemde alınmış alert yok.")
         return "\n".join(lines) + "\n"
 
-    lines += _daily_table(data.signals)
+    lines += _daily_table(data.signals, data.delivery)
     lines.append("")
     lines += _outcome_lines(data.signals)
-    lines += _latency_lines(data.samples)
+    lines += _latency_lines(data.samples, data.delivery)
     lines += _outbox_lines(data)
     lines += [
         "",
@@ -151,7 +185,7 @@ def _stamp(epoch_ms: int) -> str:
     return f"{fmt_date(epoch_ms, ISTANBUL)} {fmt_clock(epoch_ms, ISTANBUL)}"
 
 
-def _daily_table(signals: Sequence[SignalRow]) -> list[str]:
+def _daily_table(signals: Sequence[SignalRow], delivery: dict[int, OutboxStatus]) -> list[str]:
     header = (
         "Gün (TR)",
         "alert",
@@ -161,6 +195,7 @@ def _daily_table(signals: Sequence[SignalRow]) -> list[str]:
         "bayat",
         "atlanan",
         "hata",
+        "ulaşmayan",
     )
     rows: dict[str, Counter[str]] = {}
     for signal in signals:
@@ -169,10 +204,14 @@ def _daily_table(signals: Sequence[SignalRow]) -> list[str]:
             counter["heartbeat"] += 1
             continue
         counter["alert"] += 1
+        delivered = delivery.get(signal.id)
         if signal.action == _ENTRY_ACTION:
             counter["giriş"] += 1
-            if signal.outcome is Outcome.FORWARDED:
+            # "Forwarded" is the processor's decision; delivered is what Telegram accepted.
+            if signal.outcome is Outcome.FORWARDED and delivered is OutboxStatus.SENT:
                 counter["iletilen giriş"] += 1
+        if delivered in _UNDELIVERED:
+            counter["ulaşmayan"] += 1
         if signal.outcome is Outcome.STALE:
             counter["bayat"] += 1
         elif signal.outcome in _SKIPPED:
@@ -214,23 +253,40 @@ def _outcome_lines(signals: Sequence[SignalRow]) -> list[str]:
     return ["Sonuçlar (heartbeat hariç): " + (" · ".join(parts) if parts else "yok")]
 
 
-def _latency_lines(samples: Sequence[LatencySample]) -> list[str]:
+def _latency_lines(
+    samples: Sequence[LatencySample], delivery: dict[int, OutboxStatus]
+) -> list[str]:
     receive = latency_stats([s.received_at_ms - s.bar_close_ms for s in samples])
     telegram = latency_stats(
         [s.sent_at_ms - s.bar_close_ms for s in samples if s.sent_at_ms is not None]
     )
+    statuses = Counter(delivery.values())
+    undelivered = sum(statuses[status] for status in _UNDELIVERED)
+    pending = statuses[OutboxStatus.PENDING]
     lines = [
         "Gecikme, bar kapanışı → alıcı: " + _latency_text(receive, "alert"),
         "Gecikme, bar kapanışı → Telegram: " + _latency_text(telegram, "mesaj"),
+        f"Telegram teslimi (mesaj üreten {len(delivery)} sinyal): "
+        + " · ".join(
+            f"{_DELIVERY_LABELS[status]} {statuses[status]}" for status in reversed(_DELIVERY_ORDER)
+        ),
     ]
-    if telegram is None:
+    # The median only covers messages that were sent, and one that is slower than its
+    # validity never is: without the delivery count the slowest cases could not fail it.
+    if not delivery:
         verdict = "veri yok"
-    elif telegram.median_ms < ACCEPTANCE_MEDIAN_LATENCY_MS:
-        verdict = "SAĞLANDI"
-    else:
+    elif undelivered:
+        verdict = f"SAĞLANMADI — {undelivered} sinyalin mesajı Telegram'a ulaşmadı"
+    elif pending:
+        verdict = f"EKSİK — {pending} mesaj hâlâ bekliyor; raporu sonra yeniden al"
+    elif telegram is None or telegram.median_ms >= ACCEPTANCE_MEDIAN_LATENCY_MS:
         verdict = "SAĞLANMADI"
+    else:
+        verdict = "SAĞLANDI"
     seconds = ACCEPTANCE_MEDIAN_LATENCY_MS // 1000
-    lines.append(f"  SPEC §5.7 ölçütü (uçtan uca medyan < {seconds} sn): {verdict}")
+    lines.append(
+        f"  SPEC §5.7 ölçütü (ulaşmayan mesaj 0 ve uçtan uca medyan < {seconds} sn): {verdict}"
+    )
     return lines
 
 
@@ -264,6 +320,7 @@ def signals_csv(store: Store, *, start_ms: int, end_ms: int) -> str:
     """One CSV row per signal received in [start_ms, end_ms), for spreadsheet comparison."""
     data = _read(store, start_ms, end_ms)
     sent_at = {sample.signal_id: sample.sent_at_ms for sample in data.samples}
+    delivery = data.delivery
     buffer = io.StringIO()
     writer = csv.writer(buffer, lineterminator="\n")
     writer.writerow(CSV_HEADER)
@@ -283,6 +340,7 @@ def signals_csv(store: Store, *, start_ms: int, end_ms: int) -> str:
                 "" if signal.outcome is None else signal.outcome.value,
                 signal.received_at_ms - signal.bar_close_ms,
                 "" if sent is None else sent - signal.bar_close_ms,
+                delivery[signal.id].value if signal.id in delivery else "",
             ]
         )
     return buffer.getvalue()

@@ -48,8 +48,13 @@ def add_signal(
     outcome: Outcome | None = Outcome.FORWARDED,
     sent_delay_ms: int | None = None,
     alarm: str | None = None,
+    undelivered: str | None = None,
 ) -> int:
-    """Insert one signal as the receiver would, process it and optionally deliver its message."""
+    """Insert one signal as the receiver would, process it and optionally deliver its message.
+
+    `undelivered`: write the message but leave it "pending", or close it as "expired" /
+    "failed" (what the sender does when Telegram cannot be reached in time or refuses).
+    """
     received_at_ms = bar_close_ms + receive_delay_ms
     heartbeat = action == "heartbeat"
     signal = NewSignal(
@@ -83,6 +88,20 @@ def add_signal(
                 signal_id=signal_id,
             )
             tx.mark_message_sent(message_id, bar_close_ms + sent_delay_ms)
+        if undelivered is not None:
+            message_id = tx.enqueue_message(
+                kind=OutboxKind.SIGNAL,
+                text="[SİNYAL] …",
+                now_ms=received_at_ms,
+                signal_id=signal_id,
+                expires_at_ms=bar_close_ms + MINUTE_MS,
+            )
+            if undelivered == "expired":
+                tx.mark_message_expired(message_id, bar_close_ms + MINUTE_MS + 1)
+            elif undelivered == "failed":
+                tx.mark_message_failed(message_id, error="Forbidden", now_ms=received_at_ms + 9)
+            else:
+                assert undelivered == "pending"
         if alarm is not None:
             tx.enqueue_message(kind=OutboxKind.ALARM, text=alarm, now_ms=received_at_ms)
     return signal_id
@@ -188,17 +207,19 @@ def test_report_counts_days_outcomes_and_latency(store: Store) -> None:
         "Sinyal raporu · data/propbot.db\n"
         "Dönem (Türkiye saati): 2026-12-01 00:00 → 2026-12-03 00:00\n"
         "\n"
-        "Gün (TR)    alert  heartbeat  giriş  iletilen giriş  bayat  atlanan   hata\n"
-        "2026-12-01      4          2      2               1      1        0      0\n"
-        "2026-12-02      3          0      3               0      0        1      1\n"
-        "Toplam          7          2      5               1      1        1      1\n"
+        "Gün (TR)    alert  heartbeat  giriş  iletilen giriş  bayat  atlanan   hata  ulaşmayan\n"
+        "2026-12-01      4          2      2               1      1        0      0          0\n"
+        "2026-12-02      3          0      3               0      0        1      1          0\n"
+        "Toplam          7          2      5               1      1        1      1          0\n"
         "\n"
         "Sonuçlar (heartbeat hariç): iletildi 3 · bayat 1 · atla: günlük bütçe 1 · "
         "işlenemedi (hata) 1 · kuyrukta bekleyen 1\n"
         "Gecikme, bar kapanışı → alıcı: medyan 1.2 sn · %95 95.0 sn · en fazla 95.0 sn (7 alert)\n"
         "Gecikme, bar kapanışı → Telegram: medyan 2.0 sn · %95 96.0 sn · en fazla 96.0 sn "
         "(5 mesaj)\n"
-        "  SPEC §5.7 ölçütü (uçtan uca medyan < 5 sn): SAĞLANDI\n"
+        "Telegram teslimi (mesaj üreten 5 sinyal): gönderildi 5 · bekliyor 0 · süresi doldu 0 · "
+        "başarısız 0\n"
+        "  SPEC §5.7 ölçütü (ulaşmayan mesaj 0 ve uçtan uca medyan < 5 sn): SAĞLANDI\n"
         "Telegram kutusu (tüm zamanlar): gönderildi 5 · bekliyor 1 · süresi doldu 0 · "
         "başarısız 0\n"
         "Dönemdeki alarmlar: 1\n"
@@ -216,7 +237,9 @@ def test_report_is_limited_to_the_requested_days(store: Store) -> None:
     report = build_report(store, start_ms=day_start_ms(DAY_2), end_ms=END_MS, source="db")
 
     assert "2026-12-01" not in report.split("\n", 3)[3]
-    assert "Toplam          3          0      3               0      0        1      1" in report
+    assert (
+        "Toplam          3          0      3               0      0        1      1          0"
+    ) in report
     assert "(3 alert)" in report
     assert "(1 mesaj)" in report
 
@@ -239,16 +262,107 @@ def test_slow_delivery_fails_the_acceptance_line(store: Store) -> None:
 
     report = build_report(store, start_ms=START_MS, end_ms=END_MS, source="db")
 
-    assert "SPEC §5.7 ölçütü (uçtan uca medyan < 5 sn): SAĞLANMADI" in report
+    assert verdict(report) == "SAĞLANMADI"
 
 
-def test_without_delivered_messages_there_is_no_verdict(store: Store) -> None:
-    add_signal(store, bar_close_ms=tr("2026-12-01 17:45"), receive_delay_ms=1000)
+def verdict(report: str) -> str:
+    prefix = "  SPEC §5.7 ölçütü (ulaşmayan mesaj 0 ve uçtan uca medyan < 5 sn): "
+    (line,) = (line for line in report.splitlines() if line.startswith(prefix))
+    return line.removeprefix(prefix)
+
+
+def test_without_any_message_there_is_no_verdict(store: Store) -> None:
+    add_signal(
+        store,
+        bar_close_ms=tr("2026-12-01 17:45"),
+        receive_delay_ms=1000,
+        action="stop_update",
+        outcome=Outcome.FILTERED_MIN_STEP,
+    )
 
     report = build_report(store, start_ms=START_MS, end_ms=END_MS, source="db")
 
     assert "Gecikme, bar kapanışı → Telegram: örnek yok" in report
-    assert "SPEC §5.7 ölçütü (uçtan uca medyan < 5 sn): veri yok" in report
+    assert "Telegram teslimi (mesaj üreten 0 sinyal): gönderildi 0 · bekliyor 0" in report
+    assert verdict(report) == "veri yok"
+
+
+def test_an_entry_whose_message_never_went_out_is_not_a_delivered_entry(store: Store) -> None:
+    # Telegram answers the first entry and then times out: the next two messages expire.
+    # "Forwarded" is only the processor's decision; nothing reached the trader.
+    add_signal(
+        store, bar_close_ms=tr("2026-12-01 17:45"), receive_delay_ms=1000, sent_delay_ms=1500
+    )
+    for minute in (50, 55):
+        add_signal(
+            store,
+            bar_close_ms=tr(f"2026-12-01 17:{minute}"),
+            receive_delay_ms=1000,
+            strategy_id="asian_sweep",
+            undelivered="expired",
+        )
+
+    report = build_report(store, start_ms=START_MS, end_ms=END_MS, source="db")
+
+    lines = report.splitlines()
+    assert lines[3:6] == [
+        "Gün (TR)    alert  heartbeat  giriş  iletilen giriş  bayat  atlanan   hata  ulaşmayan",
+        "2026-12-01      3          0      3               1      0        0      0          2",
+        "Toplam          3          0      3               1      0        0      0          2",
+    ]
+    assert "Sonuçlar (heartbeat hariç): iletildi 3" in lines  # the decision, not the delivery
+    assert (
+        "Gecikme, bar kapanışı → Telegram: medyan 1.5 sn · %95 1.5 sn · en fazla 1.5 sn (1 mesaj)"
+    ) in lines
+    assert (
+        "Telegram teslimi (mesaj üreten 3 sinyal): gönderildi 1 · bekliyor 0 · süresi doldu 2 · "
+        "başarısız 0"
+    ) in lines
+    # The median alone (1.5 s over the one survivor) would pass.
+    assert verdict(report) == "SAĞLANMADI — 2 sinyalin mesajı Telegram'a ulaşmadı"
+
+
+@pytest.mark.parametrize(
+    ("undelivered", "expected"),
+    [
+        ("failed", "SAĞLANMADI — 1 sinyalin mesajı Telegram'a ulaşmadı"),
+        ("pending", "EKSİK — 1 mesaj hâlâ bekliyor; raporu sonra yeniden al"),
+    ],
+)
+def test_one_message_that_is_not_out_keeps_the_criterion_from_being_met(
+    store: Store, undelivered: str, expected: str
+) -> None:
+    for minute in (40, 41, 42):
+        add_signal(
+            store,
+            bar_close_ms=tr(f"2026-12-01 17:{minute}"),
+            receive_delay_ms=1000,
+            action="exit",
+            sent_delay_ms=1200,
+        )
+    add_signal(
+        store,
+        bar_close_ms=tr("2026-12-01 17:50"),
+        receive_delay_ms=1000,
+        undelivered=undelivered,
+    )
+
+    report = build_report(store, start_ms=START_MS, end_ms=END_MS, source="db")
+
+    assert verdict(report) == expected
+
+
+def test_a_refused_message_outweighs_a_pending_one(store: Store) -> None:
+    add_signal(
+        store, bar_close_ms=tr("2026-12-01 17:40"), receive_delay_ms=1000, undelivered="pending"
+    )
+    add_signal(
+        store, bar_close_ms=tr("2026-12-01 17:41"), receive_delay_ms=1000, undelivered="failed"
+    )
+
+    report = build_report(store, start_ms=START_MS, end_ms=END_MS, source="db")
+
+    assert verdict(report) == "SAĞLANMADI — 1 sinyalin mesajı Telegram'a ulaşmadı"
 
 
 def test_long_alarm_lists_are_cut(store: Store) -> None:
@@ -292,6 +406,7 @@ def test_csv_has_one_row_per_signal_with_latencies(store: Store) -> None:
         "outcome": "forwarded",
         "receive_latency_ms": "1200",
         "telegram_latency_ms": "2000",
+        "delivery": "sent",
     }
     heartbeat = dict(zip(CSV_HEADER, rows[4], strict=True))
     assert (heartbeat["action"], heartbeat["side"], heartbeat["telegram_latency_ms"]) == (
@@ -301,6 +416,26 @@ def test_csv_has_one_row_per_signal_with_latencies(store: Store) -> None:
     )
     queued = dict(zip(CSV_HEADER, rows[9], strict=True))
     assert (queued["strategy_id"], queued["outcome"]) == ("mr_bb_kc_rsi2", "")
+    assert [row[-1] for row in rows[1:]] == ["sent", "sent", "sent", "", "", "sent", "sent", "", ""]
+
+
+@pytest.mark.parametrize("undelivered", ["pending", "expired", "failed"])
+def test_csv_says_what_became_of_the_message(store: Store, undelivered: str) -> None:
+    add_signal(
+        store,
+        bar_close_ms=tr("2026-12-01 17:45"),
+        receive_delay_ms=1000,
+        undelivered=undelivered,
+    )
+
+    rows = list(csv.reader(io.StringIO(signals_csv(store, start_ms=START_MS, end_ms=END_MS))))
+
+    row = dict(zip(CSV_HEADER, rows[1], strict=True))
+    assert (row["outcome"], row["telegram_latency_ms"], row["delivery"]) == (
+        "forwarded",
+        "",
+        undelivered,
+    )
 
 
 def test_csv_of_an_empty_period_is_only_the_header(store: Store) -> None:
