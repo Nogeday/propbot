@@ -344,7 +344,9 @@ karşılaştırmasında orijinalle fark beklenir. Ayrıntı ve gerekçe: `CHANGE
 | `reason` | str | isteğe bağlı (v1 uzantısı, `^[a-z_]{1,32}$`); Pine dosyaları henüz göndermez (açık bulgu 15) |
 
 Fiyatları `str.tostring(x, format.mintick)` ile yaz; olmayan sayısal alan `null` (ör. `exit`'te `stop`/`tp`). Strateji başına TradingView'da bir alarm: koşul
-"alert() function calls only", webhook URL'si alıcı adresi.
+"alert() function calls only", webhook URL'si alıcı adresi. **Bir `strategy_id`'nin (sembol başına) tek kaynağı olur:**
+Master ile bağımsız NY Open / Asian Sweep script'leri aynı kimlikleri gönderdiği için birlikte alarmlanmaz; alıcı iki
+akışı ayırt edemez (açık bulgu 47). Sembolün verisi gerçek zamanlı olmalıdır; gecikmeli veride her giriş bayattır.
 
 Kurallar (`src/propbot/signals/schema.py`): bilinmeyen anahtar, yinelenen anahtar, `NaN`/`Infinity`, sayı yerine metin ya
 da `true/false` reddedilir. `entry`: `side`, `setup`, `order_type`, `est_entry`, `stop` zorunlu; stop zarar tarafında,
@@ -376,6 +378,11 @@ dilimleri reddedilir: bar kapanışı seans takvimine bağlıdır, tazelik denet
 3. Bot: kaynak IP'yi yeniden doğrular; yalnızca loopback'i dinler; `X-Forwarded-For` dışında başlık kabul etmez.
 4. Payload token'ı (`.env`, kolay rotasyon). Broker/Telegram kimlik bilgisi asla payload'da yok.
 5. Hız sınırı (dakikada ≤ 30, token'ı doğru isteklerde), gövde boyutu sınırı, yapılandırılmış log (sırlar `***`).
+   python-telegram-bot'un kendi kayıtları **değersiz** loglanır (ileti şablonu, istisna türleri ve konumları; argüman
+   ve istisna metni yok): kütüphane ayrıştıramadığı güncellemeleri olduğu gibi loglar ve bir sohbet mesajı (yanlış
+   yazılmış PIN, yabancının metni) bilinen bir sır değildir. Yakalanmayan istisnalar için üç yorumlayıcı kancası
+   (`sys.excepthook`, `threading.excepthook`, `sys.unraisablehook`) ve olay döngüsü aynı maskeleyen günlüğe bağlıdır;
+   `propbot serve`'ün bu bağlantıları giriş noktası üzerinden testlidir.
 6. Kimliği doğrulanamayan istekler (yanlış token, bozuk JSON, büyük gövde) sayılır; izinli adresten gelenler için en
    fazla saatte bir Telegram uyarısı gider. Sayılar uyarı gerçekten gönderilene kadar tutulur ve izinli adresten gelen
    sonraki herhangi bir istek (geçerli bir heartbeat dahil) bekleyen uyarıyı tetikler: eski token'la gönderen kendi
@@ -410,10 +417,23 @@ id {signal_id} · bar {NY saati} NY / {TR saati} TR
   (stop genişletme reddedildi), `[ALARM]`.
 - Günlük bütçe satırı temkinlidir (ADR-0005): iletilen her giriş prop günü boyunca sayılır; almadığın sinyali `/atladim`
   ile bildirirsin. Stop güncellemeleri mesafe uzayında karşılaştırılır; stop'u genişleten güncelleme iletilmez.
+- `/atladim` id'siz yazılırsa mesajı Telegram'a gönderilmiş en yeni girişi alır. Ondan daha yeni, hâlâ sayılan bir
+  girişin mesajı "belki ulaştı" durumundaysa (gönderim zaman aşımına uğradı) hiçbir şey serbest bırakılmaz ve id
+  istenir: yanlış girişi serbest bırakmak o işlemin stop/çıkış mesajlarını da keser. id baştaki sıfırla yazılamaz.
+- **Teslim kuşkusu:** bir gönderim, istek çıktıktan sonra zaman aşımına uğradıysa ya da yorumlanamayan bir yanıtla
+  bittiyse (JSON olmayan / mesaj olmayan yanıt) mesaj ulaşmış olabilir. Böyle bir giriş mesajı süresi dolunca,
+  duraklatma/KILL ile düşürülünce **ya da sonradan kalıcı hata alınca** bütçeden düşülmez; kullanıcıya
+  "[İLETİM BELİRSİZ]" ile sorulur. Yalnızca Telegram'ın açık reddi (BadRequest, Forbidden, ChatMigrated, Conflict)
+  ulaşmadığının kanıtıdır. Yeniden başlatmada yalnızca **önceki sürecin** bıraktığı bekleyen girişler kuşkulu sayılır.
+- Kütüphanenin kuramadığı bir Telegram güncellemesi (tanımadığı mesaj biçimi) atlanır ve Telegram'a onaylanır; aynı
+  partideki komutlar işlenir, kullanıcıya saatte en çok bir "N mesaj okunamadı ve atlandı" alarmı gider. Aşılamayan bir
+  okuma hatasında polling 1–30 sn aralıkla yavaşlar ve "komutlar işlenmeyebilir" alarmı gider (önceden: aynı parti
+  sonsuza dek yeniden istenir, hiçbir komut işlenmez, ham güncellemeler loglanırdı).
 - Komutlar (ASCII): `/durum`, `/pnl`, `/risk`, `/duraklat`, `/devam`, `/kill <PIN>`, `/mod`, `/saglik`, `/atladim [id]`,
   `/aldim <id>`, `/yardim`. `/duraklat` ve `/kill` yalnızca yeni girişleri keser (stop/çıkış/iptal her zaman iletilir) ve
   gecikmeli ulaşsa da uygulanır; `/devam`, `/atladim`, `/aldim` 60 sn'den eskiyse reddedilir. KILL'den dönüş
-  `/devam <PIN>`. 15 dk içinde 5 yanlış PIN, PIN girişini 15 dk kilitler. Silinecek mesaj **biçimine** göre seçilir,
+  `/devam <PIN>`. 15 dk içinde 5 yanlış PIN, PIN girişini 15 dk kilitler (sunucu saati geri alınsa da kilit ilk
+  denetimden bir süre sonra biter). Silinecek mesaj **biçimine** göre seçilir,
   PIN ile karşılaştırılarak değil: `/kill` ya da `/devam`'dan sonra bir şey yazılmışsa ya da mesajda 6+ haneli bir sayı
   varsa mesaj silinir ve yanıtlar o sayıyı yinelemez. PIN yalnızca bu iki komutun içinde karşılaştırılır; başka hiçbir
   yanıt "bu PIN'di / değildi" ayrımı taşımaz.
@@ -428,18 +448,28 @@ id {signal_id} · bar {NY saati} NY / {TR saati} TR
   alınmadı): 90 sn'den uzun boşluk "Bot … arasında kapalıydı"; daha kısa boşluk (yeniden başlatma) "Bot … yeniden
   başladı" — en çok 30 dakikada bir, bastırılan yeniden başlatmalar sayılır ve sonraki alarm "N. kez" der (çökme
   döngüsü). Her yeniden başlatma, TradingView'ın hata yanıtı alıp alert'i yitirdiği bir deliktir.
+  Bastırılan yeniden başlatmalar bir sonraki yeniden başlatmayı beklemez: kısıtlama bitince "N kez daha yeniden
+  başladı" özeti gider. Aynı süreç iki denetim arasında 90 sn'den uzun çalışmadıysa (makine uykuya geçti, süreç
+  askıda kaldı) bu da "Bot … arasında çalışmadı" diye bildirilir: o sırada alıcı da yanıt verememiştir.
+- Heartbeat göstergesi, bar süresi aralığı tam bölen grafiklerde çalışır (1, 2, 3, 5, 10, 15, 30, 60 dk); yeni
+  aralıkta kapanan ilk bar atım gönderir (sınırdaki bar yoksa bir bar geç). Heartbeat yalnızca kendi alarmının ve
+  webhook yolunun çalıştığını kanıtlar; tek bir strateji alarmının durması görünmez (açık bulgu 49).
 - Premium altı planlar için `config/tv_alerts.yaml` → `alerts` altında her alarmın bitiş tarihi (`expires_on`); bitişten
   7 gün önce ve sonrasında günde bir hatırlatma.
 
 ### 5.6 Dağıtım
 Ubuntu · systemd (`Restart=always`) · chrony · journald. İki ücretsiz yol (`docs/runbook.md`): **A** DuckDNS alt alan adı +
 Caddy (Let's Encrypt) + ufw; **B** kendi bilgisayarın + Tailscale Funnel (ya da yalnızca deneme için Cloudflare hızlı
-tünel). Örnek dosyalar `deploy/`. Yeniden başlatmalar izlenen pencerelerin dışında yapılır.
+tünel). Örnek dosyalar `deploy/`. Yeniden başlatmalar izlenen pencerelerin dışında yapılır. Dinleme soketi, hiçbir
+arka plan görevi başlamadan önce bağlanır ve bir veritabanında tek `serve` çalışır (`<db>.lock`): yanlışlıkla
+başlatılan ikinci kopya canlı veritabanına ve bota dokunmadan `HATA` ile çıkar.
 
 ### 5.7 Kabul
 - 10 işlem günü kesintisiz; kaçan/çift sinyal 0 (TradingView Alert Log ile karşılaştırma); uçtan uca medyan gecikme < 5 sn.
   Kanıt: `uv run propbot signals report --since <gün> --csv reports/sinyaller.csv` (gün gün sayılar, gecikme medyanı,
-  alarmlar).
+  alarmlar). Rapor teslimi sayar, kararı değil: "iletilen giriş" mesajı Telegram'a gönderilmiş giriştir; dönemde
+  süresi dolan ya da reddedilen tek bir mesaj ölçütü "SAĞLANMADI" yapar, bekleyen mesaj "EKSİK" (medyan yalnızca
+  gönderilen mesajlardan hesaplanır, geçerliliğinden yavaş kalan mesaj örneğe hiç girmez).
 - Tüm doğrulama hata yolları testli; `/kill` ve yetkisiz sohbet testleri yeşil.
 
 ## 6. Faz 2 — Python motoru ve backtest

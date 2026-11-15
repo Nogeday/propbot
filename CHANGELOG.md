@@ -274,7 +274,7 @@ Kullanıcı kararı (2026-11-13): Faz 1 planı, dosya yapısı, ADR kararları v
 cevaplandı. **Emir yolu yazılmadı; tek mod `signal`.** Kararlar: `docs/adr/0000`, `0004`, `0005`. Kurulum ve işletim:
 `docs/runbook.md`. Spesifikasyon: `docs/SPEC.md` §5 (uygulanan davranışa göre güncellendi, sürüm 0.3).
 
-**Durum:** kod ve testler tamam (3416 test, ruff, mypy --strict). SPEC §5.7'deki 10 işlem günlük kabul koşusu **yapılmadı**:
+**Durum:** kod ve testler tamam (uygulama denetimi sonrası 3578 test, ruff, mypy --strict; ilk teslimde 3416). SPEC §5.7'deki 10 işlem günlük kabul koşusu **yapılmadı**:
 Faz 0 script'leri TradingView'da henüz derlenmedi, alarmlar kurulmadı, bot bir sunucuya kurulmadı. Hiçbir şey gerçek
 TradingView ya da gerçek Telegram'a karşı denenmedi (bu ortamdan ikisine de erişim yok).
 
@@ -345,8 +345,36 @@ Kod bittikten sonra bağımsız mercekler kodu kırmaya çalıştı; her bulgu a
 | SEC-2 | Token, grafikte script'in durum satırında ve (açıksa) alarmın e-posta/uygulama bildirimlerinde görünür | Heartbeat göstergesinde girdi `display.none` (derlenmedi, doğrulama listesi H); runbook §8.1–8.2: yalnızca Webhook URL bildirimi, paylaşım uyarısı, token yenileme adımları. Altı strateji dosyası için → açık bulgu 45 | `461abbe` |
 | SYM-1 | Alert'teki TradingView sembolü venue sembolüyle eşleştirilmiyor | Karar gerekir → açık bulgu 46 | — |
 
+İkinci tur (2026-11-15): güvenlik ve işleyici mercekleri düzeltilmiş kodu yeniden taradı; Telegram, entegrasyon ve Pine
+mercekleri ilk kez çalıştı (ilk denemede kullanım sınırı yüzünden yarıda kalmışlardı). Her bulgu için denetçinin yeniden
+üretme betiği düzeltmeden sonra yeniden çalıştırıldı; kritik kurallar mutasyonla sınandı (44 mutantın 44'ü yakalandı).
+
+| Bulgu | Sorun | Düzeltme | Commit |
+|---|---|---|---|
+| SEC-4 | python-telegram-bot'un kuramadığı tek bir güncelleme: updater aynı partiyi sonsuza dek yeniden istiyor, hiçbir komut işlenmiyor (`/duraklat`, `/kill` dahil), uyarı yok, kütüphane bekleyen bütün mesajları (yanlış yazılmış PIN, yabancının metni) her seferinde logluyordu | `telegram.*` kayıtları değersiz loglanır (şablon + istisna türü/konumu); `ResilientBot` partiyi ham JSON olarak yeniden alır, güncellemeleri tek tek kurar, kuramadığını atlayıp Telegram'a onaylar; "N mesaj okunamadı" alarmı; aşılamayan hatada 1–30 sn geri çekilme + "komutlar işlenmeyebilir" alarmı | `1317530`, `e974e55` |
+| SEC-5 | `propbot serve`'ün sırları maskeleyiciye vermesi ve istisna kancalarını kurması testsizdi: sır listesi boşaltılınca ya da kancalar kaldırılınca bütün testler yeşil kalıyordu | Gerçek giriş noktası (`main(["serve", …])`) üzerinden testler; olay döngüsü hata işleyicisi `run_service` ile test edilir | `52c30fd` |
+| SEC-6 | `sys.unraisablehook` varsayılanda kalıyordu: sonlandırıcıda / çöpe giden coroutine'de oluşan istisna metni maskelenmeden stderr'e yazılırdı | Üçüncü kanca da maskeleyen günlüğe bağlandı (asla istisna fırlatmaz) | `b520205` |
+| SEC-7 | Birim dosyası, depo `/home` dışındaysa `ProtectHome=true` önerir; Ubuntu 22.04'te uv yorumlayıcıyı ev dizinine kurduğu için servis başlayamazdı | Yorum iki koşulu ve denetim komutunu söyler; runbook §4 ve §11 (`status=203/EXEC`) | `bef9ed4` |
+| MON-2 | Kısıtlama altında sayılan yeniden başlatmalar yalnızca **sonraki** yeniden başlatmada bildiriliyordu: kendiliğinden biten çökme döngüsü "birkaç saniyelik tek yeniden başlatma" olarak kalıyor, günler sonraki olağan yeniden başlatma "120. kez" diye duyuruluyordu | Her izleyici denetimi, kısıtlama bitince bekleyen sayıyı "N kez daha yeniden başladı" diye bildirir | `a74ca72` |
+| TEST-1/2 | İki kuralı kıran mutantlar yakalanmıyordu: stop güncellemesi önceki işlemin güncellemeleriyle karşılaştırılırsa; puan değeri ters uygulanırsa / tick değeri tick boyutu yerine kullanılırsa (bütün test sözleşmelerinde puan değeri 1 idi) | İşlem sınırı testi; puan değeri 5 $/puan ve 2 $/puan olan sözleşmelerle nominal, en küçük lot riski ve asgari trail adımı testleri | `3b5b2c8` |
+| TG-1 | SEC-1'in kalıntısı: `/atladim 0<tahmin>` yanıtı sayıyı sıfırsız yazdığı için maskeleme kullanıcının metnini bulamıyor, son çare satırı yalnızca tahmin PIN'e eşitse `***` basıyordu (sayaçsız, kilitsiz kehanet) | Baştaki sıfırla id reddedilir; PIN ile karşılaştıran satır kaldırıldı: `/kill` ve `/devam` dışında hiçbir kod yolu PIN'e bakmaz | `ca280e4` |
+| TG-2 | id'siz `/atladim`, en yeni girişin mesajı "belki ulaştı" durumundayken ondan **eski** girişi serbest bırakıyordu; işleyici de o (içinde olunan) işlemin stop/çıkış mesajlarını kesiyordu | Daha yeni, hâlâ sayılan ve teslimi kuşkulu bir giriş varsa hiçbir şey serbest bırakılmaz, id istenir | `fbbf611` |
+| TG-3 | Açılışta "belki ulaştı" işaretlemesi göndericinin ilk adımında, ilk `getMe`'den sonra yapılıyordu; Telegram yavaşken aynı sürecin işleyicisi araya yeni giriş koyabiliyor, hiç denenmemiş mesaj kuşkulu sayılıp bütçede kalıyordu | İşaretleme, işleyici başlamadan önce yapılır (yalnızca önceki sürecin bıraktıkları) | `b3cb8b9` |
+| TG-4 | Kalıcı gönderim hatası teslim kuşkusuna bakmıyordu: önceki denemesi zaman aşımına uğramış (belki ulaşmış) giriş "GÖNDERİLEMEDİ" diye duyurulup bütçeden düşülüyordu | Kuşkulu giriş sayılmaya devam eder ve kullanıcıya sorulur; yorumlanamayan yanıtla biten gönderim de kuşkulu sayılır; yalnızca BadRequest / Forbidden / ChatMigrated / Conflict "ulaşmadı" kanıtıdır | `9863639` |
+| TG-5 | Sunucu saati ilerideyken oluşan PIN kilidi, saat düzeltilince hiç bitmiyordu (her denetimde "15 dk sonra") | Bir süreden uzak görünen kilit o anki saatle yeniden yazılır; geri sayar ve biter | `be91706` |
+| REP-1 | Kabul raporu "iletilen giriş"i işleyicinin kararından sayıyordu; mesajı süresi dolan giriş de iletilmiş görünüyor, §5.7 satırı yalnızca gönderilebilen mesajların medyanına bakıp "SAĞLANDI" diyordu | Teslim, giden kutusundan okunur: "ulaşmayan" sütunu, "Telegram teslimi" satırı, CSV'de `delivery`; ulaşmayan mesaj varsa "SAĞLANMADI", bekleyen varsa "EKSİK" | `eae22ca` |
+| MON-3 | Kapalı kalma denetimi yalnızca süreç başlangıcında çalışıyordu: uykuya geçen makine / duraklatılan VM aynı süreçle devam ettiği için izlenen penceredeki delik hiç bildirilmiyordu | Her denetim önceki denetimle arasındaki boşluğa bakar; 90 sn'den uzun boşluk "Bot … arasında çalışmadı" diye bildirilir | `b5836b7` |
+| PORT-1 | Portu alamayan ikinci `serve` (yanlışlıkla başlatılan kopya), vazgeçmeden önce canlı veritabanında izleyici denetimi çalıştırıyor (sahte "yeniden başladı" alarmı), bekleyen girişi kuşkulu işaretliyor, kutunun başını kendisi gönderiyor ve polling başlatıyordu; sonra kod 3 ve boş stderr ile çıkıyordu | Soket her şeyden önce bağlanır (`HATA: … dinlenemiyor`, kod 1); veritabanı başına tek `serve` (`<db>.lock`); duran servis polling başlatmaz | `edfa6b6` |
+| TEST-3 | ADR-0004'ün ana kuralı (arka plan görevi ölürse süreç hata koduyla çıkar) testsizdi | Gerçek `run_service`, gerçek loopback portunda: Telegram token'ı reddedince `EXIT_FAILED` döner | `edfa6b6` |
+| DEP-1 | Birim dosyası "işaretli üç satırı ayarla" diyordu, `ReadWritePaths=/opt/propbot/data` ise bloğun dışındaydı; başka depo yolunda servis başlayamazdı | `ReadWritePaths` işaretli bloğa alındı (dört satır); test, blok dışında kurulum yolu kalmadığını denetler | `910dff6` |
+| TV-3 | Heartbeat atımı yalnızca saat sınırını kapsayan bara bağlıydı: 1 dakikalık grafikte HH:59 barı yoksa o saatin atımı kayboluyor (2 saat boşluk → sahte "hat sessiz" alarmı); bar süresi 60'ı bölmeyen grafiklerde atımlar 90 dk aralıklıydı | Yeni aralıkta kapanan ilk bar atım gönderir; bar süresi aralığı bölmeyen grafik reddedilir. **Derlenmedi** (doğrulama listesi H) | `1ba7522` |
+| TV-4 | "Pine'ın gönderebildiği her gövde" derlemesindeki MTF `before_tp1` stop güncellemesi gerçekte gönderilemez; test buna "genişletme reddi" bekliyordu | Yerine gerçek biçim (TP1 sonrası runner trail'i, hedefsiz) kondu; açık bulgu 35 düzeltildi | `c087770` |
+| TV-1 | Master ile bağımsız NY Open / Asian Sweep script'leri aynı `strategy_id`'leri gönderir; belgeler hepsini alarmlamayı öneriyordu, bot iki akışı tek işlem sanar | Belgeler (runbook §8, `pine/README.md`, SPEC §5.1, `config/tv_alerts.yaml`): bir `strategy_id` tek kaynaktan → açık bulgu 47 | bu commit |
+| TV-2 | Grafikteki sembolün gerçek zamanlı veri gerektirdiği hiçbir yerde yazmıyordu; gecikmeli veride her giriş "BAYAT", takip mesajları sessizce düşer, heartbeat ise gelir | runbook §1 ön koşul (VERIFY), §11 sorun giderme, doğrulama listesi H → açık bulgu 48 | bu commit |
+
 ### Testler
-- 3453 test (`uv run pytest -q`), ruff, `mypy --strict` (36 kaynak dosya) temiz (uygulama denetimi sonrası; ilk teslimde 3416).
+- 3578 test (`uv run pytest -q`; 1 test bu ortamda atlanır: IPv6 loopback yok), ruff, `mypy --strict` (36 kaynak dosya)
+  temiz (uygulama denetiminin iki turu sonrası; ilk teslimde 3416).
 - Alıcının her adımı ve dalı; 33 gerçek gövde biçimi şemadan, alıcıdan ve işleyiciden geçer.
 - `/kill`, PIN kilidi, yetkisiz sohbet, grup sohbeti testleri (`tests/unit/test_commands.py`, `test_telegram.py`).
 - Uçtan uca (`tests/integration/test_service.py`): gerçek uygulama + store + işleyici + izleyici + python-telegram-bot;
@@ -363,7 +391,7 @@ Kod bittikten sonra bağımsız mercekler kodu kırmaya çalıştı; her bulgu a
 ## Açık bulgular
 
 Durum (2026-11-13): 1, 3–11 ve 24 kapandı; 2, 15 ve 23 kısmen. 12–23 ve 25–30 açık (18–23 denetimden, 25–27 Faz 2 ön
-diliminden, 28–30 FTMO doğrulamasından). 31–44 Faz 1'den, 45–46 Faz 1 uygulama denetiminden.
+diliminden, 28–30 FTMO doğrulamasından). 31–44 Faz 1'den, 45–52 Faz 1 uygulama denetiminden.
 
 1. ~~**MTF derleme riski:** `riskPts := ...` bildirimi olmayan değişkene atama.~~ **Çözüldü** (`e997dd5`).
 2. **B4 sayısal değerleri — kısmen:** kod varsayılanı artık MES test profili (E9). FTMO `US500.cash` spread'i/komisyonu
@@ -439,9 +467,11 @@ diliminden, 28–30 FTMO doğrulamasından). 31–44 Faz 1'den, 45–46 Faz 1 uy
     `"rr":2`), `timeframe.period` değerleri ve özellikle `syminfo.tickerid`'nin uzatılmış seans / ayarlama açıkken
     `={"session":…}` biçiminde gelip JSON'u bozması (→ 400, saatlik uyarı) TradingView'da kontrol edilmeli
     (doğrulama listesi F).
-35. **Mesafe uzayı kuralının gürültüsü:** TradingView dolumu sinyal barı kapanışından kötüyken mutlak seviyesi değişmeyen
-    bir `stop_update` (MTF'de dolum barı yeniden fiyatlaması) kullanıcı için genişleme sayılır ve "[UYARI] … mevcut
-    stop'unu KORU" mesajı üretir. Doğru ama sık olabilir; eşik uydurulmadı.
+35. **Mesafe uzayı kuralının gürültüsü:** stop güncellemesi kullanıcının çerçevesinde (stop − TradingView dolumu)
+    değerlendirilir. TradingView dolumu sinyal barı kapanışından kötüyse ve ilk trail adımı bu kaymadan küçükse güncelleme
+    kullanıcı için genişleme sayılır ve "[UYARI] … mevcut stop'unu KORU" mesajı üretir (NY / Master S1; asgari trail
+    adımı 4 tick olduğu için yalnızca kayma 1 puanı aşarsa). Doğru ama gürültü olabilir; eşik uydurulmadı. *(Düzeltme
+    2026-11-15: MTF dolum barında stop güncellemesi göndermez; önceki metindeki örnek yanlıştı — TV-4.)*
 36. **Stop/TP dolumu bildirilmiyor:** TradingView yalnızca zorunlu kapanışları alert eder. Bot bir pozisyonun kapandığını
     bilemez; bütçe bu yüzden temkinli sayılır ve her giriş mesajı "pozisyonun hâlâ açıksa seans sonunda kendin kapat" der.
     TradingView'da iptal edilen bir limit emir FTMO'da dolmuşsa o pozisyon için hiçbir mesaj gelmez. Tersi (TradingView'da
@@ -455,10 +485,13 @@ diliminden, 28–30 FTMO doğrulamasından). 31–44 Faz 1'den, 45–46 Faz 1 uy
     sohbette kullanıcının PIN'li mesajını silebildiği (silemezse uyarı gönderir); 4096 sınırı. İlk kurulumda kontrol et.
 40. **python-telegram-bot iç ayrıntısına bağımlılık:** çalışırken iptal edilen token, 22.8'in özel polling görev adından
     algılanıyor; ad değişirse yalnızca bir log satırı kalır (token reddi bir sonraki gönderimde yine fark edilir).
+    `ResilientBot`, kuramadığı partiyi ham almak için kütüphanenin korumalı `Bot._post` çağrısını kullanır (açık
+    `do_api_request` aynı uç nokta için uyarı üretir); sürüm `uv.lock` ile sabit ve yol testlidir, yükseltmede bakılmalı.
 41. **Budama ve göç yok:** `data/propbot.db` büyür (yılda birkaç MB); şema sürümü değişirse eski dosya açılmaz.
 42. **`pine/heartbeat_indicator.pine` derlenmedi** (doğrulama listesi H); alarm koşulunun adı ("Any alert() function
-    call"), `timeframe.in_seconds()` davranışı ve token girdisindeki `display = display.none` parametresi TradingView'da
-    doğrulanmalı (resmi Pine belgesine bu ortamdan erişilemedi).
+    call"), `timeframe.in_seconds()` davranışı, token girdisindeki `display = display.none` parametresi, yeni atım kuralı
+    (`slotClose != slotClose[1]`, `dayofmonth(time_close, tz)`) ve bar süresi denetimi TradingView'da doğrulanmalı (resmi
+    Pine belgesine bu ortamdan erişilemedi).
 43. **Master `exit` alert'inde `side` net pozisyondan gelir** (iki bacak aynı yönde olduğu için pratikte doğru); alıcı
     çıkışta yönü denetlemez, yön girişinkinden farklıysa çıkış mesajı girişe bağlanmadan iletilir.
 44. **Dağıtım belgesinde doğrulanamayanlar:** Tailscale ve cloudflared kurulum komutları, Cloudflare hızlı tünel
@@ -477,3 +510,24 @@ diliminden, 28–30 FTMO doğrulamasından). 31–44 Faz 1'den, 45–46 Faz 1 uy
     venue sembolüyle aynı ölçekte olan TradingView sembollerinin listesi (ör. `CME_MINI:MES1!`, `CME_MINI:ES1!`);
     listede olmayan sembolün girişi "[SİNYAL — ATLA]" olur. Hangi sembollerde çalıştıracağını bilmeden liste
     uydurulmadı; 10 günlük kabul koşusundan önce karar verilmeli.
+47. **Master ile bağımsız NY Open / Asian Sweep aynı `strategy_id`'leri gönderir (karar gerekir):** ikisi aynı sembolde
+    birlikte alarmlanırsa bot akışları ayırt edemez: uyuştuklarında ikinci alert "yinelenen" diye düşer (Alert Log
+    karşılaştırması tutmaz), ayrıştıklarında ikinci giriş ayrı pozisyon gibi iletilir ve bir script'in stop güncellemesi
+    öbürünün girişine bağlanır. Şimdilik belge kuralı: bir `strategy_id` tek kaynaktan (runbook §8). İkisini yan yana
+    çalıştırmak istenirse Master bacaklarına ayrı kimlik gerekir (Pine değişikliği, B/E dışı → onay).
+48. **Gerçek zamanlı veri gereği doğrulanmadı (VERIFY):** CME vadelilerinin TradingView'da aboneliksiz gecikmeli geldiği
+    ve alarmların gecikmeli barlarda tetiklendiği bu ortamdan doğrulanamadı (bilgi bellekten). Alıcı tarafı kanıtlı:
+    10 dk gecikmeli alert'te giriş "BAYAT", takip mesajları `no_active_trade`. Doğrulama listesi H'de ölçüm maddesi var.
+49. **Heartbeat yalnızca kendi alarmını kanıtlar:** TradingView tek bir strateji alarmını durdurursa (script çalışma zamanı
+    hatası, tetikleme sınırı) hat sağlıklı görünmeye devam eder. Kabul koşusunda her gün Alerts panelinde bütün alarmların
+    "Active" olduğuna bak; otomatik denetim yok.
+50. **Silver Bullet: gün/pencere sıfırlamasında iptal alert'i yok (Pine, B/E dışı):** `newDay` / `newWindow` sıfırlaması,
+    silahlı ama dolmamış bir limit için `strategy.cancel` çağırmadan ve `cancel` alert'i göndermeden `phase`'i sıfırlar.
+    Yalnızca pencerenin son barı eksikse erişilir (olağan durumda 4. blok önce iptal eder). Ayrıca genel düşüş kesicisi
+    `cancel` gönderip `phase`'i sıfırlamıyor (pozisyon yokken erişilemez). Kaynak okunarak bulundu, derlenip denenmedi.
+51. **`/devam` mesajlarda dokunulabilir (karar gerekir):** `/duraklat` ve `/durum` yanıtlarındaki `/devam` bağlantısına
+    yanlışlıkla dokunmak duraklatmayı kaldırır (yanıtı görünür; KILL sonrası PIN gerektiği için orada etkisi yok).
+    `/atladim` ve `/aldim` gibi `code` yapılabilir; kolaylık–güvenlik tercihi kullanıcıya bırakıldı.
+52. **Düzenlenen mesajlar alınmıyor:** bot yalnızca `message` güncellemelerini ister; eski bir mesaja sonradan düzenlemeyle
+    yazılan PIN silinmez (komut olarak da işlenmez). PIN'i düzenlemeyle yazma.
+

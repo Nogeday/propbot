@@ -35,7 +35,9 @@ heartbeat:
     - {days: [mon, tue, wed, thu, fri], start: "03:00", end: "16:00"}
 
 # One entry per TradingView alert you created, with the day it expires (null = no expiry on your plan).
-# Names must be unique. Example:
+# Names must be unique. One alert per strategy_id and symbol: the Master script sends ny_orb_fvg and
+# asian_sweep itself, so do not also alert the stand-alone NY Open / Asian Sweep scripts
+# (docs/runbook.md §8). Example:
 #   alerts:
 #     - {name: "heartbeat MES1! 1m", expires_on: 2027-01-12}
 #     - {name: "ny_orb_fvg MES1! 1m", expires_on: null}

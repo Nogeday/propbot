@@ -136,9 +136,12 @@ tablosundan (MTF'de tablo farklı: "Full trades", "Avg runner R"; Silver Bullet'
 
 ## H. Heartbeat göstergesi ve alıcı (Faz 1 — `docs/runbook.md` ile birlikte)
 - [ ] `pine/heartbeat_indicator.pine` dosyasını yeni bir **gösterge** olarak yapıştır, derle. Hata/uyarı varsa kopyala.
-- [ ] Stratejilerle aynı sembolün **1 dakikalık** grafiğine ekle; saat başlarında (New York saatiyle) barın arka planı
-      hafif renkleniyor mu?
+- [ ] Stratejilerle aynı sembolün **1 dakikalık** grafiğine ekle; her saatin **son** barı (saat başında KAPANAN bar:
+      1 dakikalık grafikte HH:59 barı, New York saatiyle) hafif renkleniyor mu? Saat başını izleyen bar (HH:00)
+      renklenmemeli.
 - [ ] Günlük grafikte "use an intraday chart of 60 minutes or less" çalışma zamanı hatası veriyor mu (vermeli)?
+- [ ] 45 dakikalık grafikte "the chart's bar length must divide the heartbeat interval" hatası veriyor mu (vermeli)?
+      5 ve 15 dakikalık grafiklerde hata vermemeli.
 - [ ] "Webhook token" girdisi `display = display.none` ile tanımlı (doğrulanamadı: resmi belgeye bu oturumdan
       erişilemedi). Derleyici `display` parametresini reddederse hata metnini kopyala. Derlendiyse: token'ı yazdıktan
       sonra grafikte gösterge adının yanındaki girdi değerleri arasında token **görünmemeli** — görünüyor mu?
@@ -149,6 +152,11 @@ tablosundan (MTF'de tablo farklı: "Full trades", "Avg runner R"; Silver Bullet'
 - [ ] İlk saat başında Alert Log'da şu biçimde bir mesaj görünüyor mu:
       `{"v":1,"token":"…","strategy_id":"heartbeat","symbol":"CME_MINI:MES1!","tf":"1","bar_time":…,"action":"heartbeat"}`
 - [ ] Bot çalışıyorsa Telegram'da `/saglik` → "son heartbeat" birkaç saniye/dakika önce görünüyor mu?
+- [ ] **Veri gerçek zamanlı mı?** Alert Log'daki tetiklenme saati, o barın kapanışından yalnızca birkaç saniye sonra
+      olmalı. Dakikalarca (ör. 10 dk) sonraysa sembolün verisi gecikmelidir: bot her girişi "[BAYAT SİNYAL]" sayar
+      (`docs/runbook.md` 1. bölüm). Gördüğün farkı yaz.
+- [ ] **Bir `strategy_id` tek kaynaktan:** aynı sembolde Master ile bağımsız NY Open / Asian Sweep alarmları birlikte
+      kurulu DEĞİL (Master S1 = `ny_orb_fvg`, S2 = `asian_sweep` gönderir). Hangisini kullandığını yaz.
 - [ ] Alarmın bitiş tarihini `config/tv_alerts.yaml` → `alerts` altına yazdın mı?
 
 ## Claude Code'a yapıştırılacaklar

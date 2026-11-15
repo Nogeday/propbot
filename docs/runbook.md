@@ -17,6 +17,11 @@ Tasarım kararları: `docs/adr/0000`, `docs/adr/0004`. Spesifikasyon: `docs/SPEC
 
 - Ubuntu 22.04 ya da üstü, `git`, `curl`.
 - TradingView hesabında webhook (ücretli plan) ve 2FA açık.
+- **Grafikteki sembol için gerçek zamanlı veri (VERIFY: TradingView hesabından doğrula).** Bilindiği kadarıyla CME
+  vadelileri (`CME_MINI:MES1!`) ek veri aboneliği olmadan gecikmeli gelir ve alarmlar gecikmeli barlarda tetiklenir. O
+  durumda her giriş "[BAYAT SİNYAL — ATLA]" olur, o işlemin stop/çıkış mesajları hiç gelmez, heartbeat ise gelmeye
+  devam eder: bot sağlıklı görünür ama kullanılabilir tek sinyal iletmez. Gerçek zamanlı veri yoksa abonelik al ya
+  da stratejileri gerçek zamanlı gelen bir sembolde çalıştır (o sembolün puanı `US500.cash` ile aynı ölçekte olmalı).
 - Bir Telegram hesabı.
 - İki dağıtım yolundan biri (ikisi de ücretsiz):
   - **Seçenek A:** internetten 80 ve 443 portlarına ulaşılabilen bir Ubuntu makine (ücretsiz katmanlı bir VPS ya da evdeki
@@ -113,6 +118,9 @@ curl -s http://127.0.0.1:8000/healthz              # {"status":"ok"}
 ```
 
 - Bot yalnızca `127.0.0.1:8000`'i dinler; dışarıya TLS vekili (Caddy) ya da tünel açar.
+- **Bir veritabanında tek `propbot serve` çalışır** (`data/propbot.db.lock` kilidi). Servis çalışırken elle ikinci bir
+  kopya başlatırsan kopya hiçbir şeye dokunmadan `HATA: …` ile çıkar; port doluysa da öyle. Denemek için servisi durdur
+  ya da `--db` ve `--port` ile ayrı bir veritabanı ve port ver.
 - Arka plan görevlerinden biri ölürse süreç hata koduyla çıkar, systemd 5 sn sonra yeniden başlatır. Kuyruk ve Telegram
   kutusu `data/propbot.db`'de durur; kaldığı yerden devam eder. Süresi geçmiş giriş sinyalleri "BAYAT" ya da
   "İLETİLEMEDİ" olarak bildirilir, hiçbir zaman geçerli sinyal gibi iletilmez.
@@ -225,7 +233,11 @@ başlığı hiç yazmamıştır).
 
 ## 8. TradingView alarmları
 
-Her strateji için (ve heartbeat göstergesi için) **bir** alarm:
+Her strateji için (ve heartbeat göstergesi için) **bir** alarm. **Bir `strategy_id`'nin tek kaynağı olmalı:** Master
+script'i S1 ve S2 bacakları için `ny_orb_fvg` ve `asian_sweep` gönderir, yani bağımsız NY Open ve Asian Sweep
+script'leriyle aynı kimlikleri. Aynı sembolde **ya Master'ı ya da bağımsız NY/Asian script'lerini** alarmla, ikisini
+birlikte değil: bot iki akışı tek işlem sanar (ikinci giriş ayrı bir pozisyon gibi iletilir, stop güncellemesi yanlış
+girişe bağlanır, aynı bardaki ikinci alert "yinelenen" diye düşer). Ayrıntı: CHANGELOG açık bulgu 47.
 
 1. Script'in **Inputs → Webhook token** alanına `.env`'deki `TV_WEBHOOK_TOKEN` değerini yaz.
 2. Alarm oluştur → Condition: strateji için **"alert() function calls only"**, `pine/heartbeat_indicator.pine` için
@@ -293,7 +305,7 @@ Uçtan uca test TradingView'dan yapılır: heartbeat alarmını kur, saat başı
 | `/durum` | mod, duraklatma/KILL durumu, kuyruk, bugünkü sinyaller, son alert ve heartbeat |
 | `/risk` | işlem başı risk, günlük bütçe (temkinli sayım), bugünkü girişler ve durumları |
 | `/pnl` | Faz 1'de emir yok: iletilen giriş sayısı ve sayılan risk |
-| `/atladim [id]` | almadığın girişin riskini bütçeden düşer **ve o girişin stop/çıkış mesajlarını keser** (id yoksa: sana ulaşmış son giriş). Yanıt hangi girişin işaretlendiğini söyler |
+| `/atladim [id]` | almadığın girişin riskini bütçeden düşer **ve o girişin stop/çıkış mesajlarını keser** (id yoksa: sana ulaşmış son giriş). Yanıt hangi girişin işaretlendiğini söyler. Daha yeni bir girişin mesajı "belki ulaştı" durumundaysa tahmin yürütmez, id ister. id baştaki sıfırla yazılmaz (`/atladim 7`, `07` değil) |
 | `/aldim <id>` | `/atladim`'ı (ya da "iletilemedi" işaretini) geri alır |
 | `/duraklat` · `/devam` | yeni giriş sinyallerini durdurur / sürdürür (stop, çıkış ve iptal mesajları her zaman gelir) |
 | `/kill <PIN>` | yeni girişleri kalıcı keser; açık pozisyonu **sen** kapatırsın. Geri dönüş: `/devam <PIN>`. PIN içeren mesajı bot siler; silemezse uyarır. 6+ haneli sayı içeren **her** mesaj da (PIN olsun olmasın) silinir |
@@ -343,7 +355,13 @@ Uçtan uca test TradingView'dan yapılır: heartbeat alarmını kur, saat başı
 | "TradingView alarm hattı sessiz" | alarm durmuş ya da süresi dolmuş; TradingView kesintisi; tatil | TradingView Alerts paneli |
 | "[ALARM] Bot … yeniden başladı" | servis yeniden başlatıldı (güncelleme) ya da çöktü; "N. kez" yazıyorsa çökme döngüsü | `journalctl -u propbot -n 100`; o aralıkta alert geldiyse TradingView Alert Log |
 | "[ALARM] Bot … arasında kapalıydı" | sunucu/servis 90 saniyeden uzun kapalı kaldı | `systemctl status propbot`, `journalctl -u propbot`; TradingView Alert Log |
-| "[BAYAT SİNYAL]" sık geliyor | sunucu saati kaymış; ağ gecikmesi | `chronyc tracking`, `/saglik` gecikme medyanı |
+| "[BAYAT SİNYAL]" sık (ya da her girişte) geliyor | **TradingView verisi gecikmeli** (gerçek zamanlı abonelik yok); sunucu saati kaymış; ağ gecikmesi | `/saglik` → "bar kapanışı → alım" medyanı dakikalar mertebesindeyse veri gecikmelidir (1. bölüm); saniyelerse `chronyc tracking` |
+| "Hangi girişi atladığın belli değil" | çıplak `/atladim` yazdın, ama daha yeni bir girişin mesajı sana ulaşmış da olabilir, ulaşmamış da | hangisini kastettiysen id ile yaz: `/atladim <id>` |
+| "[ALARM] Telegram'dan gelen N mesaj okunamadı ve atlandı" | Telegram, kütüphanenin tanımadığı biçimde bir mesaj gönderdi (yeni bir mesaj türü, ya da biri bota öyle bir şey yazdı) | komutun yanıtsız kaldıysa yeniden gönder; sık oluyorsa python-telegram-bot sürümü yükseltilmeli (Claude Code'a bildir) |
+| "[ALARM] Telegram güncellemeleri okunamıyor" | komutlar işlenmiyor olabilir (`/duraklat`, `/kill` dahil) | `journalctl -u propbot -n 50`; sinyalleri durdurman gerekirse `sudo systemctl stop propbot` |
+| `HATA: … dinlenemiyor` | port başka bir süreçte (çoğunlukla zaten çalışan servis) | `ss -ltnp \| grep 8000`; elle ikinci bir `propbot serve` başlatma |
+| `HATA: bu veritabanıyla çalışan başka bir propbot serve var` | servis çalışırken elle bir kopya daha başlatıldı | `systemctl status propbot`; kopya hiçbir şeye dokunmadan çıkar |
+| `status=226/NAMESPACE` | birimdeki `ReadWritePaths` klasörü yok (depo yolu değişti ama satır değişmedi; `data/` oluşturulmadı) | birimdeki işaretli dört satır; `mkdir -p data` |
 | `/saglik` yanıt vermiyor | Telegram token/sohbet kimliği yanlış; ağ yok | `journalctl -u propbot -n 50` |
 | Mesajda "boyut hesaplanamadı" | venue profilinde `contract.*` boş | 3.3 |
 
@@ -351,9 +369,15 @@ Uçtan uca test TradingView'dan yapılır: heartbeat alarmını kur, saat başı
 
 1. Başlangıç: stratejiler TradingView'da derlenmiş (Faz 0 doğrulama listesi), alarmlar kurulu, heartbeat çalışıyor.
 2. **10 işlem günü** boyunca servisi izlenen pencerelerde yeniden başlatma.
-3. Her gün sonunda TradingView → Alerts → Log'u dışa aktar ve bot kaydıyla karşılaştır:
+3. Her gün TradingView → Alerts panelinde **bütün** alarmların "Active" olduğuna bak: heartbeat yalnızca kendi alarmının
+   ve webhook yolunun çalıştığını gösterir; durmuş tek bir strateji alarmı hattı sessizleştirmez (açık bulgu 49).
+4. Her gün sonunda TradingView → Alerts → Log'u dışa aktar ve bot kaydıyla karşılaştır:
    ```bash
    uv run propbot signals report --since 2026-12-01 --csv reports/sinyaller.csv
    ```
    Ölçütler: kaçan sinyal 0, çift mesaj 0, uçtan uca medyan gecikme (bar kapanışı → Telegram) < 5 sn.
-4. Sonuçları (rapor çıktısı + TradingView Alert Log sayıları) Claude Code oturumuna yapıştır.
+   Rapordaki "iletilen giriş" yalnızca mesajı Telegram'a **gönderilmiş** girişleri sayar; "ulaşmayan" sütunu ve "Telegram
+   teslimi" satırı süresi dolan / reddedilen mesajları gösterir. Bunlardan biri bile varsa §5.7 satırı "SAĞLANMADI",
+   bekleyen mesaj varsa "EKSİK" yazar (medyan yalnızca gönderilen mesajlardan hesaplandığı için tek başına yetmez).
+   CSV'deki `delivery` sütunu her sinyalin mesajına ne olduğunu söyler.
+5. Sonuçları (rapor çıktısı + TradingView Alert Log sayıları) Claude Code oturumuna yapıştır.

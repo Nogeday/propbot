@@ -14,11 +14,14 @@ mantığının referansı bu dosyalardır (`docs/SPEC.md` §3) ve düzeltilen do
 | `heartbeat_indicator.pine` | Gösterge (strateji değil): alarm hattı için saat başı heartbeat | 1m | `heartbeat` | §5.5 |
 
 - Hepsi Pine v5, tek parça ve doğrudan yapıştırılabilir. v6'ya yükseltme yok.
+- **Master ile bağımsız NY Open / Asian Sweep script'leri aynı `strategy_id`'leri gönderir.** Sinyal botuna aynı sembolde
+  ya Master'ı ya da bağımsız ikisini bağla, hepsini birlikte değil (`docs/runbook.md` §8, CHANGELOG açık bulgu 47).
 - Varsayılanlar `CME_MINI:MES1!` test profilidir: komisyon kontrat başı $0,50 (taraf başı), slipaj 1 tick, başlangıç
   sermayesi 100.000, marjin %0. Başka enstrümanda Properties'ten değiştir (her dosyanın başlığındaki COSTS notu).
 - Asian Sweep ve Master'ın S2 motoru ~23 saat işlem gören enstrüman ister (MES/ES, US500 CFD); SPY/SPX'te çalışmaz.
 - TradingView'dan güncelleme: Pine Editor → script'i aç → `Ctrl+A`, `Ctrl+C` → Metin Düzenleyici → `Ctrl+V` → aynı adla
   bu klasöre kaydet.
 - `heartbeat_indicator.pine` Faz 1'de yazıldı (TradingView kaynağı yoktur, depo kaynaktır); emir üretmez, yalnızca
-  alıcının "alarm hattı sessiz" denetimi için saat başı küçük bir JSON gönderir. Henüz derlenmedi (doğrulama listesi H).
+  alıcının "alarm hattı sessiz" denetimi için saat başı küçük bir JSON gönderir. Bar süresi aralığı tam bölen
+  grafiklerde çalışır (1, 2, 3, 5, 10, 15, 30, 60 dk); 1 dakika önerilir. Henüz derlenmedi (doğrulama listesi H).
 - TradingView'da yapılacak kontroller: `docs/tv-verification-checklist.md`. Değişiklik geçmişi: `CHANGELOG.md`.

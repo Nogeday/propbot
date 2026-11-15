@@ -55,9 +55,13 @@ SPEC §8.1 ön kontrolü `gerçekleşen + açık risk + yeni risk ≤ günlük b
   yenisinin üzerine yazamaz.
 
 **Hangi mesajlar her zaman gelir.** Duraklatma ve KILL yalnızca yeni girişleri keser; stop güncellemesi, çıkış ve iptal
-mesajları risk azalttığı için her durumda iletilir. Kullanıcının atladığını bildirdiği ya da hiç iletilmemiş bir girişin
-takip mesajları gönderilmez. Mesajı "iletim belirsiz" kalan bir girişin takip mesajları, kullanıcı pozisyonda olabileceği
-için, bir notla iletilir.
+mesajları risk azalttığı için her durumda iletilir. Kullanıcının atladığını bildirdiği (`/atladim`) bir girişin takip
+mesajları gönderilmez. Mesajı zamanında gönderilemediği için bütçeden düşülen ("iletilemedi") bir girişin takip
+mesajları "(giriş mesajı sana ulaşmamış olabilir; pozisyon açmadıysan yok say)" notuyla yine iletilir. Mesajı "iletim
+belirsiz" kalan bir girişin bütçesi sayılmaya devam eder ve takip mesajları, kullanıcı pozisyonda olabileceği için,
+olağan biçimde iletilir. *(2026-11-15: bu paragraf uygulanan davranışla hizalandı; önceki metin notu "iletim belirsiz"
+girişe atfediyordu. Aynı tarihte eklenenler: kalıcı hata alan "iletim belirsiz" giriş de bütçeden düşülmez; id'siz
+`/atladim`, daha yeni bir girişin teslimi kuşkuluysa tahmin yürütmez ve id ister — SPEC §5.4.)*
 
 **Kuralların tazeliği.** Venue kuralları 30 günden eskiyse `signal` modu SPEC §8.1 gereği çalışmaya devam eder; giriş
 mesajlarının başına "[KURALLAR DOĞRULANMADI …]" satırı eklenir ve günde bir alarm gönderilir.

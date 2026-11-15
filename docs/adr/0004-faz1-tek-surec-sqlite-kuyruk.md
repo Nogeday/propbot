@@ -83,6 +83,9 @@ traceback olarak basılmaz, aynı zincirden geçer: python-telegram-bot'un `Inva
 
 - Tek makine, tek süreç; yatay ölçek yok (gerek de yok). Aynı bot token'ıyla ikinci bir kopya çalışırsa Telegram
   `Conflict` verir ve alarm üretilir.
+  *Güncelleme (2026-11-15, uygulama denetimi PORT-1):* aynı veritabanında ikinci bir `propbot serve` artık hiç
+  başlamaz (`<db>.lock` üzerinde `flock`), ve dinleme soketi arka plan görevlerinden önce bağlanır. `Conflict` alarmı
+  yalnızca başka bir veritabanı/makinede aynı token'la çalışan kopya için kalır.
 - Süreç kapalıyken gelen alert kaybolur (TradingView yeniden denemez). İzleyici, bir izleme penceresine denk gelen
   kapalı kalma süresini açılışta bildirir; heartbeat sessizliği ayrıca alarm üretir. Yeniden başlatmalar izlenen
   pencerelerin dışında yapılır.
