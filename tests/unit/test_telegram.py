@@ -1143,21 +1143,32 @@ def test_uncertainty_is_sticky() -> None:
     drive(scenario)
 
 
-def _permanent_failures() -> list[tuple[BaseException | tg.Response, str]]:
+REFUSED = "GÖNDERİLEMEDİ ve atlandı"
+MAY_HAVE_ARRIVED = "sana ULAŞMAMIŞ OLABİLİR"
+
+
+def _permanent_failures() -> list[tuple[BaseException | tg.Response, str, str]]:
+    """Outcome of sendMessage, the class it is recorded as, and what the user is told."""
     return [
-        (tg.error_response(400, "Bad Request: message text is empty"), "BadRequest"),
-        (tg.error_response(403, "Forbidden: bot was blocked by the user"), "Forbidden"),
-        (tg.error_response(400, "migrated", migrate_to_chat_id=tg.GROUP_ID), "ChatMigrated"),
-        (tg.error_response(409, "Conflict"), "Conflict"),
-        (TelegramError(f"odd {BOT_TOKEN}"), "TelegramError"),
-        (BadRequest("chat not found"), "BadRequest"),
-        (Forbidden("kicked"), "Forbidden"),
+        (tg.error_response(400, "Bad Request: message text is empty"), "BadRequest", REFUSED),
+        (tg.error_response(403, "Forbidden: bot was blocked by the user"), "Forbidden", REFUSED),
+        (
+            tg.error_response(400, "migrated", migrate_to_chat_id=tg.GROUP_ID),
+            "ChatMigrated",
+            REFUSED,
+        ),
+        (tg.error_response(409, "Conflict"), "Conflict", REFUSED),
+        (BadRequest("chat not found"), "BadRequest", REFUSED),
+        (Forbidden("kicked"), "Forbidden", REFUSED),
+        # Not an answer of the Bot API: nobody knows whether the message arrived.
+        (TelegramError(f"odd {BOT_TOKEN}"), "TelegramError", MAY_HAVE_ARRIVED),
+        ((200, b"<html>gateway</html>"), "TelegramError", MAY_HAVE_ARRIVED),
     ]
 
 
-@pytest.mark.parametrize("index", range(7))
+@pytest.mark.parametrize("index", range(8))
 def test_a_permanent_failure_is_set_aside_and_the_queue_moves_on(index: int) -> None:
-    outcome, error_name = _permanent_failures()[index]
+    outcome, error_name, fate = _permanent_failures()[index]
 
     async def scenario(h: Harness) -> None:
         bad = h.enqueue("bozuk", kind=OutboxKind.SIGNAL)
@@ -1175,8 +1186,9 @@ def test_a_permanent_failure_is_set_aside_and_the_queue_moves_on(index: int) -> 
             "bozuk",
             "sağlam",
             f"[ALARM] Telegram bir mesaj için kalıcı hata verdi ({error_name}); mesaj "
-            "GÖNDERİLEMEDİ ve atlandı.\nTradingView Alert Log'undan ne olduğunu kontrol et.",
+            f"{fate}.\nTradingView Alert Log'undan ne olduğunu kontrol et.",
         ]
+        assert row.delivery_uncertain is (fate == MAY_HAVE_ARRIVED)
         assert {
             "event": "telegram_send_failed",
             "error_type": error_name,
@@ -1240,6 +1252,59 @@ def test_an_entry_that_telegram_refuses_is_released_and_reported() -> None:
             "TradingView Alert Log'undan ne olduğunu kontrol et. Bu bir giriş sinyaliydi: ATLA "
             "say; bütçeden düşüldü."
         )
+
+    drive(scenario)
+
+
+def test_an_entry_that_may_have_arrived_is_not_released_by_a_later_refusal() -> None:
+    # The first attempt timed out after the request left: the user may have the signal.
+    # "Telegram refused the retry" is then no proof that they do not, and a release would
+    # also silence that trade's stop and exit messages.
+    async def scenario(h: Harness) -> None:
+        await h.first_step()
+        signal_id, message_id = h.entry(expires_at_ms=NOW_MS + 10 * MINUTE_MS)
+        h.fake.script("sendMessage", TimedOut(), BadRequest("message is too long"))
+
+        assert await h.service.send_due() is True
+        assert h.row(message_id).delivery_uncertain is True
+        h.clock.now_ms = h.row(message_id).next_attempt_ms
+        assert await h.drain() == 2  # the refused retry, then the notice
+
+        assert h.row(message_id).status is OutboxStatus.FAILED
+        assert h.counted(signal_id) == (True, None)
+        assert h.fake.sent_texts()[-1] == uncertain_notice(
+            signal_id, "Telegram sonra kalıcı hata verdi: BadRequest"
+        )
+        assert not any("GÖNDERİLEMEDİ" in text for text in h.fake.sent_texts())
+
+    drive(scenario)
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        TelegramError("Invalid server response"),
+        (200, b"not json"),
+        # Accepted by Telegram, but the library cannot build a Message from the answer.
+        tg.ok({"sent": "yes, but this is no message object"}),
+    ],
+    ids=["plain_telegram_error", "answer_is_not_json", "answer_is_not_a_message"],
+)
+def test_an_entry_whose_send_ended_in_an_unreadable_way_is_not_released(
+    outcome: tg.Scripted,
+) -> None:
+    async def scenario(h: Harness) -> None:
+        await h.first_step()
+        signal_id, message_id = h.entry(expires_at_ms=NOW_MS + 10 * MINUTE_MS)
+        h.fake.script("sendMessage", outcome)
+
+        assert await h.drain() == 2
+
+        row = h.row(message_id)
+        assert (row.status, row.delivery_uncertain) == (OutboxStatus.FAILED, True)
+        assert h.counted(signal_id) == (True, None)
+        assert h.fake.sent_texts()[-1].startswith(f"[İLETİM BELİRSİZ] id {signal_id}: ")
+        assert h.fake.sent_texts()[-1].endswith(f"/atladim {signal_id}")
 
     drive(scenario)
 

@@ -1668,6 +1668,49 @@ def test_mark_failed(file_store: Store, db_path: Path) -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("earlier_attempt", "last_attempt", "expected"),
+    [
+        (False, False, False),
+        (False, True, True),  # the attempt that ended it may itself have delivered
+        (True, False, True),  # sticky: an earlier doubtful attempt is not forgotten
+        (True, True, True),
+    ],
+)
+def test_a_failed_message_keeps_the_doubt_about_its_delivery(
+    store: Store, earlier_attempt: bool, last_attempt: bool, expected: bool
+) -> None:
+    message_id = enqueue(store)
+
+    with store.transaction() as tx:
+        tx.mark_message_retry(
+            message_id, next_attempt_ms=NOW_MS + 1000, error="e", uncertain=earlier_attempt
+        )
+        tx.mark_message_failed(message_id, error="e", now_ms=NOW_MS + 9, uncertain=last_attempt)
+        row = tx.get_message(message_id)
+
+    assert row is not None
+    assert (row.status, row.delivery_uncertain) == (OutboxStatus.FAILED, expected)
+
+
+@pytest.mark.parametrize("uncertain", [False, True])
+def test_sending_or_expiring_a_message_does_not_touch_the_doubt(
+    store: Store, uncertain: bool
+) -> None:
+    sent, expired = enqueue(store), enqueue(store, expires_at_ms=NOW_MS + 10)
+
+    with store.transaction() as tx:
+        for message_id in (sent, expired):
+            tx.mark_message_retry(
+                message_id, next_attempt_ms=NOW_MS + 1000, error="e", uncertain=uncertain
+            )
+        tx.mark_message_sent(sent, NOW_MS + 5)
+        tx.mark_message_expired(expired, NOW_MS + 11)
+        rows = [tx.get_message(sent), tx.get_message(expired)]
+
+    assert [row.delivery_uncertain for row in rows if row is not None] == [uncertain, uncertain]
+
+
 def test_mark_expired(file_store: Store, db_path: Path) -> None:
     message_id = enqueue(file_store, expires_at_ms=NOW_MS + 10, expired_text="geç kaldı")
 

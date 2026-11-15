@@ -507,7 +507,8 @@ WHERE created_at_ms >= ? AND created_at_ms < ? ORDER BY id
 # Leaves `pending` for good. A NULL error keeps the last retry error as history.
 _SQL_CLOSE_MESSAGE: Final = f"""
 UPDATE outbox
-SET status = ?, sent_at_ms = ?, closed_at_ms = ?, last_error = COALESCE(?, last_error)
+SET status = ?, sent_at_ms = ?, closed_at_ms = ?, last_error = COALESCE(?, last_error),
+    delivery_uncertain = MAX(delivery_uncertain, ?)
 WHERE id = ? AND status = '{OutboxStatus.PENDING.value}'
 """
 _SQL_OUTBOX_COUNTS: Final = "SELECT status, COUNT(*) FROM outbox GROUP BY status"
@@ -939,13 +940,17 @@ class Tx:
             _outbox_row(row) for row in self._all(_SQL_MESSAGES_CREATED_BETWEEN, (start_ms, end_ms))
         ]
 
-    def mark_message_failed(self, message_id: int, *, error: str, now_ms: int) -> None:
+    def mark_message_failed(
+        self, message_id: int, *, error: str, now_ms: int, uncertain: bool = False
+    ) -> None:
+        """Give up on a message. `uncertain`: this last attempt may still have delivered it."""
         self._close_message(
             message_id,
             OutboxStatus.FAILED,
             now_ms,
             sent_at_ms=None,
             error=error[:MAX_ERROR_CHARS],
+            uncertain=uncertain,
         )
 
     def mark_message_expired(self, message_id: int, now_ms: int) -> None:
@@ -966,9 +971,11 @@ class Tx:
         *,
         sent_at_ms: int | None,
         error: str | None,
+        uncertain: bool = False,
     ) -> None:
         changed = self._change(
-            _SQL_CLOSE_MESSAGE, (status.value, sent_at_ms, now_ms, error, message_id)
+            _SQL_CLOSE_MESSAGE,
+            (status.value, sent_at_ms, now_ms, error, int(uncertain), message_id),
         )
         self._require_pending_changed(message_id, changed)
 

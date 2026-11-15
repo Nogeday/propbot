@@ -47,7 +47,9 @@ from telegram import LinkPreviewOptions, MessageEntity, Update
 from telegram.constants import ChatType, MessageLimit
 from telegram.error import (
     BadRequest,
+    ChatMigrated,
     Conflict,
+    Forbidden,
     InvalidToken,
     NetworkError,
     RetryAfter,
@@ -108,6 +110,9 @@ _CODE_TOKEN: Final = re.compile(
 # Exceptions (httpx / httpcore) proving that the HTTP request was never written: the
 # connection could not be opened, or no pooled connection became free.
 _NEVER_SENT_ERRORS: Final = frozenset({"ConnectError", "ConnectTimeout", "PoolTimeout"})
+# Telegram answered and refused the message: it did not arrive, and retrying cannot help.
+# (BadRequest subclasses NetworkError, so it must be caught before that class.)
+_REFUSALS: Final = (BadRequest, Forbidden, ChatMigrated, Conflict)
 _HTTP_LIBRARIES: Final = frozenset({"httpx", "httpcore"})
 
 _FLAG_CLEAR: Final = "0"
@@ -139,13 +144,26 @@ _log = structlog.get_logger(__name__)
 
 
 def _after_permanent_failure(tx: Tx, row: OutboxRow, delivery: "_Delivery") -> None:
-    """Telegram refused this message for good, so it did not arrive: do not let that be silent.
+    """A message was given up for good: do not let that be silent.
 
-    An entry that never reached the user is released from the budget, and the user is told
-    (throttled) that a message was dropped. A failed alarm raises no further alarm.
+    An entry that provably never reached the user is released from the budget, and the user
+    is told (throttled) that a message was dropped. An entry that MAY have arrived (an
+    earlier attempt timed out after the request left, or this one ended in an error nobody
+    can interpret) stays counted and the user is asked, as when such an entry expires. A
+    failed alarm raises no further alarm.
     """
+    uncertain = row.delivery_uncertain or delivery.uncertain
     released = False
     if row.signal_id is not None and row.expires_at_ms is not None:
+        if uncertain:
+            tx.enqueue_message(
+                kind=OutboxKind.NOTICE,
+                text=_uncertain_notice(
+                    row.signal_id, f"Telegram sonra kalıcı hata verdi: {delivery.error}"
+                ),
+                now_ms=delivery.at_ms,
+            )
+            return
         entry = tx.get_budget_entry(row.signal_id)
         if entry is not None and entry.counted:
             tx.set_budget_counted(
@@ -158,9 +176,9 @@ def _after_permanent_failure(tx: Tx, row: OutboxRow, delivery: "_Delivery") -> N
     if row.kind is OutboxKind.ALARM:
         return
     subject = "bir mesaj" if row.signal_id is None else f"sinyal id {row.signal_id} mesajı"
+    fate = "sana ULAŞMAMIŞ OLABİLİR" if uncertain else "GÖNDERİLEMEDİ ve atlandı"
     text = (
-        f"[ALARM] Telegram {subject} için kalıcı hata verdi ({delivery.error}); mesaj "
-        "GÖNDERİLEMEDİ ve atlandı.\n"
+        f"[ALARM] Telegram {subject} için kalıcı hata verdi ({delivery.error}); mesaj {fate}.\n"
         "TradingView Alert Log'undan ne olduğunu kontrol et."
     )
     if released:
@@ -320,6 +338,13 @@ def code_entity_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
+def _message_parts(text: str) -> tuple[str, list[MessageEntity]]:
+    """The text as it is sent (cut to Telegram's limit) and its `code` entities. No I/O."""
+    text = fit_text(text)
+    spans = code_entity_spans(text)[: int(MessageLimit.MESSAGE_ENTITIES)]
+    return text, [MessageEntity(MessageEntity.CODE, offset, length) for offset, length in spans]
+
+
 def fit_text(text: str) -> str:
     """Cut a text that exceeds Telegram's message limit, marking the cut.
 
@@ -382,8 +407,11 @@ def _flag(tx: Tx, key: StateKey) -> bool:
     return tx.get_state(key) not in (None, _FLAG_CLEAR)
 
 
-def _uncertain_notice(signal_id: int, *, dropped: bool) -> str:
-    why = "duraklatma/KILL nedeniyle yeniden gönderilmedi" if dropped else "geçerliliği doldu"
+_WHY_EXPIRED: Final = "geçerliliği doldu"
+_WHY_DROPPED: Final = "duraklatma/KILL nedeniyle yeniden gönderilmedi"
+
+
+def _uncertain_notice(signal_id: int, why: str) -> str:
     return (
         f"[İLETİM BELİRSİZ] id {signal_id}: giriş sinyali sana ulaşmış da olabilir, ulaşmamış "
         f"da ({why}). Gördüysen ve girdiysen bir şey yapma; görmediysen ya da girmediysen: "
@@ -631,7 +659,7 @@ class TelegramService:
             if signal_id is not None:
                 tx.enqueue_message(
                     kind=OutboxKind.NOTICE,
-                    text=_uncertain_notice(signal_id, dropped=dropped),
+                    text=_uncertain_notice(signal_id, _WHY_DROPPED if dropped else _WHY_EXPIRED),
                     now_ms=now_ms,
                 )
             return
@@ -649,43 +677,7 @@ class TelegramService:
 
     async def _deliver(self, row: OutboxRow, now_ms: int) -> _Delivery:
         """Send one outbox row and classify the result. Raises nothing but cancellation."""
-        try:
-            text = row.text
-            late_ms = now_ms - row.created_at_ms
-            if (
-                row.kind is OutboxKind.SIGNAL
-                and row.expires_at_ms is None
-                and late_ms > self._validity_ms
-            ):
-                text = f"[GEÇ İLETİLDİ +{fmt_duration(late_ms / _SECOND_MS)}] {text}"
-            await self._send_text(text)
-        except InvalidToken:
-            self._fatal_reason = _FATAL_TOKEN
-            return _Delivery(_Result.FATAL, self._clock())
-        except RetryAfter as error:
-            at_ms = self._clock()
-            until_ms = at_ms + math.ceil(_retry_after_seconds(error) * _SECOND_MS)
-            self._retry_after_until_ms = until_ms
-            delivery = _Delivery(_Result.RETRY, at_ms, type(error).__name__, until_ms)
-        except BadRequest as error:
-            # Subclasses NetworkError, but the request itself is wrong: retrying cannot help.
-            delivery = _Delivery(_Result.FAILED, self._clock(), type(error).__name__)
-        except NetworkError as error:
-            at_ms = self._clock()
-            delivery = _Delivery(
-                _Result.RETRY,
-                at_ms,
-                type(error).__name__,
-                at_ms + _backoff_ms(row.attempts),
-                uncertain=not _never_left(error),
-            )
-        except Exception as error:
-            # Forbidden, ChatMigrated, any other TelegramError, or a bug hit by this one row:
-            # set the row aside so it cannot block the queue.
-            delivery = _Delivery(_Result.FAILED, self._clock(), type(error).__name__)
-        else:
-            delivery = _Delivery(_Result.SENT, self._clock())
-
+        delivery = await self._attempt(row, now_ms)
         fields = {"outbox_id": row.id, "kind": row.kind.value, "signal_id": row.signal_id}
         if delivery.result is _Result.SENT:
             _log.info("telegram_message_sent", attempts=row.attempts + 1, **fields)
@@ -702,6 +694,49 @@ class TelegramService:
             _log.error("telegram_send_failed", error_type=delivery.error, **fields)
         return delivery
 
+    async def _attempt(self, row: OutboxRow, now_ms: int) -> _Delivery:
+        try:
+            text = row.text
+            late_ms = now_ms - row.created_at_ms
+            if (
+                row.kind is OutboxKind.SIGNAL
+                and row.expires_at_ms is None
+                and late_ms > self._validity_ms
+            ):
+                text = f"[GEÇ İLETİLDİ +{fmt_duration(late_ms / _SECOND_MS)}] {text}"
+            text, entities = _message_parts(text)
+        except Exception as error:
+            # A bug hit by this one row before anything was sent: set the row aside so it
+            # cannot block the queue.
+            return _Delivery(_Result.FAILED, self._clock(), type(error).__name__)
+        try:
+            await self._send_parts(text, entities)
+        except InvalidToken:
+            self._fatal_reason = _FATAL_TOKEN
+            return _Delivery(_Result.FATAL, self._clock())
+        except RetryAfter as error:
+            at_ms = self._clock()
+            until_ms = at_ms + math.ceil(_retry_after_seconds(error) * _SECOND_MS)
+            self._retry_after_until_ms = until_ms
+            return _Delivery(_Result.RETRY, at_ms, type(error).__name__, until_ms)
+        except _REFUSALS as error:
+            return _Delivery(_Result.FAILED, self._clock(), type(error).__name__)
+        except NetworkError as error:
+            at_ms = self._clock()
+            return _Delivery(
+                _Result.RETRY,
+                at_ms,
+                type(error).__name__,
+                at_ms + _backoff_ms(row.attempts),
+                uncertain=not _never_left(error),
+            )
+        except Exception as error:
+            # An answer the library could not read (a plain TelegramError), or an error
+            # raised after the request had left: the row is set aside, but the message may
+            # have arrived.
+            return _Delivery(_Result.FAILED, self._clock(), type(error).__name__, uncertain=True)
+        return _Delivery(_Result.SENT, self._clock())
+
     def _record(self, row: OutboxRow, delivery: _Delivery) -> None:
         """Recording transaction (worker thread)."""
         with self._store.transaction() as tx:
@@ -715,14 +750,19 @@ class TelegramService:
                     uncertain=delivery.uncertain,
                 )
             else:
-                tx.mark_message_failed(row.id, error=delivery.error, now_ms=delivery.at_ms)
+                tx.mark_message_failed(
+                    row.id,
+                    error=delivery.error,
+                    now_ms=delivery.at_ms,
+                    uncertain=delivery.uncertain,
+                )
                 _after_permanent_failure(tx, row, delivery)
 
     async def _send_text(self, text: str) -> None:
         """Send plain text to the one allowed chat; domain-like tokens become `code`."""
-        text = fit_text(text)
-        spans = code_entity_spans(text)[: int(MessageLimit.MESSAGE_ENTITIES)]
-        entities = [MessageEntity(MessageEntity.CODE, offset, length) for offset, length in spans]
+        await self._send_parts(*_message_parts(text))
+
+    async def _send_parts(self, text: str, entities: list[MessageEntity]) -> None:
         await self.application.bot.send_message(
             chat_id=self._chat_id,
             text=text,
