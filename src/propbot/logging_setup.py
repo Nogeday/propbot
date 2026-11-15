@@ -9,12 +9,19 @@ formatted traceback, before the line is rendered.
 structlog events are redacted a first time before they become a `logging.LogRecord`, so a
 second handler on the root logger never sees them raw. Records of other libraries are
 redacted only by the handler installed here.
+
+Records of python-telegram-bot are logged WITHOUT any value (`VALUE_FREE_LOGGERS`): the
+message template, the exception types and where they were raised, nothing else. That
+library logs whole updates when it cannot parse them, and an update is somebody's chat
+message: a mistyped PIN or a stranger's text is not a known secret the redactor could
+star out.
 """
 
 import logging
 import math
 import re
 import sys
+import traceback
 from collections.abc import Mapping, Sequence
 from typing import Final, TextIO
 from urllib.parse import quote
@@ -32,6 +39,10 @@ QUIET_LOGGERS: Final = ("httpx", "httpx2", "httpcore", "httpcore2")
 # python-telegram-bot logs whole updates at DEBUG, and an update may be the user's
 # `/kill <PIN>` message. These loggers never go below INFO, whatever level is configured.
 INFO_FLOOR_LOGGERS: Final = ("telegram", "telegram.ext")
+# Loggers (and their children) whose records are rendered without arguments and without
+# exception texts: "Error while parsing updates! Received data was %r" carries every
+# pending chat message, and an exception text may quote the value that did not parse.
+VALUE_FREE_LOGGERS: Final = ("telegram",)
 
 _LEVELS: Final[Mapping[str, int]] = {
     "DEBUG": logging.DEBUG,
@@ -43,6 +54,9 @@ _LEVELS: Final[Mapping[str, int]] = {
 _LEADING_KEYS: Final = ("timestamp", "level", "logger", "event")
 # Containers nested deeper than this are logged as their (redacted) repr.
 _MAX_DEPTH: Final = 6
+# Exceptions of one chain (cause / context) that are listed for a value-free record.
+_MAX_CHAIN: Final = 8
+_CHAIN_SEPARATOR: Final = "\n-- caused by / raised while handling --\n"
 
 _render_json: Final = structlog.processors.JSONRenderer(ensure_ascii=False)
 
@@ -88,6 +102,7 @@ def configure_logging(
     foreign_pre_chain: list[Processor] = [
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
+        _drop_library_values,
     ]
     processors: list[Processor] = [
         structlog.stdlib.ProcessorFormatter.remove_processors_meta,
@@ -191,6 +206,54 @@ class _Redactor:
             if isinstance(value, list | tuple | set | frozenset):
                 return [self._clean(item, depth + 1) for item in value]
         return self._text(repr(value))
+
+
+def _is_value_free(logger_name: str) -> bool:
+    return any(
+        logger_name == name or logger_name.startswith(name + ".") for name in VALUE_FREE_LOGGERS
+    )
+
+
+def _traceback_without_texts(error: BaseException) -> str:
+    """Where each exception of a chain was raised and its type: no exception text, no source."""
+    blocks: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen and len(blocks) < _MAX_CHAIN:
+        seen.add(id(current))
+        kind = type(current)
+        frames = [
+            f'  File "{frame.filename}", line {frame.lineno}, in {frame.name}'
+            for frame in traceback.extract_tb(current.__traceback__)
+        ]
+        blocks.append("\n".join([*frames, f"{kind.__module__}.{kind.__qualname__}"]))
+        if current.__cause__ is not None:
+            current = current.__cause__
+        elif current.__suppress_context__:
+            current = None
+        else:
+            current = current.__context__
+    return _CHAIN_SEPARATOR.join(blocks)
+
+
+def _drop_library_values(
+    logger: WrappedLogger, method_name: str, event_dict: EventDict
+) -> EventDict:
+    """Foreign pre-chain: reduce a record of a `VALUE_FREE_LOGGERS` logger to what is constant.
+
+    The event becomes the message template (the arguments are never merged in) and the
+    exception becomes a traceback without exception texts.
+    """
+    record = event_dict.get("_record")
+    if not isinstance(record, logging.LogRecord) or not _is_value_free(record.name):
+        return event_dict
+    template = record.msg
+    event_dict["event"] = template if isinstance(template, str) else type(template).__name__
+    exc_info = event_dict.pop("exc_info", None)
+    error = exc_info[1] if isinstance(exc_info, tuple) and len(exc_info) > 1 else exc_info
+    if isinstance(error, BaseException):
+        event_dict["exception"] = _traceback_without_texts(error)
+    return event_dict
 
 
 def _add_timestamp(logger: WrappedLogger, method_name: str, event_dict: EventDict) -> EventDict:

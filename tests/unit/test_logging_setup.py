@@ -19,6 +19,7 @@ from propbot.logging_setup import (
     MIN_SECRET_LENGTH,
     QUIET_LOGGERS,
     REDACTED,
+    VALUE_FREE_LOGGERS,
     configure_logging,
     redact,
     reset_logging,
@@ -373,36 +374,38 @@ def _struct_stack_info() -> None:
     structlog.get_logger("propbot.test").info(f"dump {PIN}", stack_info=True)
 
 
+# "Foreign" = a stdlib logger of another library. python-telegram-bot's loggers are not
+# used for these: their records are logged without values (see the tests further down).
 def _foreign_message() -> None:
-    logging.getLogger("telegram").warning(f"Invalid token {BOT_TOKEN}")
+    logging.getLogger("uvicorn.error").warning(f"Invalid token {BOT_TOKEN}")
 
 
 def _foreign_positional_args() -> None:
-    logging.getLogger("telegram.ext.Updater").warning(
+    logging.getLogger("uvicorn.error").warning(
         "Error while calling %s for bot%s (attempt %d)", "getUpdates", BOT_TOKEN, 3
     )
 
 
 def _foreign_mapping_args() -> None:
-    logging.getLogger("telegram").warning("pin %(pin)s refused", {"pin": PIN})
+    logging.getLogger("uvicorn").warning("pin %(pin)s refused", {"pin": PIN})
 
 
 def _foreign_message_object() -> None:
-    logging.getLogger("telegram").error(RuntimeError(f"bad pin {PIN}"))
+    logging.getLogger("uvicorn").error(RuntimeError(f"bad pin {PIN}"))
 
 
 def _foreign_exception() -> None:
     try:
         _raise_with_secret()
     except RuntimeError:
-        logging.getLogger("telegram.ext.Application").exception("No error handlers registered")
+        logging.getLogger("uvicorn.error").exception("Exception in ASGI application")
 
 
 def _foreign_exception_with_args() -> None:
     try:
         _raise_with_secret()
     except RuntimeError as error:
-        logging.getLogger("telegram").exception("update %s caused %s", f"/kill {PIN}", error)
+        logging.getLogger("uvicorn").exception("update %s caused %s", f"/kill {PIN}", error)
 
 
 def _foreign_exc_info_tuple() -> None:
@@ -419,15 +422,15 @@ def _foreign_chained_exception() -> None:
         except KeyError as inner:
             raise RuntimeError("network error") from inner
     except RuntimeError:
-        logging.getLogger("telegram").exception("polling failed")
+        logging.getLogger("uvicorn").exception("polling failed")
 
 
 def _foreign_stack_info() -> None:
-    logging.getLogger("telegram").warning("slow call with %s", BOT_TOKEN, stack_info=True)
+    logging.getLogger("uvicorn").warning("slow call with %s", BOT_TOKEN, stack_info=True)
 
 
 def _foreign_dict_message() -> None:
-    logging.getLogger("telegram").warning({"token": BOT_TOKEN})
+    logging.getLogger("uvicorn").warning({"token": BOT_TOKEN})
 
 
 def _foreign_root_logger() -> None:
@@ -435,7 +438,12 @@ def _foreign_root_logger() -> None:
 
 
 def _foreign_url_encoded() -> None:
-    logging.getLogger("telegram").warning("GET /bot%s/getMe", quote(BOT_TOKEN, safe=""))
+    logging.getLogger("uvicorn").warning("GET /bot%s/getMe", quote(BOT_TOKEN, safe=""))
+
+
+def _telegram_template_with_a_secret() -> None:
+    # A value-free record still passes the redactor: a secret inside the template is starred.
+    logging.getLogger("telegram").warning(f"Invalid token {BOT_TOKEN}")
 
 
 def _foreign_warning_level_http_client() -> None:
@@ -478,6 +486,7 @@ EMITTERS: list[Callable[[], None]] = [
     _foreign_root_logger,
     _foreign_url_encoded,
     _foreign_warning_level_http_client,
+    _telegram_template_with_a_secret,
 ]
 
 
@@ -537,7 +546,7 @@ def test_foreign_record_args_are_merged_then_redacted() -> None:
     _foreign_positional_args()
 
     entry = only_line(stream)
-    assert entry["logger"] == "telegram.ext.Updater"
+    assert entry["logger"] == "uvicorn.error"
     assert entry["level"] == "warning"
     assert entry["event"] == "Error while calling getUpdates for bot*** (attempt 3)"
     assert "positional_args" not in entry
@@ -549,7 +558,7 @@ def test_foreign_exception_traceback_is_redacted_but_kept() -> None:
     _foreign_exception_with_args()
 
     entry = only_line(stream)
-    assert entry["logger"] == "telegram"
+    assert entry["logger"] == "uvicorn"
     assert entry["level"] == "error"
     assert entry["event"] == "update /kill *** caused request to bot*** failed"
     assert entry["exception"].startswith("Traceback (most recent call last):")
@@ -575,6 +584,149 @@ def test_foreign_stack_info_is_kept_as_text() -> None:
     entry = only_line(stream)
     assert entry["event"] == "slow call with ***"
     assert entry["stack_info"].startswith("Stack (most recent call last):")
+
+
+# --- python-telegram-bot: records without values ------------------------------------------
+
+# What the library hands to its logger when it cannot build an update: every pending chat
+# message. None of it is a configured secret, so the redactor alone would let it through.
+NEAR_PIN = "424243"  # the PIN with one digit mistyped
+PENDING_UPDATES = [
+    {"update_id": 71, "message": {"text": f"/kill {NEAR_PIN}", "chat": {"id": 4242}}},
+    {"update_id": 72, "message": {"text": "merhaba, ben bir yabancıyım", "chat": {"id": 5151}}},
+]
+TELEGRAM_LOGGERS = [
+    "telegram",
+    "telegram.ext.ExtBot",
+    "telegram.ext.Updater",
+    "telegram.request.BaseRequest",
+]
+
+
+def test_value_free_loggers_are_the_telegram_library() -> None:
+    assert VALUE_FREE_LOGGERS == ("telegram",)
+
+
+@pytest.mark.parametrize("name", TELEGRAM_LOGGERS)
+@pytest.mark.parametrize("level", ["DEBUG", "INFO", "CRITICAL"])
+def test_telegram_library_records_are_logged_without_their_arguments(name: str, level: str) -> None:
+    stream = start(level=level)
+
+    logging.getLogger(name).critical(
+        "Error while parsing updates! Received data was %r", PENDING_UPDATES
+    )
+
+    entry = only_line(stream)
+    assert entry["logger"] == name
+    assert entry["level"] == "critical"
+    assert entry["event"] == "Error while parsing updates! Received data was %r"
+    raw = stream.getvalue()
+    for fragment in (NEAR_PIN, "/kill", "yabancı", "4242", "5151", "update_id"):
+        assert fragment not in raw
+
+
+def test_telegram_library_mapping_arguments_are_dropped_too() -> None:
+    stream = start()
+
+    logging.getLogger("telegram").warning("update %(update)s ignored", {"update": PENDING_UPDATES})
+
+    assert only_line(stream)["event"] == "update %(update)s ignored"
+    assert NEAR_PIN not in stream.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("message", "event"),
+    [
+        (RuntimeError(f"bad update /kill {NEAR_PIN}"), "RuntimeError"),
+        ({"text": f"/kill {NEAR_PIN}"}, "dict"),
+        (PENDING_UPDATES, "list"),
+    ],
+)
+def test_a_telegram_library_message_that_is_not_text_is_named_by_its_type(
+    message: object, event: str
+) -> None:
+    stream = start()
+
+    logging.getLogger("telegram.ext").error(message)
+
+    assert only_line(stream)["event"] == event
+    assert NEAR_PIN not in stream.getvalue()
+
+
+def _raise_parse_error() -> None:
+    try:
+        raise ValueError(f"invalid literal for int() with base 10: '{NEAR_PIN}'")
+    except ValueError as inner:
+        raise TypeError(f"Chat.__init__() cannot use '/kill {NEAR_PIN}'") from inner
+
+
+def test_telegram_library_exceptions_keep_types_and_locations_but_no_text() -> None:
+    stream = start()
+
+    try:
+        _raise_parse_error()
+    except TypeError as error:
+        logging.getLogger("telegram.ext.ExtBot").critical(
+            "Error while parsing updates! Received data was %r", PENDING_UPDATES, exc_info=error
+        )
+
+    entry = only_line(stream)
+    assert "exc_info" not in entry
+    outer, inner = entry["exception"].split("\n-- caused by / raised while handling --\n")
+    assert outer.endswith("builtins.TypeError")
+    assert inner.endswith("builtins.ValueError")
+    assert outer.splitlines()[-2].endswith(", in _raise_parse_error")
+    assert inner.splitlines()[-2].endswith(", in _raise_parse_error")
+    assert all(line.startswith(f'  File "{__file__}", line ') for line in outer.splitlines()[:-1])
+    raw = stream.getvalue()
+    for fragment in (NEAR_PIN, "/kill", "invalid literal", "cannot use"):
+        assert fragment not in raw
+
+
+def test_telegram_library_exception_logged_inside_the_handler_has_no_text() -> None:
+    # `Logger.exception` (exc_info=True) and an implicit context instead of a cause.
+    stream = start()
+
+    try:
+        try:
+            raise KeyError(NEAR_PIN)
+        except KeyError:
+            raise RuntimeError(f"update {NEAR_PIN} failed")  # noqa: B904
+    except RuntimeError:
+        logging.getLogger("telegram.ext.Application").exception("An error was raised")
+
+    entry = only_line(stream)
+    assert entry["event"] == "An error was raised"
+    assert entry["exception"].count("-- caused by / raised while handling --") == 1
+    assert "builtins.RuntimeError" in entry["exception"]
+    assert entry["exception"].endswith("builtins.KeyError")
+    assert NEAR_PIN not in stream.getvalue()
+
+
+def test_an_exception_chain_that_loops_ends() -> None:
+    stream = start()
+    first, second = RuntimeError("a"), RuntimeError("b")
+    first.__cause__, second.__cause__ = second, first
+
+    logging.getLogger("telegram").error("looping", exc_info=first)
+
+    assert only_line(stream)["exception"].count("builtins.RuntimeError") == 2
+
+
+@pytest.mark.parametrize(
+    "name", ["telegramx", "telegram_bot", "mytelegram", "propbot.notify.telegram", "uvicorn"]
+)
+def test_other_loggers_keep_their_arguments_and_exception_texts(name: str) -> None:
+    stream = start()
+
+    try:
+        raise ValueError("value 12345 refused")
+    except ValueError:
+        logging.getLogger(name).exception("update %s failed", "seventeen")
+
+    entry = only_line(stream)
+    assert entry["event"] == "update seventeen failed"
+    assert entry["exception"].endswith("ValueError: value 12345 refused")
 
 
 def test_extra_attributes_of_foreign_records_are_not_rendered() -> None:
@@ -621,7 +773,7 @@ def test_timestamp_digits_are_not_redacted() -> None:
     stream = start(secrets=(year_prefix,))
 
     structlog.get_logger("propbot.test").info("tick", day=f"{year_prefix}01-02")
-    logging.getLogger("telegram").warning("tock %s", f"{year_prefix}01-02")
+    logging.getLogger("uvicorn").warning("tock %s", f"{year_prefix}01-02")
 
     first, second = lines(stream)
     assert first["day"] == "***01-02"
