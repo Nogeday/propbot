@@ -92,8 +92,18 @@ def tick(
     *,
     started_ms: int = LONG_AGO_MS,
     first_tick: bool = False,
+    after_a_gap: bool = False,
 ) -> int:
+    """One monitor tick at `now_ms`.
+
+    The real monitor ticks every 30 seconds; the tests only run the ticks they look at. So a
+    later tick of a process is taken to follow one 30 seconds earlier, unless the test is
+    about a process that did not run for a while (`after_a_gap`) or about the first tick
+    after a start (then the stored last tick is the previous process's).
+    """
     with store.transaction() as tx:
+        if not first_tick and not after_a_gap and tx.get_state(StateKey.LAST_ALIVE_MS):
+            tx.set_state(StateKey.LAST_ALIVE_MS, str(now_ms - 30 * SECOND_MS), now_ms)
         return check_alert_line(
             tx, config, now_ms=now_ms, started_ms=started_ms, first_tick=first_tick
         )
@@ -605,13 +615,52 @@ def test_a_clock_that_did_not_move_forward_is_not_a_restart(store: Store, step_m
     assert state(store, StateKey.RESTARTS_UNREPORTED) is None
 
 
-def test_a_gap_between_later_ticks_is_not_reported_as_downtime(store: Store) -> None:
-    down_from_ms = utc("2026-11-16 14:10")
-    alive_until(store, down_from_ms)
+def test_a_process_that_did_not_run_for_a_while_reports_the_hole(store: Store) -> None:
+    # The laptop slept, the VM was paused, the process was stopped: the same process goes
+    # on afterwards, but in between it answered TradingView as little as a dead one.
+    last_tick_ms = utc("2026-11-17 14:20")  # 09:20 New York
+    resumed_ms = utc("2026-11-17 15:10")
+    alert_received(store, utc("2026-11-17 14:00"))  # the 09:00 heartbeat
+    assert tick(store, last_tick_ms) == 0
 
-    # Not the first tick: the process was alive, only slow.
-    assert tick(store, down_from_ms + 30 * MINUTE_MS, first_tick=False) == 0
-    assert state(store, StateKey.LAST_ALIVE_MS) == str(down_from_ms + 30 * MINUTE_MS)
+    assert tick(store, resumed_ms, after_a_gap=True) == 1
+
+    (alarm,) = outbox(store)
+    assert alarm.kind is OutboxKind.ALARM
+    assert alarm.text == (
+        "[ALARM] Bot 17:20–18:10 TR arasında çalışmadı (makine uykuya geçmiş, süreç askıda "
+        "kalmış ya da sunucu saati ileri alınmış olabilir); bu aralıktaki TradingView alarmları "
+        "alınmadı. Açık pozisyonun varsa stop/çıkışı TradingView'dan kontrol et."
+    )
+    assert alarm.text == messages.downtime_alarm(last_tick_ms, resumed_ms, restarted=False)
+    assert state(store, StateKey.LAST_ALIVE_MS) == str(resumed_ms)
+    # Reported once: the next ordinary tick is 30 s later.
+    assert tick(store, resumed_ms + 30 * SECOND_MS) == 0
+
+
+@pytest.mark.parametrize("gap_ms", [30 * SECOND_MS, 60 * SECOND_MS, 90 * SECOND_MS])
+def test_ordinary_and_slightly_late_ticks_are_not_a_hole(store: Store, gap_ms: int) -> None:
+    last_tick_ms = utc("2026-11-16 14:10")
+    alive_until(store, last_tick_ms)
+
+    assert tick(store, last_tick_ms + gap_ms, after_a_gap=True) == 0
+    assert outbox(store) == []
+    assert state(store, StateKey.RESTARTS_UNREPORTED) is None  # nor is it a restart
+
+
+def test_a_tick_gap_just_above_the_threshold_is_a_hole(store: Store) -> None:
+    last_tick_ms = utc("2026-11-16 14:10")
+    alive_until(store, last_tick_ms)
+
+    assert tick(store, last_tick_ms + 90 * SECOND_MS + 1, after_a_gap=True) == 1
+
+
+def test_a_sleeping_machine_outside_the_watch_windows_is_not_reported(store: Store) -> None:
+    # Friday 22:00 New York to Sunday 10:00 New York: no window in between.
+    set_state(store, StateKey.LAST_ALIVE_MS, str(utc("2026-11-14 03:00")))
+
+    assert tick(store, utc("2026-11-15 15:00"), after_a_gap=True) == 0
+    assert outbox(store) == []
 
 
 def test_the_very_first_start_has_no_downtime(store: Store) -> None:
@@ -842,7 +891,7 @@ def run(scenario: Callable[[], Coroutine[Any, Any, None]]) -> None:
     asyncio.run(scenario())
 
 
-def test_the_monitor_ticks_at_once_and_checks_downtime_on_its_first_tick_only(
+def test_the_monitor_ticks_at_once_and_reports_the_downtime_before_it_started(
     store: Store,
 ) -> None:
     now_ms = utc("2026-11-16 14:30")
@@ -850,9 +899,8 @@ def test_the_monitor_ticks_at_once_and_checks_downtime_on_its_first_tick_only(
     alert_received(store, now_ms - MINUTE_MS)
 
     async def scenario() -> None:
-        # Every tick is two minutes after the previous one: more than the downtime
-        # threshold, so only the first-tick rule keeps the later ticks quiet.
-        monitor = Monitor(store, now_ms=now_ms, step_ms=2 * MINUTE_MS)
+        # Later ticks follow 30 seconds apart, as in production: nothing more to report.
+        monitor = Monitor(store, now_ms=now_ms, step_ms=30 * SECOND_MS)
         await monitor.until(lambda: monitor.ticks >= 5)
         await monitor.finish()
         assert monitor.message_calls == 1
@@ -861,6 +909,22 @@ def test_the_monitor_ticks_at_once_and_checks_downtime_on_its_first_tick_only(
     (alarm,) = outbox(store)
     assert alarm.text == messages.downtime_alarm(now_ms - HOUR_MS, now_ms)
     assert alarm.created_at_ms == now_ms
+
+
+def test_the_monitor_reports_a_hole_between_two_of_its_own_ticks(store: Store) -> None:
+    now_ms = utc("2026-11-16 14:30")
+    alert_received(store, now_ms - MINUTE_MS)
+
+    async def scenario() -> None:
+        # The clock jumps two minutes per tick: this process "slept" between its ticks.
+        monitor = Monitor(store, now_ms=now_ms, step_ms=2 * MINUTE_MS)
+        await monitor.until(lambda: monitor.ticks >= 3)
+        await monitor.finish()
+
+    run(scenario)
+    holes = [row.text for row in outbox(store) if "çalışmadı" in row.text]
+    assert holes[0] == messages.downtime_alarm(now_ms, now_ms + 2 * MINUTE_MS, restarted=False)
+    assert len(holes) >= 2  # one per hole
 
 
 def test_the_monitor_calls_back_only_for_ticks_that_enqueued_something(store: Store) -> None:

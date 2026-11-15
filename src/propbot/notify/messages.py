@@ -603,17 +603,28 @@ def restarts_summary_alarm(restarts: int) -> str:
     )
 
 
-def downtime_alarm(down_from_ms: int, down_until_ms: int) -> str:
-    """The bot was not running between two instants that overlap a watch window."""
+def downtime_alarm(down_from_ms: int, down_until_ms: int, *, restarted: bool = True) -> str:
+    """The bot was not running between two instants that overlap a watch window.
+
+    `restarted=False`: the same process went on after the gap (the machine slept, the
+    process was stopped, or the clock was set forward): it was never "down", but it could
+    not answer TradingView either.
+    """
     start = fmt_clock(down_from_ms, ISTANBUL)
     end = fmt_clock(down_until_ms, ISTANBUL)
     start_day = fmt_date(down_from_ms, ISTANBUL)
     end_day = fmt_date(down_until_ms, ISTANBUL)
     # Clock times alone are ambiguous once the gap crosses midnight.
     span = f"{start}–{end}" if start_day == end_day else f"{start_day} {start} – {end_day} {end}"
+    state = (
+        "kapalıydı"
+        if restarted
+        else "çalışmadı (makine uykuya geçmiş, süreç askıda kalmış ya da sunucu saati ileri "
+        "alınmış olabilir)"
+    )
     return (
-        f"[ALARM] Bot {span} TR arasında kapalıydı; bu aralıktaki TradingView alarmları "
-        "alınmadı. Açık pozisyonun varsa stop/çıkışı TradingView'dan kontrol et."
+        f"[ALARM] Bot {span} TR arasında {state}; bu aralıktaki TradingView alarmları "
+        f"alınmadı. {_CHECK_POSITION}"
     )
 
 

@@ -6,7 +6,8 @@ when it may be blind:
 
     silence    no valid alert for `max_silence_minutes` inside a watch window (the heartbeat
                indicator fires once an hour, so silence means the line is down)
-    downtime   the bot itself was not running during a watch window
+    downtime   the bot itself was not running during a watch window: it was down, or the
+               machine slept / the process was frozen while it stayed "up"
     restart    the bot restarted inside a watch window (a short hole; a loop of them is a fault)
     expiry     a TradingView alert is about to expire, or already has
 
@@ -74,8 +75,13 @@ def _overlaps_watch_window(heartbeat: HeartbeatConfig, start_ms: int, end_ms: in
     return False
 
 
-def _check_downtime(tx: Tx, heartbeat: HeartbeatConfig, now_ms: int) -> int:
-    """First tick after a start: report the gap since the previous process's last tick.
+def _check_downtime(tx: Tx, heartbeat: HeartbeatConfig, now_ms: int, *, first_tick: bool) -> int:
+    """Report the gap since the last tick when the bot cannot have been serving in it.
+
+    Ticks are 30 s apart. A longer gap between two ticks of the SAME process means the
+    process did not run (the machine slept, the process was stopped or the event loop was
+    blocked): the receiver could not answer either, exactly as while the bot is down. On
+    the first tick of a process the gap is measured from the previous process's last tick.
 
     A long gap is always reported. A short one (an ordinary restart, or one round of a crash
     loop) is reported too, at most once per `_RESTART_ALARM_THROTTLE_MS`: every restart is a
@@ -87,12 +93,15 @@ def _check_downtime(tx: Tx, heartbeat: HeartbeatConfig, now_ms: int) -> int:
     previous_ms = _read_ms(tx, StateKey.LAST_ALIVE_MS)
     if previous_ms is None or now_ms <= previous_ms:
         return 0
+    long_gap = now_ms - previous_ms > DOWNTIME_THRESHOLD_MS
+    if not first_tick and not long_gap:
+        return 0  # the ordinary case: the previous tick of this process
     if not _overlaps_watch_window(heartbeat, previous_ms, now_ms):
         return 0
-    if now_ms - previous_ms > DOWNTIME_THRESHOLD_MS:
+    if long_gap:
         tx.enqueue_message(
             kind=OutboxKind.ALARM,
-            text=messages.downtime_alarm(previous_ms, now_ms),
+            text=messages.downtime_alarm(previous_ms, now_ms, restarted=first_tick),
             now_ms=now_ms,
         )
         return 1
@@ -208,11 +217,10 @@ def check_alert_line(
     """One monitor tick inside `tx`; return the number of outbox rows it enqueued.
 
     `started_ms` is when this process started; `first_tick` is True for its first tick only
-    (the downtime check compares against the previous process's last tick).
+    (the gap is then measured from the previous process's last tick, and a short one is a
+    restart).
     """
-    enqueued = 0
-    if first_tick:
-        enqueued += _check_downtime(tx, config.heartbeat, now_ms)
+    enqueued = _check_downtime(tx, config.heartbeat, now_ms, first_tick=first_tick)
     enqueued += _report_counted_restarts(tx, now_ms)
     tx.set_state(StateKey.LAST_ALIVE_MS, str(now_ms), now_ms)
     enqueued += _check_silence(tx, config.heartbeat, now_ms, started_ms)
