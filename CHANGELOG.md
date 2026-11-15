@@ -369,8 +369,8 @@ mercekleri ilk kez çalıştı (ilk denemede kullanım sınırı yüzünden yar�
 | DEP-1 | Birim dosyası "işaretli üç satırı ayarla" diyordu, `ReadWritePaths=/opt/propbot/data` ise bloğun dışındaydı; başka depo yolunda servis başlayamazdı | `ReadWritePaths` işaretli bloğa alındı (dört satır); test, blok dışında kurulum yolu kalmadığını denetler | `910dff6` |
 | TV-3 | Heartbeat atımı yalnızca saat sınırını kapsayan bara bağlıydı: 1 dakikalık grafikte HH:59 barı yoksa o saatin atımı kayboluyor (2 saat boşluk → sahte "hat sessiz" alarmı); bar süresi 60'ı bölmeyen grafiklerde atımlar 90 dk aralıklıydı | Yeni aralıkta kapanan ilk bar atım gönderir; bar süresi aralığı bölmeyen grafik reddedilir. **Derlenmedi** (doğrulama listesi H) | `1ba7522` |
 | TV-4 | "Pine'ın gönderebildiği her gövde" derlemesindeki MTF `before_tp1` stop güncellemesi gerçekte gönderilemez; test buna "genişletme reddi" bekliyordu | Yerine gerçek biçim (TP1 sonrası runner trail'i, hedefsiz) kondu; açık bulgu 35 düzeltildi | `c087770` |
-| TV-1 | Master ile bağımsız NY Open / Asian Sweep script'leri aynı `strategy_id`'leri gönderir; belgeler hepsini alarmlamayı öneriyordu, bot iki akışı tek işlem sanar | Belgeler (runbook §8, `pine/README.md`, SPEC §5.1, `config/tv_alerts.yaml`): bir `strategy_id` tek kaynaktan → açık bulgu 47 | bu commit |
-| TV-2 | Grafikteki sembolün gerçek zamanlı veri gerektirdiği hiçbir yerde yazmıyordu; gecikmeli veride her giriş "BAYAT", takip mesajları sessizce düşer, heartbeat ise gelir | runbook §1 ön koşul (VERIFY), §11 sorun giderme, doğrulama listesi H → açık bulgu 48 | bu commit |
+| TV-1 | Master ile bağımsız NY Open / Asian Sweep script'leri aynı `strategy_id`'leri gönderir; belgeler hepsini alarmlamayı öneriyordu, bot iki akışı tek işlem sanar | Belgeler (runbook §8, `pine/README.md`, SPEC §5.1, `config/tv_alerts.yaml`): bir `strategy_id` tek kaynaktan → açık bulgu 47 | `56fa939` |
+| TV-2 | Grafikteki sembolün gerçek zamanlı veri gerektirdiği hiçbir yerde yazmıyordu; gecikmeli veride her giriş "BAYAT", takip mesajları sessizce düşer, heartbeat ise gelir | runbook §1 ön koşul (VERIFY), §11 sorun giderme, doğrulama listesi H → açık bulgu 48 | `56fa939` |
 
 ### Testler
 - 3578 test (`uv run pytest -q`; 1 test bu ortamda atlanır: IPv6 loopback yok), ruff, `mypy --strict` (36 kaynak dosya)
@@ -387,6 +387,28 @@ mercekleri ilk kez çalıştı (ilk denemede kullanım sınırı yüzünden yar�
 | 10 işlem günü kesintisiz; kaçan/çift sinyal 0; uçtan uca medyan gecikme < 5 sn | **Bekliyor** — kurulum ve TradingView alarmları gerekli (`docs/runbook.md` §12; ölçüm: `propbot signals report`) |
 | Tüm doğrulama hata yolları testli | Sağlandı (`tests/unit/test_receiver.py`, `test_alert_schema.py`) |
 | `/kill` ve yetkisiz sohbet testleri yeşil | Sağlandı (`tests/unit/test_commands.py`, `test_telegram.py`, `tests/integration/test_service.py`) |
+
+### Sıradaki adımlar (kullanıcı) ve açık kararlar
+Faz 1'in kodu bitti; kabul koşusu kullanıcının yapacağı işlere bağlı. Sırayla:
+
+1. **TradingView'da derle ve doğrula:** altı strateji (Faz 0 doğrulama listesi A–G) ve `pine/heartbeat_indicator.pine`
+   (liste H). Derleme hatalarını ve liste sonuçlarını Claude Code oturumuna yapıştır.
+2. **MT5'ten sözleşme değerlerini yaz:** `config/venues/ftmo_2step_100k.yaml` → `contract.*` (runbook §3.3). Boşken bot
+   çalışır, lot yerine "boyut hesaplanamadı" yazar.
+3. **Kur:** runbook §1–§9 (Seçenek A ya da B), duman testi, heartbeat alarmı. TradingView verisi gerçek zamanlı olmalı
+   (açık bulgu 48); Master ile bağımsız NY/Asian script'leri birlikte alarmlanmaz (açık bulgu 47).
+4. **10 işlem günü kabul koşusu:** runbook §12; her gün `propbot signals report`.
+
+Karar bekleyenler (hiçbiri varsayımla kapatılmadı):
+
+| Bulgu | Karar |
+|---|---|
+| 32 | Kurallar 30 günden eskiyken girişler tamamen kesilsin mi, yoksa bugünkü gibi uyarı satırı + günlük alarm mı? |
+| 33 (16 ile) | Asgari stop / azami kaldıraç eşiği: çok dar stop'ta otomatik "ATLA" olsun mu, eşik ne? |
+| 45 | Altı strateji dosyasında token girdisine `display = display.none` eklensin mi (B/E dışı tek argüman)? |
+| 46 | Hangi TradingView sembolleri `US500.cash` ile aynı ölçekte sayılacak (sembol listesi)? |
+| 47 | Master ve bağımsız script'ler yan yana çalışacak mı (Master bacaklarına ayrı `strategy_id`)? |
+| 51 | `/devam` mesajlarda dokunulamaz (`code`) olsun mu? |
 
 ## Açık bulgular
 
