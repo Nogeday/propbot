@@ -347,7 +347,7 @@ Kod bittikten sonra bağımsız mercekler kodu kırmaya çalıştı; her bulgu a
 
 İkinci tur (2026-11-15): güvenlik ve işleyici mercekleri düzeltilmiş kodu yeniden taradı; Telegram, entegrasyon ve Pine
 mercekleri ilk kez çalıştı (ilk denemede kullanım sınırı yüzünden yarıda kalmışlardı). Her bulgu için denetçinin yeniden
-üretme betiği düzeltmeden sonra yeniden çalıştırıldı; kritik kurallar mutasyonla sınandı (44 mutantın 44'ü yakalandı).
+üretme betiği düzeltmeden sonra yeniden çalıştırıldı; kritik kurallar mutasyonla sınandı (bu turda 44 mutantın 44'ü yakalandı).
 
 | Bulgu | Sorun | Düzeltme | Commit |
 |---|---|---|---|
@@ -381,11 +381,11 @@ bulundu ve düzeltildi. Bu turdan sonra yeni bir denetim turu **yapılmadı**.
 | V-1 | Polling "takılı" durumdayken kapanış, updater'ın son (kısa) sorgusunda geri çekilmeyi (30 sn'ye kadar) bekliyor, Telegram görevi kapatılmak yerine iptal ediliyordu; kurulmuş güncellemeler geri çekilme bitene kadar tutuluyor, o sırada durdurulursa yitiyordu | Geri çekilme yalnızca uzun sorguda ve verilecek güncelleme yokken; "takılı" = parti bütün olarak onaylanamadı | `c5b591e` |
 | V-2 | REP-1 kalıntısı: hiç mesaj üretmemiş sinyaller (işlenemeyen, kuyrukta bekleyen) hükmü etkilemiyordu: 5 girişin 3'ü iletilmişken "SAĞLANDI" | `hata` sonucu "SAĞLANMADI", kuyruktaki sinyal "EKSİK"; hüküm kaybedilen/açık kalan her şeyi adıyla yazar | `7925793` |
 | V-3 | Soket bağlanıyor ama dinlemeye alınmıyordu: aynı anda başlatılan başka bir kopya aynı portu bağlayıp görevlerini başlatabiliyordu; açılamayan kilit dosyası ham traceback veriyordu | Soket bağlanır bağlanmaz dinler; kilit dosyası hatası `HATA` satırı | `92aa327` |
-| V-4 | **Benim eklediğim runbook cümlesi yanlıştı:** "denemek için ayrı `--db` ve `--port` ver". O kopya aynı bot token'ını dinler ve `/kill`'i canlı servisin elinden alabilir ("KILL etkin" yanıtı gelir, sinyaller sürer) | Cümle düzeltildi: önce servisi durdur; yan yana deneme için ayrı bot token'ı. Kod kilidi veritabanı başınadır, token başına değil (açık bulgu 53) | bu commit |
-| V-5 | Doğrulama listesi H "HH:00 barı renklenmemeli" diyordu; yeni atım kuralında seans arasından sonraki ilk bar (CME'de 18:00) renklenir | Madde beklenen istisnayı söyler | bu commit |
+| V-4 | **Benim eklediğim runbook cümlesi yanlıştı:** "denemek için ayrı `--db` ve `--port` ver". O kopya aynı bot token'ını dinler ve `/kill`'i canlı servisin elinden alabilir ("KILL etkin" yanıtı gelir, sinyaller sürer) | Cümle düzeltildi: önce servisi durdur; yan yana deneme için ayrı bot token'ı. Kod kilidi veritabanı başınadır, token başına değil (açık bulgu 53) | `5af01c9` |
+| V-5 | Doğrulama listesi H "HH:00 barı renklenmemeli" diyordu; yeni atım kuralında seans arasından sonraki ilk bar (CME'de 18:00) renklenir | Madde beklenen istisnayı söyler | `5af01c9` |
 | V-6 | Beş kural testle sabitlenmemişti (mutantlar hayatta kalıyordu): yeniden denemede ulaşan giriş `/atladim`'ın hedefidir; yanıtlar PIN'e göre yeniden yazılmaz; gönderimden önceki hata "belki ulaştı" değildir; `serve` kilidi servis bitene kadar tutar; kısa sorgu beklemez | Testler | `c5b591e`, `92aa327`, `1c7384b` |
 
-Mutasyon denetimi (kendi koşularım): 64 mutantın 64'ü yakalandı; doğrulayıcıların hayatta kalan mutantlarının her biri
+Mutasyon denetimi (kendi koşularım, üç turda): 55 mutantın 55'i yakalandı; doğrulayıcıların hayatta kalan mutantlarının her biri
 için test eklendi.
 
 ### Testler
