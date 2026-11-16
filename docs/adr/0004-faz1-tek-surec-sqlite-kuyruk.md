@@ -96,25 +96,48 @@ traceback olarak basılmaz, aynı zincirden geçer: python-telegram-bot'un `Inva
      bırakmaz, süreç nasıl ölürse ölsün çekirdek bırakır, birim dosyasına dokunmaz. Sınırı ağ ad alanıdır (konteyner,
      başka makine görmez) ve Linux'a özgüdür; başka platformda `serve` kilidi alamadığı için başlamaz (dağıtım
      hedefi Ubuntu).
-  2. **Başlangıçtaki Conflict.** Kilidin görmediği kopya için: polling'e başlayalı 60 saniyeyi geçmemiş bir süreç
-     409 Conflict alırsa yeni gelen odur ve çekilir — polling'i hemen durdurur, "[ALARM] Bu PropBot kopyası (makine
-     adı) kendini DURDURDU" mesajını kuyruğa yazıp göndermeyi dener (alarm veritabanında saatte bire kısıtlanır,
-     systemd'nin yeniden deneme döngüsünde tekrar etmez) ve `TelegramFatalError` ile süreci bitirir. 60 saniyeden
-     uzun çalışan süreç botu tutar ve eski alarmı verir. Seçenek "ikisi de çalışsın, yalnızca alarm" idi (önceki
-     davranış): komutların hangi kopyaya gittiği belirsiz kalırdı (değişmez kural 3: belirsizlikte fail-closed).
-  Kalan açıklar: (a) Telegram'ın 409'u hangi isteğe verdiği bu ortamdan gözlenemedi; kural, yeni gelenin de 409
-  aldığı (bilinen) davranışa dayanır — yalnızca eski süreç 409 alıyorsa önceki davranış (alarm) sürer. (b) Başka
-  makinedeki kopya, kendini durdurana kadarki birkaç saniyede bir komut almış olabilir; iki alarm da bunu söyler.
-  (c) Canlı servis, başka makinede aynı token'la bir kopya çalışırken yeniden başlarsa duran canlı servis olur
-  (yeni gelen odur): alarmı makine adıyla verir, systemd öbür kopya kapanana kadar yeniden dener.
+  2. **Varışta Conflict → bekleme.** Kilidin görmediği kopya için Telegram'ın 409 yanıtı kullanılır. Kopya, bir
+     `getUpdates` isteği ilk kez (ya da 60 saniyeden uzun sessizlikten sonra yeniden) yanıtlandığında "varmış" sayılır;
+     varıştan sonraki 60 saniyede iki Conflict alan kopya yeni gelendir. Polling'i durdurur, depoya `standby` işareti
+     yazar (işleyici girişleri `skip_standby` olarak bildirir, gönderici bekleyen giriş mesajlarını düşürür),
+     "[ALARM] … BEKLEMEDE" mesajını bir kez gönderir ve **çalışmaya devam eder**: stop güncelleme / çıkış / iptal
+     iletilir. İşaret sürecin ömründen uzun yaşar; yeniden başlayan kopya yeniden dinler ve 60 saniye boyunca
+     Conflict görmeden yanıt alırsa işareti kaldırıp "[BİLGİ] … yeniden ETKİN" der. 60 saniyeden uzun süredir yanıt
+     alan kopya botu tutar ve eski alarmı verir.
+     - *Neden çıkmıyor (ilk uygulama çıkıyordu; denetim bulgusu, 2026-11-16):* `Restart=always` altında çıkan kopya
+       5 saniyede bir geri gelir; her seferinde kutusundaki giriş mesajlarını gönderir, öbür kopyanın uzun
+       sorgusunu keser, bir komut alabilir ve arada alıcı kapalı kaldığı için çıkış alert'leri kaybolur. Canlı servis
+       o sırada yeniden başlarsa iki kopya birbirini sürekli "yeni gelen" görür ve hiçbiri botu tutamaz.
+     - *Neden kendiliğinden yeniden denemiyor:* beklemedeki kopyanın her denemesi, o sırada yeni başlamış canlı
+       servisi bekleme durumuna düşürebilir; iki kopya da deniyorsa çözüm rastlantıya kalır. Durumu düzeltmek zaten
+       bir insan eylemi (kopyalardan birini kapatmak) gerektirir; yeniden başlatma o eylemin parçasıdır.
+     - *Neden iki Conflict:* tek bir 409, elle gönderilmiş bir `getUpdates`'ten ya da önceki sürecin Telegram'da
+       kalmış isteğinden gelebilir; gerçek bir dinleyici 1–2 saniye içinde yinelenir (python-telegram-bot hata
+       sonrası 1 sn, sonra 1,5 sn bekler). Tek Conflict'le beklemeye geçmek canlı servisi yeniden başlatılana kadar
+       susturabilirdi.
+     - *Neden "süreç yaşı" değil "varış":* süreç yaşıyla karar verildiğinde, bir dakikadan uzun süredir çalışan iki
+       kopya (ağ kesintisinden ya da uykudan dönen makine) birbirine hiç yol vermez. Varış, Telegram'ın yanıtlarından
+       ölçülür ve makinenin açılış saatiyle (`CLOCK_BOOTTIME`: uyku dahil, saat düzeltmelerinden etkilenmez) tutulur.
+     - *Komutlar:* varıştan sonraki ilk 3 saniyede (bir Conflict görüldüyse ondan sonraki 10 saniyede) gelen komut
+       bekletilir. Kopya beklemeye geçerse `/kill` ve `/duraklat` yine uygulanır (yalnızca risk azaltır; yanıt, komutun
+       öbür sürece ulaşmadığını söyler), öbür komutlar "yeniden gönder" yanıtıyla reddedilir.
+  Kalan açıklar: (a) Telegram'ın 409'u hangi isteğe verdiği bu ortamdan gözlenemedi; kural, iki dinleyicinin de
+  sırayla 409 aldığı (bilinen) davranışa dayanır — yalnızca eski süreç 409 alıyorsa yeni kopya beklemeye geçmez ve
+  önceki davranış (alarm, iki kopya çalışır) sürer. (b) Öbür süreç 3 saniyeden geç ortaya çıkarsa (hata sonrası uzun
+  bekleme aralığındaysa) yeni gelen kopya o arada aldığı bir komutu uygulamış olur. (c) Canlı servis, başka makinede
+  aynı token'la dinleyen bir kopya varken yeniden başlarsa beklemeye geçen canlı servis olur; girişleri keser, alarmı
+  makine adıyla verir ve yeniden başlatılana kadar öyle kalır. (d) İki kopya aynı dakikada varırsa ikisi de beklemeye
+  geçer (kimse komut almaz, girişler kesilir, iki alarm gelir). (e) Beklemedeki kopya, öbür kopya kaybolsa da
+  kendiliğinden etkinleşmez.
 - Süreç kapalıyken gelen alert kaybolur (TradingView yeniden denemez). İzleyici, bir izleme penceresine denk gelen
   kapalı kalma süresini açılışta bildirir; heartbeat sessizliği ayrıca alarm üretir. Yeniden başlatmalar izlenen
   pencerelerin dışında yapılır.
 - Teslimat en az bir kez olduğu için, süreç tam gönderme anında ölürse aynı mesaj iki kez gelebilir; mesajda sinyal
   kimliği yazar.
 - Veritabanı büyür, budama yoktur (yılda birkaç MB). Şema sürümü değişirse eski dosya açılmaz; göç (migration) yoktur.
-  *(2026-11-16: şema sürümü 2 oldu — `signals.outcome` denetimine `skip_symbol` ve `skip_stop_too_tight` eklendi.
-  Sürüm 1 dosyası açılmaz; eski dosya yeniden adlandırılır, servis yenisini oluşturur: runbook §11.)*
+  *(2026-11-16: şema sürümü 3 oldu — `signals.outcome` denetimine `skip_symbol`, `skip_stop_too_tight` (sürüm 2) ve
+  `skip_standby` (sürüm 3) eklendi. Eski sürümle oluşturulmuş dosya açılmaz; yeniden adlandırılır, servis yenisini
+  oluşturur: runbook §11.)*
 - Hız sınırı artık yabancı istekleri sınırlamaz; onları 4 KB gövde sınırı ve sabit maliyetli ret yolu sınırlar. Seçenek
   A'da ayrıca ufw ve Caddy yalnızca dört TradingView adresini geçirir.
 - `auto`, `approve` ve `paper` modları bu sürümde yoktur; emir yolu yazılmamıştır (ADR-0000).

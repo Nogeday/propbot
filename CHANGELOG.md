@@ -430,10 +430,11 @@ tek mod `signal`, emir yolu yok). Kararlar: `docs/adr/0004` (güncelleme), `0005
 | 46 | Yedi TradingView sembolü `US500.cash` ile aynı ölçekte kabul edilsin | Venue profili `signal.tv_symbols`; listede olmayan sembolün girişi `skip_symbol` |
 | 47 | Master bacaklarına ayrı kimlik; alıcı tanısın | `master_ny_orb_fvg`, `master_asian_sweep` (E14) |
 | 51 | `/devam` mesajlarda dokunulamaz olsun | Her `/devam` geçişi `code` varlığı |
-| 53 | Aynı bot token'ıyla ikinci kopyayı kod da engellesin (409 Conflict dahil) | Makine genelinde bot kilidi + başlangıçta Conflict gören kopya kendini durdurur |
+| 53 | Aynı bot token'ıyla ikinci kopyayı kod da engellesin (409 Conflict dahil) | Makine genelinde bot kilidi + varışında Conflict gören kopya beklemeye geçer (komut almaz, giriş iletmez) |
 
 Commit'ler: `21da0db` /devam · `3d2b72f` sembol listesi ve asgari stop · `fb202c9` Master kimlikleri · `b5aa6cd` token
-girdisi · `43c87d9` bot kilidi ve Conflict.
+girdisi · `43c87d9` bot kilidi ve Conflict (ilk biçim) · `fe0c388` dokümanlar · ardından karşıt denetim ve bekleme
+tasarımı (aşağıda "Karşıt denetim").
 
 ### Karar 46 ve 33 — giriş süzgeci (`signal` bölümü, ADR-0006)
 - `config/venues/*.yaml`'a zorunlu `signal` bölümü: `tv_symbols` (1–32 sembol, yinelemesiz, alıcı şemasının kabul ettiği
@@ -448,11 +449,14 @@ girdisi · `43c87d9` bot kilidi ve Conflict.
   olabilir). Hiçbir girişe bağlanamayan **ve** listede olmayan sembolden gelen takip alert'i iletilmez; 10 dakikada en
   çok bir alarm (`symbol_not_listed`). Heartbeat sembole bakılmaz.
 - Asgari stop tam ondalıkla karşılaştırılır (eşit olan geçer); `contract.*` boşken de geçerlidir; stop güncellemelerine
-  uygulanmaz. Stop'u girişe eşit olan giriş önceki gibi "işlenemedi" alarmına gider.
+  uygulanmaz. Stop'u girişle aynı fiyata yazılmış girişi alıcı şeması daha önce reddeder (422, "Geçersiz alert gövdesi
+  (alanlar: stop)" alarmı, kaydedilmez); tick yuvarlamasından sonra girişe eşit basılan aşırı dar stop da oraya düşer
+  ve "stop çok dar" sayımına girmez (denetim bulgusu; şema kuralı değiştirilmedi).
 - Mesajda `signal.tv_symbols` yazılmaz, "venue profilindeki tv_symbols listesi" yazılır: Telegram `signal.tv`'yi alan
   adı sanıp bağlantı yapardı.
-- **Veritabanı şema sürümü 2** (`signals.outcome` denetimine iki sonuç eklendi). Sürüm 1 dosyası açılmaz; hata mesajı ve
-  runbook §11 eski dosyanın yeniden adlandırılmasını söyler. Göç yazılmadı (kabul koşusu başlamadı).
+- **Veritabanı şema sürümü arttı** (`signals.outcome` denetimine iki sonuç eklendi: sürüm 2; bekleme sonucuyla sürüm 3,
+  aşağıda karar 53). Eski sürümle oluşturulmuş dosya açılmaz; hata mesajı ve runbook §11 eski dosyanın yeniden
+  adlandırılmasını söyler. Göç yazılmadı (kabul koşusu başlamadı).
 - `propbot config check` "Sinyal süzgeci" bölümünü, `serve` afişi "sinyal süzgeci" satırını basar; `/durum` ve
   `signals report` yeni sonuçları adlandırır ("sembol listede değil", "stop çok dar").
 
@@ -482,11 +486,23 @@ girdisi · `43c87d9` bot kilidi ve Conflict.
   soketi. `serve` bunu veritabanı kilidinden hemen sonra, afişten ve veritabanına dokunmadan önce alır; ikinci kopya
   `HATA: bu Telegram botuyla çalışan başka bir propbot serve var` ile çıkar. Dosya bırakmaz; `PrivateTmp` ve
   `ProtectSystem`'den etkilenmez; `deploy/propbot.service` değişmedi. Gerçek iki süreçle denendi (ayrı `--db`/`--port`).
-- **Başlangıçtaki Conflict** (`notify/telegram.py`): polling'e başlayalı ≤ 60 sn olan süreç 409 Conflict alırsa polling'i
-  durdurur, "[ALARM] Bu PropBot kopyası (makine adı) kendini DURDURDU…" mesajını gönderir (veritabanı üzerinden saatte
-  en çok bir; gönderilemezse kutuda kalır) ve `TelegramFatalError` ile süreci bitirir. Daha uzun süredir çalışan süreç
-  botu tutar; onun "Aynı bot token'ıyla başka bir süreç…" alarmına "bu sırada gönderdiğin bir komut öbür sürece gitmiş
-  olabilir: /durum ile kontrol et" cümlesi eklendi.
+- **Varışta Conflict → bekleme** (`notify/telegram.py`, ADR-0004): kilidin görmediği kopya (başka makine, konteyner)
+  için. Kopya, Telegram bir `getUpdates` isteğini ilk kez ya da 60 sn'den uzun sessizlikten sonra yanıtladığında
+  "varmış" sayılır; sonraki 60 sn'de **iki** Conflict alırsa yeni gelendir: polling'i durdurur, depoya `standby`
+  işaretini yazar, "[ALARM] Bu PropBot kopyası (makine adı) BEKLEMEDE…" mesajını bir kez gönderir ve **çalışmaya devam
+  eder**. Beklemede giriş sinyali iletilmez (`skip_standby`: "[SİNYAL — ATLA] … Bu kopya BEKLEMEDE"; bekleyen giriş
+  mesajları düşürülür), stop güncelleme / çıkış / iptal iletilir. Yeniden başlatılan kopya 60 sn Conflict'siz yanıt
+  alırsa "[BİLGİ] … yeniden ETKİN" der ve işareti kaldırır. Daha uzun süredir yanıt alan kopya botu tutar; onun "Aynı
+  bot token'ıyla başka bir süreç…" alarmına "bu sırada gönderdiğin bir komut öbür sürece gitmiş olabilir: /durum ile
+  kontrol et" cümlesi eklendi.
+- **Komutlar:** varıştan sonraki ilk 3 sn'de (bir Conflict görüldüyse 10 sn) gelen komut bekletilir. Kopya beklemeye
+  geçerse `/kill` ve `/duraklat` o kopyada yine uygulanır ve yanıt komutun öbür sürece ulaşmadığını söyler; öbür
+  komutlar "Bu kopya BEKLEMEDE … UYGULANMADI. Yeniden gönder" yanıtını alır (PIN içeren mesaj yine silinir).
+- Süreler duvar saatiyle değil `CLOCK_BOOTTIME` ile ölçülür (`core/clock.py` `boot_clock_ms`): saat düzeltmesi pencereyi
+  kaydırmaz, uyku sayılır.
+- Veritabanı şema sürümü 3 (`skip_standby` sonucu); `/durum` ve `signals report` "kopya beklemede" sayısını gösterir.
+- İlk biçim (`43c87d9`: yeni gelen kopya alarm verip **çıkıyordu**) karşıt denetimde yetersiz bulundu ve değiştirildi:
+  aşağıda "Karşıt denetim".
 - Kalan açıklar: açık bulgu 56.
 
 ### Karar 32 — kurallar bayatken sinyal
@@ -498,14 +514,41 @@ girdisi · `43c87d9` bot kilidi ve Conflict.
 - `WIP: uncommitted changes, moved to the cloud` commit'i (`b6fcbc8`) bağımlılık commit'ine (`cd00945`) katıldı; dal
   `--force-with-lease` ile yeniden yazıldı (açık bulgu 31). Eski Faz 1 commit kimlikleri artık dalda yok.
 
+### Karşıt denetim (2026-11-16; iki mercek tamamlandı, bulgular bağımsız olarak yeniden üretildi)
+Üç mercekli denetim `fe0c388` üzerinde çalıştı. "Süzgeç" merceği ve çürütme turu tamamlandı; "ikinci kopya" merceğinin
+bulguları çürütme ajanı kullanım sınırına takıldığı için benim tarafımdan yeniden değerlendirildi; "doküman/Pine"
+merceği ilk turda çalışamadı ve düzeltmelerden sonra yeniden koşturuldu (sonuç aşağıda).
+
+| # | Bulgu | Önem | Sonuç |
+|---|---|---|---|
+| D1 | Kendini durduran kopya systemd altında etkisiz değil: 5 sn'de bir yeniden başlar, her başlangıçta kutusundaki giriş mesajlarını gönderir, komut alabilir, arada alıcı kapalıdır; canlı servis o sırada yeniden başlarsa iki kopya birbirini sürekli düşürür. Alarm metni ("sinyal iletmiyor ve komut almıyor") doğru değildi | orta | Tasarım değişti: kopya çıkmaz, **beklemeye** geçer (yukarıda karar 53); yeniden deneme yok, döngü yok |
+| D2 | "Yeni gelen" süreç yaşıyla belirleniyordu: ikisi de bir dakikadan eski iki kopya (ağ kesintisinden / uykudan dönen makine) hiç çözülmüyor; hiç yanıt almamış süreç "eski" sayılıyor; duvar saati kayması pencereyi bozuyor | orta | Varış, Telegram'ın yanıtlarından ve `CLOCK_BOOTTIME` ile ölçülüyor; sessizlikten dönen kopya yeni gelendir |
+| D3 | Tick yuvarlamasından sonra girişe eşit basılan stop "Stop çok dar" olmuyor: alıcı 422 ile reddediyor; ADR-0006 ve CHANGELOG yanlış alarmı anıyordu | düşük | Belgeler düzeltildi (ADR-0006, runbook §11); davranış değişmedi (şema kuralı ayrı karar ister) |
+| D4 | `/durum` ve `signals report` yeni sonuçları nasıl saydığı / adlandırdığı testle sabit değildi (3 mutant yaşadı) | düşük | Farklı sayılarla iki test |
+| D5 | Pine kaynak testi yalnızca kimlik kümesine bakıyordu: yanlış bacak kimliğiyle giden ya da silinen bir Master çağrısı geçiyordu (2 mutant) | düşük | Bacak × eylem sayımı ve `s1_` / `s2_` satır kuralı testi |
+| D6 | "Eşik değerine eşit stop geçer" kuralı yalnızca ikilide zararsız eşiklerle sabitti (1 mutant) | düşük | 1,1 puanlık eşik testi |
+| D7 | Pencere değeri hiçbir testle sabit değildi (0, 60 ms ve 10 dk geçiyordu); polling'in önce durdurulması, pencerenin yeniden kurulması ve alarm kodlarının ayrılığı da | düşük | Yeni tasarımın sayıları ve davranışları testli; 31 mutantlık kendi koşum aşağıda |
+
 ### Testler
-- 3887 test (`uv run pytest -q`; 1 test bu ortamda atlanır: IPv6 loopback yok), ruff, `mypy --strict` (36 kaynak
+- 3957 test (`uv run pytest -q`; 1 test bu ortamda atlanır: IPv6 loopback yok), ruff, `mypy --strict` (36 kaynak
   dosya) temiz. Önceki durum 3593.
 - Yeni: sembol listesi ve asgari stop karar tablosu (sıra, sınır, tam ondalık, takip alert'leri, alarm kısıtlaması);
   venue profili `signal` bölümü (7 yeni hatalı fixture); Master kimlikleriyle 12 yeni gövde biçimi (toplam 45) şemadan,
-  alıcıdan ve işleyiciden geçer; Master + bağımsız script yan yana senaryoları; Pine kaynak denetimleri; `/devam` kod
-  varlıkları; bot kilidi (süreçler arası, SIGKILL sonrası serbest kalma); başlangıç Conflict'i (60 sn sınırı, saat geri
-  gitmesi, yeniden başlatma döngüsünde alarm kısıtlaması, bekleyen mesajların sırası).
+  alıcıdan ve işleyiciden geçer; Master + bağımsız script yan yana senaryoları; Pine kaynak denetimleri (kimlik kümeleri,
+  bacak × eylem sayımı, token girdisi); `/devam` kod varlıkları; bot kilidi (süreçler arası, SIGKILL sonrası serbest
+  kalma); varış kuralı (60 sn sınırı, tek Conflict'in hoş görülmesi, sessizlikten dönüş, hiç yanıt almamış kopya),
+  bekleme (polling'in durması, sürecin ayakta kalması, girişlerin kesilip çıkışların iletilmesi, komut bekletme ve
+  beklemedeki `/kill`, yeniden başlatmada tek alarm, ETKİN bildirimi).
+- Mutasyon denetimi (kendi koşum, bekleme tasarımı): 31 mutantın 31'i yakalanıyor (ilk koşuda ikisi yaşadı —
+  "sessiz kopya kendini etkin saymasın" ve "süre saati duvar saati olmasın"; ikisi için test eklendi).
+- Benzetim (elle, depoya girmedi): iki gerçek `TelegramService` kopyası, "yeni `getUpdates` bekleyen uzun sorguyu
+  409 ile keser" kuralını uygulayan sahte bir Bot API'ye karşı, gerçek saat ve gerçek bekletme süreleriyle. Dört
+  senaryo: (1) canlı kopya çalışırken ikinci kopya başlar → ikinci beklemeye geçer, o sırada gönderilen 18 komutun
+  15'ini canlı kopya uygular, 3'ü ikinci kopyada **reddedilir**, yanlış kopyada uygulanan komut 0; (2) ikisi de
+  eskiyken karşılaşma (ağ kesintisinden dönen kopya) → dönen kopya bekler; (3) denetimin kilitlenme senaryosu:
+  beklemedeki kopya varken canlı servis yeniden başlar → canlı servis etkin kalır, bekleyen kopya bir daha
+  dinlemez; yeniden başlatılan bekleyen kopya ikinci alarm vermeden yine bekler; (4) iki kopya 5 sn arayla başlar →
+  ikisi de bekler (açık bulgu 56d). Benzetim, Telegram'ın 409 davranışı hakkındaki varsayıma dayanır (56a).
 - Gerçek `propbot serve` ile: aynı bot kimliğiyle ikinci kopya (başka veritabanı ve port) afişten önce reddedildi; başka
   bot kimliğiyle kopya başladı.
 
@@ -614,7 +657,7 @@ denetiminden, 55–58 2026-11-16 kararlarının uygulamasından.
     `ResilientBot`, kuramadığı partiyi ham almak için kütüphanenin korumalı `Bot._post` çağrısını kullanır (açık
     `do_api_request` aynı uç nokta için uyarı üretir); sürüm `uv.lock` ile sabit ve yol testlidir, yükseltmede bakılmalı.
 41. **Budama ve göç yok:** `data/propbot.db` büyür (yılda birkaç MB); şema sürümü değişirse eski dosya açılmaz.
-    2026-11-16'da sürüm 2 oldu: sürüm 1 ile oluşturulmuş bir dosya (yerel deneme, duman testi) yeniden adlandırılmalı
+    2026-11-16'da sürüm 3 oldu: daha eski sürümle oluşturulmuş bir dosya (yerel deneme, duman testi) yeniden adlandırılmalı
     (runbook §11); duraklatma/KILL durumu ve günlük bütçe defteri yeni dosyada sıfırdan başlar.
 42. **`pine/heartbeat_indicator.pine` derlenmedi** (doğrulama listesi H); alarm koşulunun adı ("Any alert() function
     call"), `timeframe.in_seconds()` davranışı, token girdisindeki `display = display.none` parametresi, yeni atım kuralı
@@ -647,7 +690,7 @@ denetiminden, 55–58 2026-11-16 kararlarının uygulamasından.
 52. **Düzenlenen mesajlar alınmıyor:** bot yalnızca `message` güncellemelerini ister; eski bir mesaja sonradan düzenlemeyle
     yazılan PIN silinmez (komut olarak da işlenmez). PIN'i düzenlemeyle yazma.
 53. ~~**Aynı bot token'ıyla ikinci kopya kodla engellenmiyor (karar gerekir).**~~ **Çözüldü (2026-11-16, `43c87d9`):**
-    makine genelinde bot kilidi + başlangıçta Conflict gören kopya kendini durdurur (ADR-0004). Kalanlar: bulgu 56.
+    makine genelinde bot kilidi + varışında Conflict gören kopya beklemeye geçer (ADR-0004). Kalanlar: bulgu 56.
 54. **`systemctl stop` sonrası çıkış kodu:** uvicorn düzgün kapanıştan sonra sinyali yeniden yükseltir; süreç 143 ile biter,
     `run_service`'in dönüş değeri ve `Store.close()` çalışmaz (WAL ve çekirdek kilidi bunu taşır; veri kaybı yok).
     `Restart=always` olduğu için `systemctl stop` dışında davranışı etkilemez; gözlem doğrulayıcıdan, sistemde denenmedi.
@@ -658,12 +701,16 @@ denetiminden, 55–58 2026-11-16 kararlarının uygulamasından.
     "Sembol kabul listesinde değil (…)" olarak gelebilir — mesaj doğru yazımı gösterir, listeye o eklenir. Eşleşme
     bilerek birebirdir (ADR-0006). Doğrulama listesi H'de iki madde.
 56. **İkinci kopya korumasının kalan açıkları:** (a) Telegram'ın 409 Conflict'i hangi isteğe verdiği bu ortamdan
-    gözlenemedi; kural yeni gelenin de 409 aldığı davranışa dayanır, yalnızca eski süreç alıyorsa önceki davranış
-    (alarm, iki kopya çalışır) sürer. (b) Başka makinedeki kopya kendini durdurana kadarki birkaç saniyede bir komut
-    almış olabilir (iki alarm da bunu söyler); systemd altında yeniden deneme döngüsünde bu pencere 5 sn'de bir yeniden
-    açılır. (c) Canlı servis, başka makinede aynı token'la bir kopya çalışırken yeniden başlarsa duran canlı servis
-    olur. (d) Bot kilidi Linux'a özgüdür (soyut soket) ve ağ ad alanıyla sınırlıdır; yerel başka bir kullanıcı aynı
-    adı önceden bağlayarak servisin başlamasını engelleyebilir (tek kullanıcılı sunucuda tehdit modeli dışı).
+    gözlenemedi; kural iki dinleyicinin de sırayla 409 aldığı davranışa dayanır, yalnızca eski süreç alıyorsa yeni kopya
+    beklemeye geçmez ve önceki davranış (alarm, iki kopya çalışır) sürer. (b) Öbür süreç 3 saniyelik bekletmeden geç
+    ortaya çıkarsa (hata sonrası uzun bekleme aralığındaysa) yeni gelen kopya o arada aldığı bir komutu uygulamış olur.
+    (c) Canlı servis, başka makinede aynı token'la **dinleyen** bir kopya varken yeniden başlarsa beklemeye geçen canlı
+    servis olur: girişler kesilir (her giriş "[SİNYAL — ATLA] … BEKLEMEDE" olarak gelir), yeniden başlatılana kadar
+    öyle kalır. (d) İki kopya aynı dakikada varırsa ikisi de beklemeye geçer. (e) Beklemedeki kopya kendiliğinden
+    etkinleşmez (öbür kopya kaybolsa da); yeniden başlatma gerekir. (f) Bot kilidi Linux'a özgüdür (soyut soket) ve ağ
+    ad alanıyla sınırlıdır; yerel başka bir kullanıcı aynı adı önceden bağlayarak servisin başlamasını engelleyebilir
+    (tek kullanıcılı sunucuda tehdit modeli dışı). (g) Bot başka bir yerde webhook'a bağlanırsa Telegram yine 409 verir;
+    kopya bunu ikinci bir dinleyici gibi karşılar.
 57. **Master + bağımsız script yan yana: bütçe iki kez sayılır.** Aynı kurulumu iki script de görürse iki giriş mesajı
     gelir ve günlük bütçede ikisi de sayılır (bot hangisinin alındığını bilemez); kullanıcı almadığını `/atladim <id>`
     ile bildirir. İki mesajın aynı işlem fikri olduğu mesajda yazmaz.

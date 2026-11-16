@@ -385,8 +385,8 @@ dilimleri reddedilir: bar kapanışı seans takvimine bağlıdır, tazelik denet
 - **Asgari stop** (kullanıcı kararı 33, ADR-0006): giriş ile stop arası `signal.min_stop_points`'ten (FTMO US500.cash:
   1,5 puan) küçükse giriş "[SİNYAL — ATLA] Stop çok dar" olur; eşitse iletilir. Kural `contract.*` boşken de geçerlidir
   (lotu kullanıcı elle hesaplarken en çok orada gerekir). Stop güncellemelerini etkilemez.
-- Giriş karar sırası (ilk eşleşen): saat uyuşmazlığı → KILL → duraklatma → sembol listesi → bayat → stop çok dar →
-  stop çok geniş (en küçük lot bütçeyi aşıyor) → günlük bütçe → iletildi.
+- Giriş karar sırası (ilk eşleşen): saat uyuşmazlığı → KILL → duraklatma → kopya beklemede (§5.6) → sembol listesi →
+  bayat → stop çok dar → stop çok geniş (en küçük lot bütçeyi aşıyor) → günlük bütçe → iletildi.
 - Idempotency: `UNIQUE(strategy_id, symbol, bar_time, action)`; yinelenen istek 200 `duplicate` alır, ikinci mesaj üretmez.
 - Boyut önerisi: venue profili + `risk.yaml` ile lot hesabı (yalnızca öneri; Faz 1'de emir yok). `contract.*` boşsa
   mesajda "boyut hesaplanamadı" ve en fazla risk yazar (hata değildir).
@@ -435,7 +435,7 @@ id {signal_id} · bar {NY saati} NY / {TR saati} TR
   dolup kullanıcının kendi emri (başka enstrüman) dolmayabilir; o durumda İPTAL gelmez. Limit girişin (ya da botun
   görmediği bir girişin) `[ÇIKIŞ]` mesajı "limit emrin hâlâ bekliyorsa İPTAL ET" der. Diğer mesajlar: `[STOP GÜNCELLE]`
   (mesafe olarak: "stop = kendi giriş fiyatın −3.50 puan"), `[ÇIKIŞ]`, `[İPTAL]`, `[SİNYAL — ATLA]` (stop çok geniş ·
-  stop çok dar · sembol listede değil · bütçe yetersiz · saat uyuşmazlığı), `[BAYAT SİNYAL — ATLA]`, `[İLETİLEMEDİ — ATLA]`, `[İLETİM BELİRSİZ]`, `[UYARI]`
+  stop çok dar · sembol listede değil · kopya beklemede · bütçe yetersiz · saat uyuşmazlığı), `[BAYAT SİNYAL — ATLA]`, `[İLETİLEMEDİ — ATLA]`, `[İLETİM BELİRSİZ]`, `[UYARI]`
   (stop genişletme reddedildi), `[ALARM]`.
 - Günlük bütçe satırı temkinlidir (ADR-0005): iletilen her giriş prop günü boyunca sayılır; almadığın sinyali `/atladim`
   ile bildirirsin. Stop güncellemeleri mesafe uzayında karşılaştırılır; stop'u genişleten güncelleme iletilmez.
@@ -488,10 +488,21 @@ yanlışlıkla başlatılan ikinci kopya canlı veritabanına ve bota dokunmadan
 kopya da engellenir (kullanıcı kararı 53, ADR-0004): iki dinleyici botun komutlarını rastgele paylaşır, `/kill` yanlış
 kopyaya düşebilir. (1) Aynı makinede: bot kimliğine bağlı, makine genelinde bir kilit (Linux soyut soket adı; dosya
 yok, `PrivateTmp`'ten etkilenmez) — ayrı `--db` ve `--port` ile başlatılan kopya afişten önce `HATA` ile çıkar.
-(2) Kilidin görmediği yerde (başka makine, konteyner): polling'in ilk 60 saniyesinde Telegram'dan 409 Conflict alan
-süreç yeni gelendir; polling'i hemen durdurur, "[ALARM] Bu PropBot kopyası (makine adı) kendini DURDURDU" mesajını
-gönderir (veritabanı üzerinden saatte en çok bir) ve hata koduyla çıkar. 60 saniyeden uzun süredir çalışan süreç
-botu tutar ve "Aynı bot token'ıyla başka bir süreç…" alarmını verir. Deneme kopyası ayrı bot token'ı ister (runbook §4).
+(2) Kilidin görmediği yerde (başka makine, konteyner) Telegram'ın 409 Conflict yanıtı kullanılır. Bir kopya,
+Telegram bir `getUpdates` isteğini ilk kez (ya da 60 saniyeden uzun bir sessizlikten sonra yeniden) yanıtladığında
+"varmış" sayılır. Varışından sonraki 60 saniye içinde **iki** Conflict alan kopya yeni gelendir ve **beklemeye**
+geçer: polling'i durdurur (komut almaz), giriş sinyali iletmez ("[SİNYAL — ATLA] … Bu kopya BEKLEMEDE"), stop
+güncelleme / çıkış / iptal mesajlarını iletmeye devam eder, "[ALARM] Bu PropBot kopyası (makine adı) BEKLEMEDE"
+mesajını bir kez gönderir ve **çalışmaya devam eder** (çıkmaz: systemd onu birkaç saniyede bir yeniden başlatır,
+her seferinde öbür kopyanın güncellemelerini alır ve arada alıcı kapalı kalırdı). Tek bir Conflict hoş görülür
+(elle gönderilmiş bir `getUpdates`, önceki sürecin Telegram'da kalmış isteği). Bekleme, sürecin ömrü boyunca sürer;
+kopya yeniden başlatılınca yeniden dinler, 60 saniye boyunca tek başına kalırsa "[BİLGİ] … yeniden ETKİN"
+bildirimini gönderir ve girişleri açar. 60 saniyeden uzun süredir yanıt alan kopya botu tutar ve "Aynı bot
+token'ıyla başka bir süreç…" alarmını verir. Varıştan sonraki ilk 3 saniyede (bir Conflict görüldüyse 10 saniye)
+gelen komutlar bekletilir; kopya beklemeye geçerse `/kill` ve `/duraklat` yine uygulanır (yalnızca risk azaltır)
+ve yanıt komutun öbür sürece ulaşmadığını söyler, öbür komutlar "yeniden gönder" yanıtıyla reddedilir. Süreler
+duvar saatiyle değil, makinenin açılış saatiyle (uyku dahil, `CLOCK_BOOTTIME`) ölçülür. Deneme kopyası ayrı bot
+token'ı ister (runbook §4).
 
 ### 5.7 Kabul
 - 10 işlem günü kesintisiz; kaçan/çift sinyal 0 (TradingView Alert Log ile karşılaştırma); uçtan uca medyan gecikme < 5 sn.

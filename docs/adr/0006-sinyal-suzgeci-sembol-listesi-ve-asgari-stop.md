@@ -70,9 +70,12 @@ signal:
   "[SİNYAL — ATLA] Stop çok dar (… puan; alt sınır … puan)". Eşitlik kabul edilir; karşılaştırma tam ondalıktır
   (`Decimal`), ikili kayan nokta bir tick'lik sınırı yanlış yöne düşürebilir. Değer kullanıcının kararıdır: US500 / MES
   ölçeğinde 1,5 puan. Kural `contract.*` boşken de geçerlidir. Stop güncellemelerine uygulanmaz (açık işlemde stop'u
-  sıkılaştırmak her zaman iletilir). Stop'u girişe **eşit** olan bir giriş dar stop değil bozuk alert'tir ve önceki
-  gibi "işlenemedi" alarmına gider.
-- İki yeni sonuç `signals.outcome` denetimine girdiği için **veritabanı şema sürümü 2** oldu; sürüm 1 dosyası açılmaz
+  sıkılaştırmak her zaman iletilir). Stop'u girişle **aynı fiyata** yazılmış bir girişi alıcı şeması daha önce
+  reddeder (422, "Geçersiz alert gövdesi (alanlar: stop)" alarmı; kaydedilmez): Pine fiyatları tick'e yuvarlayarak
+  yazdığı için yarım tick'ten dar bir stop da buraya düşer ve "stop çok dar" sayımına girmez. Bu şema kuralı
+  değiştirilmedi (ayrı bir karar ister).
+- İki yeni sonuç `signals.outcome` denetimine girdiği için **veritabanı şema sürümü** arttı (bekleme sonucuyla
+  birlikte bugün 3; ADR-0004); eski sürümle oluşturulmuş dosya açılmaz
   (ADR-0004: göç yok). Kabul koşusu başlamadığı için göç yazılmadı.
 - `propbot config check` ve `serve` afişi listeyi ve eşiği gösterir.
 
