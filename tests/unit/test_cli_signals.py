@@ -15,7 +15,7 @@ import structlog
 from propbot.cli import main, run_config_check
 from propbot.logging_setup import reset_logging
 from propbot.signals.report import CSV_HEADER
-from propbot.signals.service import single_instance
+from propbot.signals.service import ServiceError, single_instance
 from propbot.store.db import NewSignal, Outcome, Store
 from support.paths import CONFIG_DIR, CONFIG_FIXTURES, FIXTURES
 
@@ -537,6 +537,30 @@ def test_a_second_serve_on_the_same_database_is_refused_before_it_touches_anythi
     assert captured.out == ""  # no banner
     assert started == []
     assert not (tmp_path / "data" / "propbot.db").exists()
+
+
+def test_serve_holds_the_database_lock_for_as_long_as_the_service_runs(
+    serve: Callable[[ServiceStandIn], int], tmp_path: Path
+) -> None:
+    lock_path = tmp_path / "data" / "propbot.db.lock"
+    refused: list[str] = []
+
+    def service(_parts: object, *, host: str, port: int) -> int:
+        # What a second copy would try while this one is serving.
+        try:
+            with single_instance(lock_path):
+                refused.append("a second instance got the lock")
+        except ServiceError as error:
+            refused.append(str(error))
+        return 0
+
+    assert serve(service) == 0
+
+    assert len(refused) == 1
+    assert refused[0].startswith("bu veritabanıyla çalışan başka bir `propbot serve` var")
+    # Released when the service ended.
+    with single_instance(lock_path):
+        pass
 
 
 def test_serve_gives_the_service_its_settings_and_a_loopback_address(

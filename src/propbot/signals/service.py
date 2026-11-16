@@ -281,7 +281,13 @@ def single_instance(lock_path: Path) -> Iterator[None]:
     that never happened. The lock is released by the kernel when the process ends, however
     it ends; the (empty) lock file stays.
     """
-    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as error:
+        raise ServiceError(
+            f"kilit dosyası açılamıyor: {lock_path} ({error.strerror or type(error).__name__}). "
+            "Veritabanı klasörü servis kullanıcısına ait ve yazılabilir olmalı"
+        ) from None
     try:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -296,17 +302,20 @@ def single_instance(lock_path: Path) -> Iterator[None]:
 
 
 def bind_listener(host: str, port: int) -> socket.socket:
-    """Bind the receiver's socket. A port that cannot be taken is an error before anything runs.
+    """Take the receiver's port. A port that cannot be taken is an error before anything runs.
 
     uvicorn would bind only after it has started the application (processor, alert-line
     monitor, Telegram): a copy that cannot get its port would first act on the live
-    database and bot.
+    database and bot. The socket listens at once: a socket that is only bound does not
+    keep a second process from binding the same port. Requests that arrive before the
+    server accepts wait in the backlog.
     """
     listener: socket.socket | None = None
     try:
         listener = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET)
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind((host, port))
+        listener.listen()
     except OSError as error:
         if listener is not None:
             listener.close()

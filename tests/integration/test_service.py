@@ -550,6 +550,23 @@ def test_the_listener_is_bound_to_the_loopback_address_asked_for(host: str) -> N
         bound_host, bound_port = listener.getsockname()[:2]
         assert bound_host == host
         assert bound_port > 0
+        # Listening already: nobody else gets this port, not even before the server runs.
+        with pytest.raises(ServiceError, match="dinlenemiyor"):
+            bind_listener(host, bound_port)
+        with socket.create_connection((host, bound_port), timeout=2):
+            pass  # accepted into the backlog
+
+
+def test_a_lock_file_that_cannot_be_opened_is_reported_in_words(tmp_path: Path) -> None:
+    missing_folder = tmp_path / "no-such-folder" / "propbot.db.lock"
+
+    with (
+        pytest.raises(ServiceError, match="kilit dosyası açılamıyor") as caught,
+        single_instance(missing_folder),
+    ):
+        raise AssertionError("a lock in a folder that does not exist was taken")
+
+    assert str(missing_folder) in str(caught.value)
 
 
 def test_one_database_runs_one_service(tmp_path: Path) -> None:
