@@ -219,7 +219,8 @@ def test_report_counts_days_outcomes_and_latency(store: Store) -> None:
         "(5 mesaj)\n"
         "Telegram teslimi (mesaj üreten 5 sinyal): gönderildi 5 · bekliyor 0 · süresi doldu 0 · "
         "başarısız 0\n"
-        "  SPEC §5.7 ölçütü (ulaşmayan mesaj 0 ve uçtan uca medyan < 5 sn): SAĞLANDI\n"
+        "  SPEC §5.7 ölçütü (ulaşmayan ya da işlenemeyen sinyal 0 ve uçtan uca medyan < 5 sn): "
+        "SAĞLANMADI — 1 sinyal işlenemedi (hata)\n"
         "Telegram kutusu (tüm zamanlar): gönderildi 5 · bekliyor 1 · süresi doldu 0 · "
         "başarısız 0\n"
         "Dönemdeki alarmlar: 1\n"
@@ -266,7 +267,9 @@ def test_slow_delivery_fails_the_acceptance_line(store: Store) -> None:
 
 
 def verdict(report: str) -> str:
-    prefix = "  SPEC §5.7 ölçütü (ulaşmayan mesaj 0 ve uçtan uca medyan < 5 sn): "
+    prefix = (
+        "  SPEC §5.7 ölçütü (ulaşmayan ya da işlenemeyen sinyal 0 ve uçtan uca medyan < 5 sn): "
+    )
     (line,) = (line for line in report.splitlines() if line.startswith(prefix))
     return line.removeprefix(prefix)
 
@@ -350,6 +353,97 @@ def test_one_message_that_is_not_out_keeps_the_criterion_from_being_met(
     report = build_report(store, start_ms=START_MS, end_ms=END_MS, source="db")
 
     assert verdict(report) == expected
+
+
+def delivered_exits(store: Store) -> None:
+    """Three exits that reached Telegram within 1.2 s: on their own the criterion is met."""
+    for minute in (40, 41, 42):
+        add_signal(
+            store,
+            bar_close_ms=tr(f"2026-12-01 17:{minute}"),
+            receive_delay_ms=1000,
+            action="exit",
+            sent_delay_ms=1200,
+        )
+
+
+def test_everything_delivered_in_time_meets_the_criterion(store: Store) -> None:
+    delivered_exits(store)
+
+    report = build_report(store, start_ms=START_MS, end_ms=END_MS, source="db")
+
+    assert verdict(report) == "SAĞLANDI"
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected"),
+    [
+        # Processing failed: no message was ever written, the trader only got an alarm.
+        (Outcome.ERROR, "SAĞLANMADI — 1 sinyal işlenemedi (hata)"),
+        # Not processed yet: nothing can be said about it.
+        (None, "EKSİK — 1 sinyal kuyrukta bekliyor; raporu sonra yeniden al"),
+    ],
+)
+def test_a_signal_without_any_message_keeps_the_criterion_from_being_met(
+    store: Store, outcome: Outcome | None, expected: str
+) -> None:
+    delivered_exits(store)
+    add_signal(store, bar_close_ms=tr("2026-12-01 17:50"), receive_delay_ms=1000, outcome=outcome)
+
+    report = build_report(store, start_ms=START_MS, end_ms=END_MS, source="db")
+
+    assert verdict(report) == expected
+
+
+def test_the_verdict_names_everything_that_was_lost_or_is_still_open(store: Store) -> None:
+    delivered_exits(store)
+    add_signal(
+        store, bar_close_ms=tr("2026-12-01 17:50"), receive_delay_ms=1000, undelivered="expired"
+    )
+    add_signal(
+        store, bar_close_ms=tr("2026-12-01 17:51"), receive_delay_ms=1000, outcome=Outcome.ERROR
+    )
+    add_signal(
+        store, bar_close_ms=tr("2026-12-01 17:52"), receive_delay_ms=1000, undelivered="pending"
+    )
+    add_signal(store, bar_close_ms=tr("2026-12-01 17:53"), receive_delay_ms=1000, outcome=None)
+
+    lost = verdict(build_report(store, start_ms=START_MS, end_ms=END_MS, source="db"))
+
+    assert lost == (
+        "SAĞLANMADI — 1 sinyalin mesajı Telegram'a ulaşmadı · 1 sinyal işlenemedi (hata)"
+    )
+
+    # Without the two lost ones, the two open ones remain.
+    with Store(":memory:") as other:
+        delivered_exits(other)
+        add_signal(
+            other,
+            bar_close_ms=tr("2026-12-01 17:52"),
+            receive_delay_ms=1000,
+            undelivered="pending",
+        )
+        add_signal(other, bar_close_ms=tr("2026-12-01 17:53"), receive_delay_ms=1000, outcome=None)
+        still_open = verdict(build_report(other, start_ms=START_MS, end_ms=END_MS, source="db"))
+
+    assert still_open == (
+        "EKSİK — 1 mesaj hâlâ bekliyor · 1 sinyal kuyrukta bekliyor; raporu sonra yeniden al"
+    )
+
+
+def test_a_heartbeat_that_was_not_processed_yet_does_not_count(store: Store) -> None:
+    delivered_exits(store)
+    add_signal(
+        store,
+        bar_close_ms=tr("2026-12-01 18:00"),
+        receive_delay_ms=800,
+        action="heartbeat",
+        outcome=None,
+    )
+
+    report = build_report(store, start_ms=START_MS, end_ms=END_MS, source="db")
+
+    assert verdict(report) == "SAĞLANDI"
 
 
 def test_a_refused_message_outweighs_a_pending_one(store: Store) -> None:

@@ -170,7 +170,7 @@ def build_report(store: Store, *, start_ms: int, end_ms: int, source: str) -> st
     lines += _daily_table(data.signals, data.delivery)
     lines.append("")
     lines += _outcome_lines(data.signals)
-    lines += _latency_lines(data.samples, data.delivery)
+    lines += _latency_lines(data.signals, data.samples, data.delivery)
     lines += _outbox_lines(data)
     lines += [
         "",
@@ -253,8 +253,14 @@ def _outcome_lines(signals: Sequence[SignalRow]) -> list[str]:
     return ["Sonuçlar (heartbeat hariç): " + (" · ".join(parts) if parts else "yok")]
 
 
+def _joined(parts: Sequence[tuple[int, str]]) -> str:
+    return " · ".join(f"{count} {what}" for count, what in parts if count)
+
+
 def _latency_lines(
-    samples: Sequence[LatencySample], delivery: dict[int, OutboxStatus]
+    signals: Sequence[SignalRow],
+    samples: Sequence[LatencySample],
+    delivery: dict[int, OutboxStatus],
 ) -> list[str]:
     receive = latency_stats([s.received_at_ms - s.bar_close_ms for s in samples])
     telegram = latency_stats(
@@ -263,6 +269,11 @@ def _latency_lines(
     statuses = Counter(delivery.values())
     undelivered = sum(statuses[status] for status in _UNDELIVERED)
     pending = statuses[OutboxStatus.PENDING]
+    strategy_signals = [signal for signal in signals if signal.action != _HEARTBEAT_ACTION]
+    # A signal that could not be processed produced no message at all (only an alarm), and
+    # one still in the queue has produced none yet: neither shows up in `delivery`.
+    unprocessed = sum(1 for signal in strategy_signals if signal.outcome is Outcome.ERROR)
+    queued = sum(1 for signal in strategy_signals if signal.outcome is None)
     lines = [
         "Gecikme, bar kapanışı → alıcı: " + _latency_text(receive, "alert"),
         "Gecikme, bar kapanışı → Telegram: " + _latency_text(telegram, "mesaj"),
@@ -273,19 +284,29 @@ def _latency_lines(
     ]
     # The median only covers messages that were sent, and one that is slower than its
     # validity never is: without the delivery count the slowest cases could not fail it.
-    if not delivery:
+    if undelivered or unprocessed:
+        lost = _joined(
+            [
+                (undelivered, "sinyalin mesajı Telegram'a ulaşmadı"),
+                (unprocessed, "sinyal işlenemedi (hata)"),
+            ]
+        )
+        verdict = f"SAĞLANMADI — {lost}"
+    elif pending or queued:
+        open_items = _joined(
+            [(pending, "mesaj hâlâ bekliyor"), (queued, "sinyal kuyrukta bekliyor")]
+        )
+        verdict = f"EKSİK — {open_items}; raporu sonra yeniden al"
+    elif not delivery:
         verdict = "veri yok"
-    elif undelivered:
-        verdict = f"SAĞLANMADI — {undelivered} sinyalin mesajı Telegram'a ulaşmadı"
-    elif pending:
-        verdict = f"EKSİK — {pending} mesaj hâlâ bekliyor; raporu sonra yeniden al"
     elif telegram is None or telegram.median_ms >= ACCEPTANCE_MEDIAN_LATENCY_MS:
         verdict = "SAĞLANMADI"
     else:
         verdict = "SAĞLANDI"
     seconds = ACCEPTANCE_MEDIAN_LATENCY_MS // 1000
     lines.append(
-        f"  SPEC §5.7 ölçütü (ulaşmayan mesaj 0 ve uçtan uca medyan < {seconds} sn): {verdict}"
+        "  SPEC §5.7 ölçütü (ulaşmayan ya da işlenemeyen sinyal 0 ve uçtan uca medyan "
+        f"< {seconds} sn): {verdict}"
     )
     return lines
 
