@@ -138,7 +138,9 @@ tablosundan (MTF'de tablo farklı: "Full trades", "Avg runner R"; Silver Bullet'
 - [ ] `pine/heartbeat_indicator.pine` dosyasını yeni bir **gösterge** olarak yapıştır, derle. Hata/uyarı varsa kopyala.
 - [ ] Stratejilerle aynı sembolün **1 dakikalık** grafiğine ekle; her saatin **son** barı (saat başında KAPANAN bar:
       1 dakikalık grafikte HH:59 barı, New York saatiyle) hafif renkleniyor mu? Saat başını izleyen bar (HH:00)
-      renklenmemeli.
+      olağan saatlerde renklenmemeli. **Beklenen istisna:** barlarda boşluktan sonraki ilk bar renklenir ve atımı bir
+      bar geç gönderir — seans arasından sonra (CME'de 18:00 New York barı), hafta açılışında ve HH:59 barı hiç
+      oluşmadıysa.
 - [ ] Günlük grafikte "use an intraday chart of 60 minutes or less" çalışma zamanı hatası veriyor mu (vermeli)?
 - [ ] 45 dakikalık grafikte "the chart's bar length must divide the heartbeat interval" hatası veriyor mu (vermeli)?
       5 ve 15 dakikalık grafiklerde hata vermemeli.

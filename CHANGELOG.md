@@ -274,7 +274,7 @@ Kullanıcı kararı (2026-11-13): Faz 1 planı, dosya yapısı, ADR kararları v
 cevaplandı. **Emir yolu yazılmadı; tek mod `signal`.** Kararlar: `docs/adr/0000`, `0004`, `0005`. Kurulum ve işletim:
 `docs/runbook.md`. Spesifikasyon: `docs/SPEC.md` §5 (uygulanan davranışa göre güncellendi, sürüm 0.3).
 
-**Durum:** kod ve testler tamam (uygulama denetimi sonrası 3578 test, ruff, mypy --strict; ilk teslimde 3416). SPEC §5.7'deki 10 işlem günlük kabul koşusu **yapılmadı**:
+**Durum:** kod ve testler tamam (uygulama denetimi sonrası 3593 test, ruff, mypy --strict; ilk teslimde 3416). SPEC §5.7'deki 10 işlem günlük kabul koşusu **yapılmadı**:
 Faz 0 script'leri TradingView'da henüz derlenmedi, alarmlar kurulmadı, bot bir sunucuya kurulmadı. Hiçbir şey gerçek
 TradingView ya da gerçek Telegram'a karşı denenmedi (bu ortamdan ikisine de erişim yok).
 
@@ -372,9 +372,25 @@ mercekleri ilk kez çalıştı (ilk denemede kullanım sınırı yüzünden yar�
 | TV-1 | Master ile bağımsız NY Open / Asian Sweep script'leri aynı `strategy_id`'leri gönderir; belgeler hepsini alarmlamayı öneriyordu, bot iki akışı tek işlem sanar | Belgeler (runbook §8, `pine/README.md`, SPEC §5.1, `config/tv_alerts.yaml`): bir `strategy_id` tek kaynaktan → açık bulgu 47 | `56fa939` |
 | TV-2 | Grafikteki sembolün gerçek zamanlı veri gerektirdiği hiçbir yerde yazmıyordu; gecikmeli veride her giriş "BAYAT", takip mesajları sessizce düşer, heartbeat ise gelir | runbook §1 ön koşul (VERIFY), §11 sorun giderme, doğrulama listesi H → açık bulgu 48 | `56fa939` |
 
+Doğrulama turu (2026-11-15/16): iki bağımsız ajan ikinci turun düzeltmelerini dondurulmuş bir kopyada sınadı (kendi
+betikleri ve mutasyonlarıyla). 18 düzeltmenin 17'si bulgusunu tam kapatıyordu, biri (REP-1) kısmen; ayrıca aşağıdakiler
+bulundu ve düzeltildi. Bu turdan sonra yeni bir denetim turu **yapılmadı**.
+
+| Bulgu | Sorun | Düzeltme | Commit |
+|---|---|---|---|
+| V-1 | Polling "takılı" durumdayken kapanış, updater'ın son (kısa) sorgusunda geri çekilmeyi (30 sn'ye kadar) bekliyor, Telegram görevi kapatılmak yerine iptal ediliyordu; kurulmuş güncellemeler geri çekilme bitene kadar tutuluyor, o sırada durdurulursa yitiyordu | Geri çekilme yalnızca uzun sorguda ve verilecek güncelleme yokken; "takılı" = parti bütün olarak onaylanamadı | `c5b591e` |
+| V-2 | REP-1 kalıntısı: hiç mesaj üretmemiş sinyaller (işlenemeyen, kuyrukta bekleyen) hükmü etkilemiyordu: 5 girişin 3'ü iletilmişken "SAĞLANDI" | `hata` sonucu "SAĞLANMADI", kuyruktaki sinyal "EKSİK"; hüküm kaybedilen/açık kalan her şeyi adıyla yazar | `7925793` |
+| V-3 | Soket bağlanıyor ama dinlemeye alınmıyordu: aynı anda başlatılan başka bir kopya aynı portu bağlayıp görevlerini başlatabiliyordu; açılamayan kilit dosyası ham traceback veriyordu | Soket bağlanır bağlanmaz dinler; kilit dosyası hatası `HATA` satırı | `92aa327` |
+| V-4 | **Benim eklediğim runbook cümlesi yanlıştı:** "denemek için ayrı `--db` ve `--port` ver". O kopya aynı bot token'ını dinler ve `/kill`'i canlı servisin elinden alabilir ("KILL etkin" yanıtı gelir, sinyaller sürer) | Cümle düzeltildi: önce servisi durdur; yan yana deneme için ayrı bot token'ı. Kod kilidi veritabanı başınadır, token başına değil (açık bulgu 53) | bu commit |
+| V-5 | Doğrulama listesi H "HH:00 barı renklenmemeli" diyordu; yeni atım kuralında seans arasından sonraki ilk bar (CME'de 18:00) renklenir | Madde beklenen istisnayı söyler | bu commit |
+| V-6 | Beş kural testle sabitlenmemişti (mutantlar hayatta kalıyordu): yeniden denemede ulaşan giriş `/atladim`'ın hedefidir; yanıtlar PIN'e göre yeniden yazılmaz; gönderimden önceki hata "belki ulaştı" değildir; `serve` kilidi servis bitene kadar tutar; kısa sorgu beklemez | Testler | `c5b591e`, `92aa327`, `1c7384b` |
+
+Mutasyon denetimi (kendi koşularım): 64 mutantın 64'ü yakalandı; doğrulayıcıların hayatta kalan mutantlarının her biri
+için test eklendi.
+
 ### Testler
-- 3578 test (`uv run pytest -q`; 1 test bu ortamda atlanır: IPv6 loopback yok), ruff, `mypy --strict` (36 kaynak dosya)
-  temiz (uygulama denetiminin iki turu sonrası; ilk teslimde 3416).
+- 3593 test (`uv run pytest -q`; 1 test bu ortamda atlanır: IPv6 loopback yok), ruff, `mypy --strict` (36 kaynak dosya)
+  temiz (uygulama denetiminin iki turu ve doğrulama turu sonrası; ilk teslimde 3416).
 - Alıcının her adımı ve dalı; 33 gerçek gövde biçimi şemadan, alıcıdan ve işleyiciden geçer.
 - `/kill`, PIN kilidi, yetkisiz sohbet, grup sohbeti testleri (`tests/unit/test_commands.py`, `test_telegram.py`).
 - Uçtan uca (`tests/integration/test_service.py`): gerçek uygulama + store + işleyici + izleyici + python-telegram-bot;
@@ -409,11 +425,12 @@ Karar bekleyenler (hiçbiri varsayımla kapatılmadı):
 | 46 | Hangi TradingView sembolleri `US500.cash` ile aynı ölçekte sayılacak (sembol listesi)? |
 | 47 | Master ve bağımsız script'ler yan yana çalışacak mı (Master bacaklarına ayrı `strategy_id`)? |
 | 51 | `/devam` mesajlarda dokunulamaz (`code`) olsun mu? |
+| 53 | Aynı bot token'ıyla ikinci kopyayı kod da engellesin mi (makine genelinde kilit), yoksa belge + Conflict alarmı yeterli mi? |
 
 ## Açık bulgular
 
 Durum (2026-11-13): 1, 3–11 ve 24 kapandı; 2, 15 ve 23 kısmen. 12–23 ve 25–30 açık (18–23 denetimden, 25–27 Faz 2 ön
-diliminden, 28–30 FTMO doğrulamasından). 31–44 Faz 1'den, 45–52 Faz 1 uygulama denetiminden.
+diliminden, 28–30 FTMO doğrulamasından). 31–44 Faz 1'den, 45–54 Faz 1 uygulama denetiminden.
 
 1. ~~**MTF derleme riski:** `riskPts := ...` bildirimi olmayan değişkene atama.~~ **Çözüldü** (`e997dd5`).
 2. **B4 sayısal değerleri — kısmen:** kod varsayılanı artık MES test profili (E9). FTMO `US500.cash` spread'i/komisyonu
@@ -552,4 +569,13 @@ diliminden, 28–30 FTMO doğrulamasından). 31–44 Faz 1'den, 45–52 Faz 1 uy
     `/atladim` ve `/aldim` gibi `code` yapılabilir; kolaylık–güvenlik tercihi kullanıcıya bırakıldı.
 52. **Düzenlenen mesajlar alınmıyor:** bot yalnızca `message` güncellemelerini ister; eski bir mesaja sonradan düzenlemeyle
     yazılan PIN silinmez (komut olarak da işlenmez). PIN'i düzenlemeyle yazma.
+53. **Aynı bot token'ıyla ikinci kopya kodla engellenmiyor (karar gerekir):** `serve` kilidi veritabanı başınadır. Ayrı
+    `--db` ve `--port` ile başlatılan kopya aynı botu dinler; Telegram her güncellemeyi kopyalardan birine verir, `/kill`
+    deneme kopyasına düşebilir. Bugünkü koruma: runbook §4 uyarısı ve "Aynı bot token'ıyla başka bir süreç…" alarmı
+    (Conflict). Makine genelinde, bot kimliğine bağlı bir kilit eklenebilir; systemd'nin `PrivateTmp`'i yüzünden kilidin
+    yeri (ör. `/run/lock`) birim dosyasıyla birlikte kararlaştırılmalı. Telegram'ın iki dinleyiciye davranışı bu ortamdan
+    gözlenmedi.
+54. **`systemctl stop` sonrası çıkış kodu:** uvicorn düzgün kapanıştan sonra sinyali yeniden yükseltir; süreç 143 ile biter,
+    `run_service`'in dönüş değeri ve `Store.close()` çalışmaz (WAL ve çekirdek kilidi bunu taşır; veri kaybı yok).
+    `Restart=always` olduğu için `systemctl stop` dışında davranışı etkilemez; gözlem doğrulayıcıdan, sistemde denenmedi.
 

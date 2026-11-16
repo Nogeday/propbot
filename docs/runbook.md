@@ -119,8 +119,13 @@ curl -s http://127.0.0.1:8000/healthz              # {"status":"ok"}
 
 - Bot yalnızca `127.0.0.1:8000`'i dinler; dışarıya TLS vekili (Caddy) ya da tünel açar.
 - **Bir veritabanında tek `propbot serve` çalışır** (`data/propbot.db.lock` kilidi). Servis çalışırken elle ikinci bir
-  kopya başlatırsan kopya hiçbir şeye dokunmadan `HATA: …` ile çıkar; port doluysa da öyle. Denemek için servisi durdur
-  ya da `--db` ve `--port` ile ayrı bir veritabanı ve port ver.
+  kopya başlatırsan kopya hiçbir şeye dokunmadan `HATA: …` ile çıkar; port doluysa da öyle.
+- **Bir bot token'ıyla da tek kopya çalışmalı; bunu kilit engellemez.** Ayrı `--db` ve `--port` verilmiş ikinci bir kopya
+  başlar, ama aynı Telegram botunu dinler: Telegram her komutu iki kopyadan yalnızca birine verir. `/kill <PIN>` deneme
+  kopyasına düşerse "KILL etkin" yanıtını görürsün, canlı servis ise sinyal göndermeye devam eder. Bir şey denemek
+  için **önce servisi durdur** (`sudo systemctl stop propbot`); yan yana deneme kopyası gerekiyorsa ona BotFather'dan
+  ayrı bir bot ve ayrı bir `--env-file` ver. İki kopya aynı token'la çalışırsa bot "Aynı bot token'ıyla başka bir süreç
+  güncelleme çekiyor" alarmı gönderir.
 - Arka plan görevlerinden biri ölürse süreç hata koduyla çıkar, systemd 5 sn sonra yeniden başlatır. Kuyruk ve Telegram
   kutusu `data/propbot.db`'de durur; kaldığı yerden devam eder. Süresi geçmiş giriş sinyalleri "BAYAT" ya da
   "İLETİLEMEDİ" olarak bildirilir, hiçbir zaman geçerli sinyal gibi iletilmez.
@@ -361,6 +366,8 @@ Uçtan uca test TradingView'dan yapılır: heartbeat alarmını kur, saat başı
 | "[ALARM] Telegram güncellemeleri okunamıyor" | komutlar işlenmiyor olabilir (`/duraklat`, `/kill` dahil) | `journalctl -u propbot -n 50`; sinyalleri durdurman gerekirse `sudo systemctl stop propbot` |
 | `HATA: … dinlenemiyor` | port başka bir süreçte (çoğunlukla zaten çalışan servis) | `ss -ltnp \| grep 8000`; elle ikinci bir `propbot serve` başlatma |
 | `HATA: bu veritabanıyla çalışan başka bir propbot serve var` | servis çalışırken elle bir kopya daha başlatıldı | `systemctl status propbot`; kopya hiçbir şeye dokunmadan çıkar |
+| `HATA: kilit dosyası açılamıyor` | `data/` klasörü yok ya da servis kullanıcısına ait değil | `mkdir -p data && chmod 700 data`; klasörün sahibi birimdeki `User=` olmalı |
+| `/kill` "KILL etkin" dedi ama sinyaller gelmeye devam ediyor | aynı bot token'ıyla ikinci bir kopya çalışıyor ve komutu o aldı | "Aynı bot token'ıyla başka bir süreç…" alarmı; fazla kopyayı durdur, `/kill <PIN>`'i yeniden gönder |
 | `status=226/NAMESPACE` | birimdeki `ReadWritePaths` klasörü yok (depo yolu değişti ama satır değişmedi; `data/` oluşturulmadı) | birimdeki işaretli dört satır; `mkdir -p data` |
 | `/saglik` yanıt vermiyor | Telegram token/sohbet kimliği yanlış; ağ yok | `journalctl -u propbot -n 50` |
 | Mesajda "boyut hesaplanamadı" | venue profilinde `contract.*` boş | 3.3 |
@@ -379,5 +386,7 @@ Uçtan uca test TradingView'dan yapılır: heartbeat alarmını kur, saat başı
    Rapordaki "iletilen giriş" yalnızca mesajı Telegram'a **gönderilmiş** girişleri sayar; "ulaşmayan" sütunu ve "Telegram
    teslimi" satırı süresi dolan / reddedilen mesajları gösterir. Bunlardan biri bile varsa §5.7 satırı "SAĞLANMADI",
    bekleyen mesaj varsa "EKSİK" yazar (medyan yalnızca gönderilen mesajlardan hesaplandığı için tek başına yetmez).
-   CSV'deki `delivery` sütunu her sinyalin mesajına ne olduğunu söyler.
+   CSV'deki `delivery` sütunu her sinyalin mesajına ne olduğunu söyler. İşlenemeyen (`hata`) bir sinyal de ölçütü
+   "SAĞLANMADI" yapar, kuyrukta bekleyen sinyal "EKSİK". Koşu sırasında `/duraklat` ya da `/kill` kullanırsan o anda
+   bekleyen giriş mesajları düşürülür ve onlar da "ulaşmayan" sayılır: kabul koşusunu duraklatmadan yürüt.
 5. Sonuçları (rapor çıktısı + TradingView Alert Log sayıları) Claude Code oturumuna yapıştır.

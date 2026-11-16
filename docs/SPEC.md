@@ -461,15 +461,18 @@ id {signal_id} · bar {NY saati} NY / {TR saati} TR
 Ubuntu · systemd (`Restart=always`) · chrony · journald. İki ücretsiz yol (`docs/runbook.md`): **A** DuckDNS alt alan adı +
 Caddy (Let's Encrypt) + ufw; **B** kendi bilgisayarın + Tailscale Funnel (ya da yalnızca deneme için Cloudflare hızlı
 tünel). Örnek dosyalar `deploy/`. Yeniden başlatmalar izlenen pencerelerin dışında yapılır. Dinleme soketi, hiçbir
-arka plan görevi başlamadan önce bağlanır ve bir veritabanında tek `serve` çalışır (`<db>.lock`): yanlışlıkla
-başlatılan ikinci kopya canlı veritabanına ve bota dokunmadan `HATA` ile çıkar.
+arka plan görevi başlamadan önce bağlanıp dinlemeye alınır ve bir veritabanında tek `serve` çalışır (`<db>.lock`):
+yanlışlıkla başlatılan ikinci kopya canlı veritabanına ve bota dokunmadan `HATA` ile çıkar. Kilit veritabanı
+başınadır: ayrı veritabanı ve portla başlatılan kopya aynı bot token'ını dinler ve komutları (`/kill` dahil) canlı
+servisin elinden alabilir; deneme kopyası ayrı bot token'ı ister (runbook §4).
 
 ### 5.7 Kabul
 - 10 işlem günü kesintisiz; kaçan/çift sinyal 0 (TradingView Alert Log ile karşılaştırma); uçtan uca medyan gecikme < 5 sn.
   Kanıt: `uv run propbot signals report --since <gün> --csv reports/sinyaller.csv` (gün gün sayılar, gecikme medyanı,
   alarmlar). Rapor teslimi sayar, kararı değil: "iletilen giriş" mesajı Telegram'a gönderilmiş giriştir; dönemde
-  süresi dolan ya da reddedilen tek bir mesaj ölçütü "SAĞLANMADI" yapar, bekleyen mesaj "EKSİK" (medyan yalnızca
-  gönderilen mesajlardan hesaplanır, geçerliliğinden yavaş kalan mesaj örneğe hiç girmez).
+  süresi dolan ya da reddedilen tek bir mesaj ya da işlenemeyen tek bir sinyal ölçütü "SAĞLANMADI" yapar, bekleyen
+  mesaj ya da kuyruktaki sinyal "EKSİK" (medyan yalnızca gönderilen mesajlardan hesaplanır, geçerliliğinden yavaş
+  kalan mesaj örneğe hiç girmez).
 - Tüm doğrulama hata yolları testli; `/kill` ve yetkisiz sohbet testleri yeşil.
 
 ## 6. Faz 2 — Python motoru ve backtest
