@@ -58,7 +58,8 @@
 //     by default (fixed cash risk off the STARTING balance, the prop rule); Account Equity compounds.
 //   QUANTITY ROUNDING: "Auto" = whole contracts on futures; a size < 1 skips the trade.
 //   WEBHOOK ALERTS: JSON via alert() (create ONE alert with "alert() function calls only");
-//     S1 alerts carry strategy_id "ny_orb_fvg", S2 alerts "asian_sweep".
+//     S1 alerts carry strategy_id "master_ny_orb_fvg", S2 alerts "master_asian_sweep" — ids of
+//     their own, so the stand-alone NY Open / Asian Sweep scripts can be alerted next to this one.
 // =====================================================================================
 
 strategy(title              = "Master Prop Firm Portfolio (S1 ORB + S2 Sweep)",
@@ -590,7 +591,7 @@ if s1_canEnter
                             s1_entryBar      := bar_index
                             array.push(s1_stopQueue, estStop)
                             s1_tradedToday := true
-                            f_alert("ny_orb_fvg", "entry", "long", st == 1 ? "IFVG" : "FVG", estEntry, estStop, s1_inTakeProfit)
+                            f_alert("master_ny_orb_fvg", "entry", "long", st == 1 ? "IFVG" : "FVG", estEntry, estStop, s1_inTakeProfit)
                             box.new(array.get(s1_aFormBar, i), t, bar_index + s1_boxProj, b, border_color = color.new(color.yellow, 0), bgcolor = color.new(color.yellow, 80))
                             label.new(bar_index, b, st == 1 ? "S1 IFVG ▲" : "S1 FVG ▲", style = label.style_label_up, color = color.new(color.green, 0), textcolor = color.white, size = size.small)
                         break
@@ -622,7 +623,7 @@ if s1_canEnter
                             s1_entryBar      := bar_index
                             array.push(s1_stopQueue, estStop)
                             s1_tradedToday := true
-                            f_alert("ny_orb_fvg", "entry", "short", st == 1 ? "IFVG" : "FVG", estEntry, estStop, s1_inTakeProfit)
+                            f_alert("master_ny_orb_fvg", "entry", "short", st == 1 ? "IFVG" : "FVG", estEntry, estStop, s1_inTakeProfit)
                             box.new(array.get(s1_aFormBar, i), t, bar_index + s1_boxProj, b, border_color = color.new(color.yellow, 0), bgcolor = color.new(color.yellow, 80))
                             label.new(bar_index, t, st == 1 ? "S1 IFVG ▼" : "S1 FVG ▼", style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.small)
                         break
@@ -639,7 +640,7 @@ if s1_inDir == 1
             s1_inTrailStop := cand
     strategy.exit("S1 ExitL", from_entry = "S1 Long", stop = s1_inTrailStop, limit = s1_inTakeProfit)
     if s1_inTrailStop > prevTrailL
-        f_alert("ny_orb_fvg", "stop_update", "long", "", s1_fillPrice, s1_inTrailStop, s1_inTakeProfit)
+        f_alert("master_ny_orb_fvg", "stop_update", "long", "", s1_fillPrice, s1_inTrailStop, s1_inTakeProfit)
 else if s1_inDir == -1
     prevTrailS = s1_inTrailStop
     if s1_useTrail and not na(s1_fillPrice)
@@ -650,12 +651,12 @@ else if s1_inDir == -1
             s1_inTrailStop := cand
     strategy.exit("S1 ExitS", from_entry = "S1 Short", stop = s1_inTrailStop, limit = s1_inTakeProfit)
     if s1_inTrailStop < prevTrailS
-        f_alert("ny_orb_fvg", "stop_update", "short", "", s1_fillPrice, s1_inTrailStop, s1_inTakeProfit)
+        f_alert("master_ny_orb_fvg", "stop_update", "short", "", s1_fillPrice, s1_inTrailStop, s1_inTakeProfit)
 
 // S1 force flat at its session end (immediately = fill at this bar's close, not the next
 // bar's open, which on an RTH-only chart would be the next session)
 if s1_closeAtEnd and s1_atSessionEnd and s1_inDir != 0 and not g_forceFlat
-    f_alert("ny_orb_fvg", "exit", s1_inDir == 1 ? "long" : "short", "", close, na, na)
+    f_alert("master_ny_orb_fvg", "exit", s1_inDir == 1 ? "long" : "short", "", close, na, na)
     strategy.close(s1_inDir == 1 ? "S1 Long" : "S1 Short", comment = "S1 EOD", immediately = true)
 
 // ═════════════════════════════ S2 · ASIAN SWEEP ENGINE ═════════════════════════════
@@ -734,7 +735,7 @@ if s2_canEnter
             s2_entryBar      := bar_index
             array.push(s2_stopQueue, estStop)
             s2_tradedToday := true
-            f_alert("asian_sweep", "entry", "long", "SWEEP_FVG", estEntry, estStop, s2_inTakeProfit)
+            f_alert("master_asian_sweep", "entry", "long", "SWEEP_FVG", estEntry, estStop, s2_inTakeProfit)
             s2_armDir := 0
             if s2_showZones and inDateRange
                 label.new(bar_index, s2_armTop, "S2 ▲", style = label.style_label_up, color = color.new(color.green, 0), textcolor = color.white, size = size.tiny)
@@ -755,7 +756,7 @@ if s2_canEnter
             s2_entryBar      := bar_index
             array.push(s2_stopQueue, estStop)
             s2_tradedToday := true
-            f_alert("asian_sweep", "entry", "short", "SWEEP_FVG", estEntry, estStop, s2_inTakeProfit)
+            f_alert("master_asian_sweep", "entry", "short", "SWEEP_FVG", estEntry, estStop, s2_inTakeProfit)
             s2_armDir := 0
             if s2_showZones and inDateRange
                 label.new(bar_index, s2_armBot, "S2 ▼", style = label.style_label_down, color = color.new(color.red, 0), textcolor = color.white, size = size.tiny)
@@ -769,7 +770,7 @@ else if s2_inDir == -1
 // S2 force flat at its active session end (first bar after the window, or the chart session's
 // last bar inside it); immediately = fill at this bar's close
 if s2_closeAtEnd and s2_activeExit and s2_inDir != 0 and not g_forceFlat
-    f_alert("asian_sweep", "exit", s2_inDir == 1 ? "long" : "short", "", close, na, na)
+    f_alert("master_asian_sweep", "exit", s2_inDir == 1 ? "long" : "short", "", close, na, na)
     strategy.close(s2_inDir == 1 ? "S2 Long" : "S2 Short", comment = "S2 session end", immediately = true)
 
 // ───────────────────────────── FORCED FLAT: DAILY-LOSS BREACH / END OF TEST RANGE ─────────────────────────────
@@ -778,9 +779,9 @@ if s2_closeAtEnd and s2_activeExit and s2_inDir != 0 and not g_forceFlat
 if g_forceFlat
     g_side = strategy.position_size > 0 ? "long" : "short"
     if s1_isOpen
-        f_alert("ny_orb_fvg", "exit", g_side, "", close, na, na)
+        f_alert("master_ny_orb_fvg", "exit", g_side, "", close, na, na)
     if s2_isOpen
-        f_alert("asian_sweep", "exit", g_side, "", close, na, na)
+        f_alert("master_asian_sweep", "exit", g_side, "", close, na, na)
     strategy.close_all(comment = g_flatDD ? "Daily DD halt" : "End of test range", immediately = true)
 
 // ───────────────────────────── DATE-RANGE / OOS VISUALS ─────────────────────────────

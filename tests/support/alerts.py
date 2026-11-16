@@ -5,7 +5,8 @@
 so the dictionaries are what `json.loads` yields for a real webhook body, token included.
 
 One builder per strategy/action shape. The Master portfolio script sends the `ny_orb_fvg`
-and `asian_sweep` shapes unchanged (same `f_alert`, the strategy id is an argument).
+and `asian_sweep` shapes with ids of its own (same `f_alert`, the strategy id is an
+argument): `master_ny_orb_fvg` and `master_asian_sweep`.
 
 Keyword overrides replace (or add) top-level keys AFTER the payload is built and recompute
 nothing: `alert_payload(stop=1.0)` keeps the original `stop_dist_pts`. Tests that need a
@@ -28,6 +29,9 @@ HEARTBEAT_TF: Final = "15"
 
 LONG: Final = "long"
 SHORT: Final = "short"
+# strategy_id of the Master script's two legs (pine/master_prop_firm_portfolio.pine).
+MASTER_NY_ORB_FVG: Final = "master_ny_orb_fvg"
+MASTER_ASIAN_SWEEP: Final = "master_asian_sweep"
 
 _NULL: Final = "null"
 
@@ -437,5 +441,22 @@ def pine_payloads() -> dict[str, dict[str, object]]:
                 side, trail_points=5.5
             ),
             f"mtf_trend_cont/exit/{side}": mtf_trend_cont_exit(side),
+            # The Master script's legs: the shapes above under the Master's own ids.
+            f"master_ny_orb_fvg/entry/{side}/FVG": ny_orb_fvg_entry(
+                side, "FVG", strategy_id=MASTER_NY_ORB_FVG
+            ),
+            f"master_ny_orb_fvg/entry/{side}/IFVG": ny_orb_fvg_entry(
+                side, "IFVG", strategy_id=MASTER_NY_ORB_FVG
+            ),
+            f"master_ny_orb_fvg/stop_update/{side}": ny_orb_fvg_stop_update(
+                side, strategy_id=MASTER_NY_ORB_FVG
+            ),
+            f"master_ny_orb_fvg/exit/{side}": ny_orb_fvg_exit(side, strategy_id=MASTER_NY_ORB_FVG),
+            f"master_asian_sweep/entry/{side}": asian_sweep_entry(
+                side, strategy_id=MASTER_ASIAN_SWEEP
+            ),
+            f"master_asian_sweep/exit/{side}": asian_sweep_exit(
+                side, strategy_id=MASTER_ASIAN_SWEEP
+            ),
         }
     return payloads

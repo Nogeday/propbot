@@ -1851,6 +1851,65 @@ def test_unlisted_symbol_alarm_is_throttled_to_ten_minutes(store: Store) -> None
     assert "stop güncelleme alert'i geldi (id 4)" in rows[1].text
 
 
+# --- process_one: Master next to the stand-alone scripts (user decision 47) -----------------
+
+
+def master(
+    payload: dict[str, object], strategy_id: str = alerts.MASTER_NY_ORB_FVG
+) -> dict[str, object]:
+    return payload | {"strategy_id": strategy_id}
+
+
+def test_master_and_stand_alone_entries_of_the_same_bar_are_two_signals(store: Store) -> None:
+    # Both scripts on one chart see the same setup on the same bar. With one shared id the
+    # second alert was a duplicate of the first; now each is a trade of its own.
+    alone = handle(store, alerts.ny_orb_fvg_entry())
+    leg = handle(store, master(alerts.ny_orb_fvg_entry()))
+
+    assert (alone.outcome, leg.outcome) == (Outcome.FORWARDED,) * 2
+    assert texts(store, alone.id)[0].startswith("[SİNYAL] NY ORB FVG · FVG · LONG · ")
+    assert texts(store, leg.id)[0].startswith("[SİNYAL] Master NY ORB FVG · FVG · LONG · ")
+    # Two entries, two risks: the daily budget counts both.
+    assert "günlük bütçe $250/$1000" in texts(store, alone.id)[0]
+    assert "günlük bütçe $500/$1000" in texts(store, leg.id)[0]
+
+
+def test_each_script_follows_its_own_entry(store: Store) -> None:
+    # The stand-alone script went long, the Master leg short (their inputs may differ).
+    alone = handle(store, alerts.ny_orb_fvg_entry(LONG))
+    leg = handle(store, master(alerts.ny_orb_fvg_entry(SHORT)))
+
+    leg_trail = handle(store, master(trail(SHORT, minute=18, offset=3.5)))
+    alone_trail = handle(store, trail(LONG, minute=18, offset=-3.5))
+    leg_exit = handle(store, master(alerts.ny_orb_fvg_exit(SHORT)))
+
+    # With a shared id the short trail would have met the long entry: a side-mismatch alarm.
+    assert (leg_trail.outcome, alone_trail.outcome) == (Outcome.FORWARDED,) * 2
+    assert f"(giriş id {leg.id})" in texts(store, leg_trail.id)[0]
+    assert f"(giriş id {alone.id})" in texts(store, alone_trail.id)[0]
+    assert f"(giriş id {leg.id})" in texts(store, leg_exit.id)[0]
+    assert all(row.kind is OutboxKind.SIGNAL for row in outbox(store))
+    # The Master leg's exit closed the Master trade only: the stand-alone one still trails.
+    later = handle(store, trail(LONG, minute=25, offset=-1.5))
+    assert later.outcome is Outcome.FORWARDED
+    assert handle(store, master(trail(SHORT, minute=300, offset=1.5))).outcome is (
+        Outcome.NO_ACTIVE_TRADE
+    )
+
+
+def test_the_two_master_legs_are_separate_strategies_too(store: Store) -> None:
+    s1 = handle(store, master(alerts.ny_orb_fvg_entry()))
+    s2 = handle(store, master(alerts.asian_sweep_entry(), alerts.MASTER_ASIAN_SWEEP))
+
+    closing = handle(store, master(alerts.asian_sweep_exit(), alerts.MASTER_ASIAN_SWEEP))
+
+    assert (s1.outcome, s2.outcome, closing.outcome) == (Outcome.FORWARDED,) * 3
+    assert texts(store, s2.id)[0].startswith("[SİNYAL] Master Asian Sweep · SWEEP_FVG · LONG · ")
+    assert f"(giriş id {s2.id})" in texts(store, closing.id)[0]
+    # S1 is still open: its trail is followed.
+    assert handle(store, master(trail(minute=18, offset=-3.5))).outcome is Outcome.FORWARDED
+
+
 def test_side_mismatch_alarm_is_throttled_to_ten_minutes(store: Store) -> None:
     handle(store, alerts.ny_orb_fvg_entry())
 
@@ -1895,6 +1954,13 @@ def _sequences() -> list[list[str]]:
                 f"mtf_trend_cont/stop_update/{side}/trail",
                 f"mtf_trend_cont/exit/{side}",
             ],
+            [
+                f"master_ny_orb_fvg/entry/{side}/FVG",
+                f"master_ny_orb_fvg/stop_update/{side}",
+                f"master_ny_orb_fvg/exit/{side}",
+            ],
+            [f"master_ny_orb_fvg/entry/{side}/IFVG"],
+            [f"master_asian_sweep/entry/{side}", f"master_asian_sweep/exit/{side}"],
         ]
     return sequences
 
@@ -1911,7 +1977,7 @@ def expected_outcome(shape: str) -> Outcome:
 def test_the_sequences_cover_every_real_payload_shape() -> None:
     shapes = [shape for sequence in SEQUENCES for shape in sequence]
 
-    assert len(shapes) == len(set(shapes)) == 33
+    assert len(shapes) == len(set(shapes)) == 45
     assert set(shapes) == set(alerts.pine_payloads())
 
 

@@ -253,6 +253,9 @@ def test_the_reward_multiple_comes_from_the_levels_not_from_the_alert() -> None:
             "girdisidir, TradingView'dan oku); kalan kısım için stop güncellemeleri gelir.",
         ),
         ("asian_sweep", None),
+        # The Master script's legs behave like their stand-alone strategies.
+        ("master_ny_orb_fvg", "Not: trailing stop güncellemeleri ayrı mesajla gelir."),
+        ("master_asian_sweep", None),
     ],
 )
 def test_each_strategy_has_its_own_note_line(strategy_id: str, note: str | None) -> None:
@@ -329,6 +332,25 @@ def test_risk_too_wide_notice_shows_the_risk_of_the_minimum_lot() -> None:
         "işlem başı sınır $250. Bu girişi ALMA.\n"
         "id 123 · bar 09:44 NY / 17:44 TR"
     )
+
+
+@pytest.mark.parametrize(
+    ("strategy_id", "name"),
+    [("master_ny_orb_fvg", "Master NY ORB FVG"), ("master_asian_sweep", "Master Asian Sweep")],
+)
+def test_a_master_leg_is_named_as_such_in_every_header(strategy_id: str, name: str) -> None:
+    # User decision 47: side by side with the stand-alone script, the header is what tells
+    # the user which of the two positions a message is about.
+    leg = row(strategy_id=strategy_id)
+    link = TradeLink(entry_id=120)
+
+    assert entry_text(leg).splitlines()[0] == f"[SİNYAL] {name} · FVG · LONG · CME_MINI:MES1!"
+    for text in (
+        messages.stop_update_signal(leg, venue=VENUE, link=link, current_offset=-12.5),
+        messages.exit_signal(leg, venue=VENUE, link=link, limit_may_rest=False),
+        messages.cancel_signal(leg, venue=VENUE, link=link, release_hint=False),
+    ):
+        assert f"] {name} · LONG · CME_MINI:MES1!" in text.splitlines()[0]
 
 
 def test_symbol_skip_notice_names_the_symbol_and_the_list_to_edit() -> None:

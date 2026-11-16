@@ -35,6 +35,9 @@ SCHEMA_VERSION: Final = 1
 HEARTBEAT_STRATEGY_ID: Final = "heartbeat"
 
 # strategy_id -> display name used in Telegram messages.
+# The Master portfolio script sends its two legs under ids of their own (user decision 47):
+# with the stand-alone ids, Master and a stand-alone script alerted on the same symbol would
+# be one stream to the receiver (duplicates dropped, follow-ups tied to the wrong entry).
 STRATEGY_NAMES: Final[Mapping[str, str]] = MappingProxyType(
     {
         "ny_orb_fvg": "NY ORB FVG",
@@ -42,6 +45,8 @@ STRATEGY_NAMES: Final[Mapping[str, str]] = MappingProxyType(
         "ict_silver_bullet": "ICT Silver Bullet",
         "mr_bb_kc_rsi2": "Mean Reversion BB/KC",
         "mtf_trend_cont": "MTF Trend",
+        "master_ny_orb_fvg": "Master NY ORB FVG",
+        "master_asian_sweep": "Master Asian Sweep",
     }
 )
 SETUPS: Final = frozenset({"FVG", "IFVG", "SWEEP_FVG", "SB_FVG", "BB_KC_RSI2", "MTF_PULLBACK"})

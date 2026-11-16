@@ -59,10 +59,13 @@ _NO_FILL_ALERTS_LIMIT_LINE: Final = (
     "TradingView'da emir dolup stop/TP ile kapanırsa mesaj gelmez: seans sonunda emrin hâlâ "
     "bekliyorsa SİL, pozisyonun açıksa kendin kapat."
 )
-# Extra line of the entry message, per strategy (asian_sweep has none).
+_TRAILING_NOTE: Final = "trailing stop güncellemeleri ayrı mesajla gelir."
+# Extra line of the entry message, per strategy (the two Asian Sweep ids have none). A leg of
+# the Master script behaves like its stand-alone strategy and carries the same note.
 _STRATEGY_NOTES: Final[Mapping[str, str]] = MappingProxyType(
     {
-        "ny_orb_fvg": "trailing stop güncellemeleri ayrı mesajla gelir.",
+        "ny_orb_fvg": _TRAILING_NOTE,
+        "master_ny_orb_fvg": _TRAILING_NOTE,
         "ict_silver_bullet": "TradingView'daki limit dolmazsa İPTAL mesajı gelir.",
         "mr_bb_kc_rsi2": "TP dinamiktir (BB ortası, her bar değişir); TradingView'dan izle.",
         "mtf_trend_cont": (

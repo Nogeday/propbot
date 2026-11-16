@@ -123,6 +123,9 @@ def test_constants_match_spec_5_1() -> None:
         "ict_silver_bullet": "ICT Silver Bullet",
         "mr_bb_kc_rsi2": "Mean Reversion BB/KC",
         "mtf_trend_cont": "MTF Trend",
+        # User decision 47: the Master script's legs have ids of their own.
+        "master_ny_orb_fvg": "Master NY ORB FVG",
+        "master_asian_sweep": "Master Asian Sweep",
     }
     assert HEARTBEAT_STRATEGY_ID not in STRATEGY_NAMES
     assert frozenset({"FVG", "IFVG", "SWEEP_FVG", "SB_FVG", "BB_KC_RSI2", "MTF_PULLBACK"}) == SETUPS
@@ -729,7 +732,19 @@ def test_an_entry_relabelled_as_heartbeat_lists_every_trade_field() -> None:
 
 @pytest.mark.parametrize("builder", NON_HEARTBEAT_BUILDERS)
 @pytest.mark.parametrize(
-    "strategy_id", ["", "NY_ORB_FVG", "ny_orb_fvg ", "topstep_x", "master", "x" * 300]
+    "strategy_id",
+    [
+        "",
+        "NY_ORB_FVG",
+        "ny_orb_fvg ",
+        "topstep_x",
+        "master",
+        "master_",
+        "master_ict_silver_bullet",
+        "Master_ny_orb_fvg",
+        "master_ny_orb_fvg_2",
+        "x" * 300,
+    ],
 )
 def test_strategy_id_must_be_known(builder: Builder, strategy_id: str) -> None:
     assert rejected_fields(untokened(builder(), strategy_id=strategy_id)) == ("strategy_id",)
