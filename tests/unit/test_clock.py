@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from propbot.core.clock import ms_from_datetime, system_clock_ms, utc_from_ms
+from propbot.core.clock import boot_clock_ms, ms_from_datetime, system_clock_ms, utc_from_ms
 
 
 def test_round_trip_keeps_the_millisecond() -> None:
@@ -39,3 +39,14 @@ def test_system_clock_is_utc_epoch_milliseconds() -> None:
     now = utc_from_ms(system_clock_ms())
 
     assert abs((now - before).total_seconds()) < 5
+
+
+def test_the_boot_clock_measures_durations_not_dates() -> None:
+    # Milliseconds since the machine started (suspend included): far from an epoch time,
+    # so a wall clock that is corrected or stepped cannot move it.
+    first = boot_clock_ms()
+    second = boot_clock_ms()
+
+    assert 0 < first <= second
+    assert second < system_clock_ms() // 2
+    assert second - first < 1_000

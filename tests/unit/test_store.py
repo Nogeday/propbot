@@ -174,6 +174,7 @@ def raw_execute(path: Path, sql: str, *, ignore_checks: bool = False) -> list[tu
                 "error",
                 "skip_symbol",
                 "skip_stop_too_tight",
+                "skip_standby",
             ],
         ),
         (OutboxKind, ["signal", "alarm", "notice"]),
@@ -192,6 +193,7 @@ def raw_execute(path: Path, sql: str, *, ignore_checks: bool = False) -> list[tu
                 "expiry_reminder_day",
                 "last_alive_ms",
                 "restarts_unreported",
+                "standby",
             ],
         ),
     ],
@@ -201,10 +203,11 @@ def test_enum_values_are_the_stored_text(enum_type: type[StrEnum], values: list[
     assert [member.value for member in enum_type] == values
 
 
-def test_schema_version_is_two() -> None:
-    # Version 2 added two outcomes to the CHECK of `signals.outcome`; a version 1 file
-    # would refuse them at write time, so it is refused when it is opened instead.
-    assert SCHEMA_VERSION == 2
+def test_schema_version_is_three() -> None:
+    # Versions 2 and 3 added outcomes to the CHECK of `signals.outcome` (skip_symbol and
+    # skip_stop_too_tight, then skip_standby); an older file would refuse them at write
+    # time, so it is refused when it is opened instead.
+    assert SCHEMA_VERSION == 3
 
 
 def test_state_keys_cannot_collide_with_alarm_throttle_keys() -> None:
@@ -259,7 +262,7 @@ def test_new_file_gets_wal_strict_tables_and_the_schema_version(
 ) -> None:
     assert db_path.is_file()
     assert raw_execute(db_path, "PRAGMA journal_mode") == [("wal",)]
-    assert raw_execute(db_path, "SELECT key, value FROM meta") == [("schema_version", "2")]
+    assert raw_execute(db_path, "SELECT key, value FROM meta") == [("schema_version", "3")]
 
     tables = raw_execute(
         db_path, "SELECT name, strict FROM pragma_table_list WHERE schema = 'main' AND wr = 0"
@@ -386,12 +389,12 @@ def test_foreign_sqlite_database_is_refused_and_left_untouched(db_path: Path) ->
     assert raw_execute(db_path, "PRAGMA journal_mode") == [("delete",)]
 
 
-@pytest.mark.parametrize("stored", ["1", "3", "0", "02", "2.0", " 2", ""])
+@pytest.mark.parametrize("stored", ["1", "2", "4", "0", "03", "3.0", " 3", ""])
 def test_other_schema_version_is_refused(db_path: Path, stored: str) -> None:
     Store(db_path).close()
     raw_execute(db_path, f"UPDATE meta SET value = '{stored}' WHERE key = 'schema_version'")
 
-    with pytest.raises(StoreError, match="şema sürümü uyuşmuyor: beklenen 2"):
+    with pytest.raises(StoreError, match="şema sürümü uyuşmuyor: beklenen 3"):
         Store(db_path)
 
 

@@ -551,7 +551,44 @@ def test_unknown_contract_budget_boundary() -> None:
     assert decide(ENTRY, at(budget_used=750.01), UNKNOWN).outcome is Outcome.SKIP_BUDGET
 
 
-# --- entry: rule 3, the symbol list (user decision 46) --------------------------------------
+# --- entry: rule 3, standby (another process answers the bot's commands) --------------------
+
+
+def test_entry_on_standby_is_skipped_with_a_notice() -> None:
+    decision = decide(ENTRY, at(standby=True, budget_used=250.0), CONFIG)
+
+    assert decision.outcome is Outcome.SKIP_STANDBY
+    assert decision.budget_risk is None
+    assert decision.alarms == ()
+    assert decision.messages[0].expires_at_ms is None
+    assert text_of(decision) == messages.entry_standby_skip_notice(ENTRY)
+    assert text_of(decision).startswith(
+        "[SİNYAL — ATLA] NY ORB FVG · FVG · LONG · CME_MINI:MES1!\nBu kopya BEKLEMEDE: "
+    )
+
+
+@pytest.mark.parametrize("signal", ["stop_update", "exit", "cancel"])
+def test_standby_never_holds_back_a_follow_up(signal: str) -> None:
+    # Stop updates, exits and cancels only take risk away; the user may hold the position.
+    follow = {
+        "stop_update": stored(alerts.ny_orb_fvg_stop_update(), signal_id=2),
+        "exit": stored(alerts.ny_orb_fvg_exit(), signal_id=3),
+        "cancel": stored(alerts.ict_silver_bullet_cancel(), signal_id=4),
+    }[signal]
+    reference = dataclasses.replace(FORWARDED_ENTRY, side=follow.side)
+    context = DecisionContext(
+        now_ms=follow.received_at_ms + 500,
+        reference=reference,
+        reference_budget=COUNTED,
+        standby=True,
+        killed=True,
+        paused=True,
+    )
+
+    assert decide(follow, context, CONFIG).outcome is Outcome.FORWARDED
+
+
+# --- entry: rule 4, the symbol list (user decision 46) --------------------------------------
 
 OTHER_SYMBOL = "CME_MINI:NQ1!"
 UNLISTED_ENTRY = stored(alerts.ny_orb_fvg_entry(symbol=OTHER_SYMBOL))
@@ -694,6 +731,21 @@ def test_the_minimum_stop_is_compared_in_exact_decimals() -> None:
     assert decide(signal, at(), config(min_stop_points=0.3)).outcome is Outcome.FORWARDED
 
 
+def test_the_minimum_itself_is_read_as_the_decimal_it_prints_as() -> None:
+    # 1.1 as a binary float is a little ABOVE 1.1: read that way, a stop of exactly 1.1
+    # points would be "closer than the minimum" of 1.1.
+    signal = dataclasses.replace(ENTRY, est_entry=5123.2, stop=5122.1)
+    binary_value = 1.1
+    assert Decimal("1.1") < Decimal(binary_value)
+
+    assert decide(signal, at(), config(min_stop_points=1.1)).outcome is Outcome.FORWARDED
+    one_tick_less = dataclasses.replace(ENTRY, est_entry=5123.2, stop=5122.11)
+    assert (
+        decide(one_tick_less, at(), config(min_stop_points=1.1)).outcome
+        is Outcome.SKIP_STOP_TOO_TIGHT
+    )
+
+
 def test_the_minimum_stop_holds_while_the_contract_is_unknown() -> None:
     # Today's real profile: no lot can be suggested, the user sizes the trade by hand. A
     # 1.25 point stop is exactly where that hand-made size would be far too large.
@@ -736,6 +788,12 @@ NOTHING_FITS = config(INDEX_CFD | {"min_lot": 1000.0})
         (ENTRY, at(LATE_MS), TOO_WIDE, Outcome.STALE),
         (ENTRY, at(LATE_MS, budget_used=1000.0), CONFIG, Outcome.STALE),
         (ENTRY, at(budget_used=1000.0), TOO_WIDE, Outcome.SKIP_RISK_TOO_WIDE),
+        (EARLY_ENTRY, at(standby=True), CONFIG, Outcome.SKIP_CLOCK),
+        (ENTRY, at(killed=True, standby=True), CONFIG, Outcome.SUPPRESSED_KILLED),
+        (ENTRY, at(paused=True, standby=True), CONFIG, Outcome.SUPPRESSED_PAUSED),
+        (UNLISTED_ENTRY, at(standby=True), CONFIG, Outcome.SKIP_STANDBY),
+        (ENTRY, at(LATE_MS, standby=True), CONFIG, Outcome.SKIP_STANDBY),
+        (TIGHT_ENTRY, at(standby=True, budget_used=1000.0), TOO_WIDE, Outcome.SKIP_STANDBY),
         (EARLY_UNLISTED_ENTRY, at(), CONFIG, Outcome.SKIP_CLOCK),
         (UNLISTED_ENTRY, at(killed=True), CONFIG, Outcome.SUPPRESSED_KILLED),
         (UNLISTED_ENTRY, at(paused=True), CONFIG, Outcome.SUPPRESSED_PAUSED),
@@ -758,6 +816,12 @@ NOTHING_FITS = config(INDEX_CFD | {"min_lot": 1000.0})
         "late+too_wide",
         "late+budget",
         "too_wide+budget",
+        "early+standby",
+        "killed+standby",
+        "paused+standby",
+        "standby+unlisted",
+        "standby+late",
+        "standby+tight+too_wide+budget",
         "early+unlisted",
         "unlisted+killed",
         "unlisted+paused",
@@ -1804,6 +1868,35 @@ def test_orphan_stop_updates_are_compared_with_each_other(store: Store) -> None:
     assert "stop = kendi giriş fiyatın −3.50 puan" in texts(store, wider.id)[0]
     assert "Yalnızca mevcut stop'undan DAHA SIKIysa uygula." in texts(store, other_side.id)[0]
     assert "Yalnızca mevcut stop'undan DAHA SIKIysa uygula." in texts(store, tighter.id)[0]
+
+
+def test_entries_stop_and_follow_ups_go_on_while_the_store_says_standby(store: Store) -> None:
+    before = handle(store, alerts.ny_orb_fvg_entry())
+    set_state(store, StateKey.STANDBY, "1")
+
+    other = handle(store, alerts.asian_sweep_entry(bar_time=BAR_TIME_MS + 5 * MINUTE_MS))
+    update = handle(store, trail(minute=18, offset=-3.5))
+    closing = handle(store, alerts.ny_orb_fvg_exit())
+    after = handle(store, entry_at(300))
+
+    assert before.outcome is Outcome.FORWARDED
+    assert (other.outcome, after.outcome) == (Outcome.SKIP_STANDBY,) * 2
+    assert budget(store, other.id) is None
+    assert texts(store, other.id) == [messages.entry_standby_skip_notice(other)]
+    # The trade that was open when the copy went on standby is followed to its end.
+    assert (update.outcome, closing.outcome) == (Outcome.FORWARDED,) * 2
+    assert f"(giriş id {before.id})" in texts(store, update.id)[0]
+
+    with store.transaction() as tx:
+        tx.delete_state(StateKey.STANDBY)
+    assert handle(store, entry_at(400)).outcome is Outcome.FORWARDED
+
+
+@pytest.mark.parametrize("value", ["1", "yes", "x", " "])
+def test_an_unreadable_standby_mark_counts_as_set(store: Store, value: str) -> None:
+    set_state(store, StateKey.STANDBY, value)
+
+    assert handle(store, alerts.ny_orb_fvg_entry()).outcome is Outcome.SKIP_STANDBY
 
 
 def test_an_unlisted_symbol_is_refused_from_entry_to_exit(store: Store) -> None:

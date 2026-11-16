@@ -232,6 +232,31 @@ def test_report_counts_days_outcomes_and_latency(store: Store) -> None:
     )
 
 
+def test_report_counts_and_names_the_automatic_skips(store: Store) -> None:
+    # Different counts per outcome: swapped labels or a skip missing from the "atlanan"
+    # column would show (open finding 58 tells the user to read these numbers).
+    skips = [Outcome.SKIP_SYMBOL] + [Outcome.SKIP_STOP_TOO_TIGHT] * 2 + [Outcome.SKIP_STANDBY] * 3
+    for minute, outcome in enumerate(skips):
+        add_signal(
+            store,
+            bar_close_ms=tr(f"2026-12-01 17:{40 + minute}"),
+            receive_delay_ms=1000,
+            outcome=outcome,
+            sent_delay_ms=1500,
+        )
+
+    report = build_report(store, start_ms=START_MS, end_ms=END_MS, source="db")
+
+    assert (
+        "Gün (TR)    alert  heartbeat  giriş  iletilen giriş  bayat  atlanan   hata  ulaşmayan\n"
+        "2026-12-01      6          0      6               0      0        6      0          0\n"
+    ) in report
+    assert (
+        "Sonuçlar (heartbeat hariç): atla: kopya beklemede 3 · atla: stop çok dar 2 · "
+        "atla: sembol listede değil 1\n"
+    ) in report
+
+
 def test_report_is_limited_to_the_requested_days(store: Store) -> None:
     populated(store)
 

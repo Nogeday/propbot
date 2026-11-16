@@ -152,9 +152,13 @@ def running(
     *,
     telegram: tg.FakeRequest | None = None,
     prepare: Callable[[Store], None] | None = None,
+    hold_ms: int = 0,
 ) -> Iterator[Running]:
     """Start the service on a fresh database file and stop it cleanly afterwards."""
     monkeypatch.setattr("propbot.notify.telegram._IDLE_POLL_SECONDS", 0.02)
+    # Commands are held for three seconds after the bot's first answer from Telegram (two
+    # processes with one token, ADR-0004). Not here: every test would wait them out.
+    monkeypatch.setattr("propbot.notify.telegram.ARRIVAL_HOLD_MS", hold_ms)
     fake = telegram or tg.FakeRequest()
     clock = FakeClock()
     failures: list[int] = []
@@ -343,6 +347,67 @@ def test_another_chart_and_a_tight_stop_are_answered_with_skip_and_count_nothing
         ]
         assert used == 0.0
     assert not any(text.startswith("[SİNYAL]") for text in bot.texts())
+    assert bot.failures == []
+
+
+# --- two processes with one bot token (user decision 53) -------------------------------------
+
+CONFLICT_409 = tg.error_response(409, "Conflict: terminated by other getUpdates request")
+
+
+def test_a_copy_that_meets_another_poller_stays_up_forwards_exits_and_no_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The whole service: it must not die (a supervisor would restart it every few seconds,
+    # each time taking updates from the other process and dropping alerts in between).
+    def an_open_trade(store: Store) -> None:
+        tg.forwarded_entry(store, prop_day=dt.date(2026, 7, 21), now_ms=NOW_MS, delivered=True)
+
+    fake = tg.FakeRequest()
+    fake.script("getUpdates", CONFLICT_409, CONFLICT_409)
+    with running(tmp_path, monkeypatch, telegram=fake, prepare=an_open_trade) as bot:
+        alarm = bot.wait_for_text("BEKLEMEDE: aynı bot token'ıyla başka bir süreç")
+        wait_until(lambda: bot.state(StateKey.STANDBY) == "1", "standby mark")
+
+        entry = alerts.alert_payload(strategy_id="asian_sweep", setup="SWEEP_FVG")
+        assert bot.post(json.dumps(entry).encode()) == {"status": "queued"}
+        skipped = bot.wait_for_text("[SİNYAL — ATLA] Asian Sweep")
+        exit_payload = alerts.ny_orb_fvg_exit("long")
+        bar_time = exit_payload["bar_time"]
+        assert isinstance(bar_time, int)
+        bot.clock.now_ms = bar_time + 60_000 + 1_000
+        assert bot.post(json.dumps(exit_payload).encode()) == {"status": "queued"}
+        closing = bot.wait_for_text("[ÇIKIŞ]")
+
+        assert alarm.startswith("[ALARM] Bu PropBot kopyası BEKLEMEDE: ")
+        assert "Bu kopya BEKLEMEDE" in skipped
+        assert "(giriş id 1)" in closing
+        with bot.store.transaction() as tx:
+            second = tx.get_signal(2)
+            used = tx.budget_used(dt.date(2026, 7, 21))
+        assert second is not None
+        assert second.outcome is Outcome.SKIP_STANDBY
+        assert used == 250.0  # the open trade only
+        # Polling ended with the second Conflict (plus the library's last short request).
+        assert [call["timeout"] for call in fake.calls_to("getUpdates")] == [10, 10, 0]
+        assert bot.service.failure is None
+    assert bot.failures == []
+    assert not any(text.startswith("[SİNYAL]") for text in bot.texts())
+
+
+def test_a_command_right_after_the_start_waits_for_the_arrival_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The real hold, on the real clock, shortened to keep the test quick.
+    with running(tmp_path, monkeypatch, hold_ms=600) as bot:
+        asked = time.monotonic()
+        bot.say("/mod")
+        bot.wait_for_text("Mod: signal")
+        waited = time.monotonic() - asked
+        bot.say("/mod")
+        wait_until(lambda: sum("Mod: signal" in text for text in bot.texts()) == 2, "second reply")
+
+    assert waited >= 0.5
     assert bot.failures == []
 
 

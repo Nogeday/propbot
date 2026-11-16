@@ -12,12 +12,13 @@ Entries, first match wins:
     0. arrived more than 2 s before its bar close   SKIP_CLOCK (clock doubt = no new entry)
     1. KILLED                                       SUPPRESSED_KILLED (silent)
     2. PAUSED                                       SUPPRESSED_PAUSED (silent)
-    3. symbol not on the venue's `tv_symbols` list  SKIP_SYMBOL (prices on another scale)
-    4. older than the validity limit                STALE
-    5. stop closer than `min_stop_points`           SKIP_STOP_TOO_TIGHT
-    6. minimum lot risks more than the budget       SKIP_RISK_TOO_WIDE
-    7. daily budget cannot take it                  SKIP_BUDGET
-    8. otherwise                                    FORWARDED, risk counted in the ledger
+    3. this copy is on standby                      SKIP_STANDBY (another process has the bot)
+    4. symbol not on the venue's `tv_symbols` list  SKIP_SYMBOL (prices on another scale)
+    5. older than the validity limit                STALE
+    6. stop closer than `min_stop_points`           SKIP_STOP_TOO_TIGHT
+    7. minimum lot risks more than the budget       SKIP_RISK_TOO_WIDE
+    8. daily budget cannot take it                  SKIP_BUDGET
+    9. otherwise                                    FORWARDED, risk counted in the ledger
 
 Stop updates, exits and cancels reduce risk and are never held back by pause or kill. They
 are matched to the latest entry of the same strategy and symbol; a stop update is judged in
@@ -99,6 +100,8 @@ class DecisionContext:
     # Entries only.
     killed: bool = False
     paused: bool = False
+    # Another process answers the bot's commands: /kill and /duraklat would not reach this one.
+    standby: bool = False
     budget_used: float = 0.0  # counted risk of the current prop day
     # Stop updates, exits and cancels only.
     reference: SignalRow | None = None  # latest entry of the strategy + symbol, any outcome
@@ -186,6 +189,10 @@ def _decide_entry(signal: SignalRow, context: DecisionContext, config: Processor
         return Decision(Outcome.SUPPRESSED_KILLED)
     if context.paused:
         return Decision(Outcome.SUPPRESSED_PAUSED)
+    if context.standby:
+        # Not the user's choice, so not silent: the kill switch cannot stop this copy.
+        text = messages.entry_standby_skip_notice(signal)
+        return Decision(Outcome.SKIP_STANDBY, (OutboxDraft(text),))
     if not _symbol_listed(signal, venue):
         text = messages.entry_symbol_skip_notice(signal, venue=venue)
         return Decision(Outcome.SKIP_SYMBOL, (OutboxDraft(text),))
@@ -409,6 +416,7 @@ def load_context(
             now_ms=now_ms,
             killed=_flag_set(tx, StateKey.KILLED),
             paused=_flag_set(tx, StateKey.PAUSED),
+            standby=_flag_set(tx, StateKey.STANDBY),
             budget_used=tx.budget_used(current_prop_day(config, now_ms)),
         )
     if signal.action not in (Action.STOP_UPDATE.value, Action.EXIT.value, Action.CANCEL.value):

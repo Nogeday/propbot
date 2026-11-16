@@ -15,9 +15,9 @@ Units: every `*_ms` column is INTEGER UTC epoch milliseconds; prices and money a
 `prop_day` is TEXT `YYYY-MM-DD`; booleans are INTEGER 0/1. Nothing secret is stored here: the
 webhook token is stripped before `payload_json` is built, and callers redact `last_error`.
 
-Schema version 2 (all tables STRICT; no migrations yet, another version refuses to open;
-version 1 lacked the `skip_symbol` and `skip_stop_too_tight` outcomes in the CHECK of
-`signals.outcome`):
+Schema version 3 (all tables STRICT; no migrations yet, another version refuses to open;
+the CHECK of `signals.outcome` gained `skip_symbol` and `skip_stop_too_tight` in version 2
+and `skip_standby` in version 3):
 
     table           column           type     notes
     --------------  ---------------  -------  ---------------------------------------------------
@@ -85,7 +85,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Final, Self
 
-SCHEMA_VERSION: Final = 2
+SCHEMA_VERSION: Final = 3
 
 MEMORY_PATH: Final = ":memory:"
 BUSY_TIMEOUT_MS: Final = 5000
@@ -131,6 +131,8 @@ class Outcome(StrEnum):
     SKIP_SYMBOL = "skip_symbol"
     # An entry whose stop is closer than the venue profile's `min_stop_points`.
     SKIP_STOP_TOO_TIGHT = "skip_stop_too_tight"
+    # An entry while this copy is on standby: another process holds the bot's commands.
+    SKIP_STANDBY = "skip_standby"
 
 
 class OutboxKind(StrEnum):
@@ -164,6 +166,9 @@ class StateKey(StrEnum):
     EXPIRY_REMINDER_DAY = "expiry_reminder_day"
     LAST_ALIVE_MS = "last_alive_ms"  # written by the monitor on every tick (downtime detection)
     RESTARTS_UNREPORTED = "restarts_unreported"  # short restarts since the last restart alarm
+    # Another process was polling with the same bot token when this copy arrived: no entry
+    # is forwarded until a later arrival of this copy stays unchallenged (ADR-0004).
+    STANDBY = "standby"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

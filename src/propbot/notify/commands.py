@@ -124,6 +124,7 @@ _OUTCOME_LABELS: Final[Mapping[Outcome, str]] = {
     Outcome.SKIP_CLOCK: "saat uyuşmazlığı",
     Outcome.SKIP_SYMBOL: "sembol listede değil",
     Outcome.SKIP_STOP_TOO_TIGHT: "stop çok dar",
+    Outcome.SKIP_STANDBY: "kopya beklemede",
     Outcome.SUPERSEDED: "eskimiş güncelleme",
     Outcome.ERROR: "işleme hatası",
 }
@@ -146,6 +147,23 @@ _HELP: Final = "\n".join(
     )
 )
 _UNKNOWN_PREFIX: Final = "Bilinmeyen komut.\n"
+# A copy on standby (another process answers the bot) still obeys the two commands that can
+# only take risk away; everything else would act on, or report from, the wrong copy.
+_SAFE_ON_STANDBY: Final = frozenset({"kill", "duraklat"})
+_STANDBY_REFUSAL: Final = (
+    "Bu kopya BEKLEMEDE (aynı bot token'ıyla başka bir süreç komutları alıyor): komutun "
+    "UYGULANMADI. Yeniden gönder; öbür süreç yanıtlar."
+)
+# /durum is answered by a copy whose standby mark is still set only after a restart, while
+# it polls again and waits to see whether it is alone (a copy on standby refuses /durum).
+_STANDBY_STATE: Final = (
+    "beklemeden çıkıyor (başka bir kopya algılanmıştı; ETKİN bildirimi gelene kadar giriş "
+    "sinyalleri iletilmez)"
+)
+_STANDBY_NOTE: Final = (
+    "\n[BEKLEMEDE] Bu yanıt bekleme durumundaki kopyadan geldi: komut aynı bot token'ıyla "
+    "çalışan öbür sürece ULAŞMADI. Yeniden gönder."
+)
 _LONG_NUMBER_REPLY: Final = (
     "Mesajındaki uzun sayı PIN olabileceği için mesajın siliniyor. PIN yalnızca /kill <PIN> ya "
     "da /devam <PIN> içinde kullanılır."
@@ -320,14 +338,25 @@ class Commands:
         """Count a message from a chat that is not the whitelisted one (shown by /saglik)."""
         self._unauthorized += 1
 
-    def handle(self, text: str, *, sent_at_ms: int) -> Reply:
-        """Answer one message. Never raises: a failure becomes a reply and changes nothing."""
+    def handle(self, text: str, *, sent_at_ms: int, standby: bool = False) -> Reply:
+        """Answer one message. Never raises: a failure becomes a reply and changes nothing.
+
+        `standby`: another process holds the bot's commands and this message reached this
+        copy by accident. Only /kill and /duraklat are carried out (they can only take risk
+        away), with a note that the other process did not get them; the rest is refused.
+        """
         # First, from the raw text alone: nothing below may lose this decision.
         delete_request = _must_delete(text)
         name, args = _split_command(text)
         known = name if name in self._commands else None
         try:
-            body = self._dispatch(name, args, sent_at_ms, pin_like=delete_request)
+            if standby and name not in _SAFE_ON_STANDBY:
+                _log.info("telegram_command", command=known, refused=True, standby=True)
+                body = _STANDBY_REFUSAL
+            else:
+                body = self._dispatch(name, args, sent_at_ms, pin_like=delete_request)
+                if standby:
+                    body += _STANDBY_NOTE
         except Exception as error:
             # Every command is one transaction, so whatever failed has been rolled back.
             _log.error("telegram_command_failed", command=known, error_type=type(error).__name__)
@@ -508,6 +537,7 @@ class Commands:
         with deps.store.transaction() as tx:
             paused = _flag(tx, StateKey.PAUSED)
             killed = _flag(tx, StateKey.KILLED)
+            standby = _flag(tx, StateKey.STANDBY)
             depth = tx.queue_depth()
             outbox = tx.outbox_counts()
             signals = tx.signals_received_between(start_ms, end_ms)
@@ -518,8 +548,12 @@ class Commands:
             state = "KILL (giriş sinyalleri kesildi; açmak için /devam <PIN>)"
         elif paused:
             state = "duraklatıldı (giriş sinyalleri iletilmiyor; açmak için /devam)"
+        elif standby:
+            state = _STANDBY_STATE
         else:
             state = "aktif"
+        if standby and (killed or paused):
+            state += " · " + _STANDBY_STATE
         counts = Counter(
             signal.outcome for signal in signals if signal.action != Action.HEARTBEAT.value
         )

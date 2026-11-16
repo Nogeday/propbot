@@ -47,6 +47,7 @@ OUTCOME_LABELS: Final[dict[Outcome, str]] = {
     Outcome.SKIP_CLOCK: "atla: saat uyuşmazlığı",
     Outcome.SKIP_SYMBOL: "atla: sembol listede değil",
     Outcome.SKIP_STOP_TOO_TIGHT: "atla: stop çok dar",
+    Outcome.SKIP_STANDBY: "atla: kopya beklemede",
     Outcome.FILTERED_MIN_STEP: "süzüldü: adım küçük",
     Outcome.REJECTED_WIDEN: "reddedildi: stop genişliyor",
     Outcome.SUPERSEDED: "eskidi: yenisi gönderilmişti",
@@ -63,6 +64,7 @@ _SKIPPED: Final = frozenset(
         Outcome.SKIP_CLOCK,
         Outcome.SKIP_SYMBOL,
         Outcome.SKIP_STOP_TOO_TIGHT,
+        Outcome.SKIP_STANDBY,
     }
 )
 CSV_HEADER: Final = (

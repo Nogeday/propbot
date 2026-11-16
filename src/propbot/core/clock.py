@@ -16,6 +16,16 @@ def system_clock_ms() -> int:
     return time.time_ns() // 1_000_000
 
 
+def boot_clock_ms() -> int:
+    """Milliseconds since the machine booted, time spent suspended included.
+
+    For measuring how long something lasted, never for timestamps: it does not jump when
+    the wall clock is corrected, and (unlike `time.monotonic`) it keeps counting while a
+    laptop sleeps, so "silent for more than a minute" also holds across a suspend.
+    """
+    return time.clock_gettime_ns(time.CLOCK_BOOTTIME) // 1_000_000
+
+
 def utc_from_ms(epoch_ms: int) -> dt.datetime:
     """Timezone-aware UTC datetime for an epoch-millisecond instant."""
     return dt.datetime.fromtimestamp(epoch_ms / 1000.0, tz=dt.UTC)

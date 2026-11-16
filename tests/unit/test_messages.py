@@ -353,6 +353,21 @@ def test_a_master_leg_is_named_as_such_in_every_header(strategy_id: str, name: s
         assert f"] {name} · LONG · CME_MINI:MES1!" in text.splitlines()[0]
 
 
+def test_standby_skip_notice_says_why_and_how_to_end_it() -> None:
+    text = messages.entry_standby_skip_notice(row())
+
+    assert text == (
+        "[SİNYAL — ATLA] NY ORB FVG · FVG · LONG · CME_MINI:MES1!\n"
+        "Bu kopya BEKLEMEDE: aynı bot token'ıyla başka bir süreç komutları alıyor; /kill ve "
+        "/duraklat bu kopyaya ulaşmaz. Giriş sinyalleri iletilmiyor (stop/çıkış/iptal "
+        "mesajları gelir). Bu girişi ALMA.\n"
+        "Öbür süreci durdur, sonra bu kopyayı yeniden başlat; bir dakika içinde ETKİN "
+        "bildirimi gelir.\n"
+        "id 123 · bar 09:44 NY / 17:44 TR"
+    )
+    assert code_entity_spans(text) == []
+
+
 def test_symbol_skip_notice_names_the_symbol_and_the_list_to_edit() -> None:
     text = messages.entry_symbol_skip_notice(row(symbol="CME_MINI:NQ1!"), venue=VENUE)
 
@@ -680,6 +695,7 @@ def test_every_builder_tolerates_a_row_without_optional_fields() -> None:
         messages.entry_symbol_skip_notice(bare, venue=VENUE),
         messages.entry_stop_too_tight_notice(bare, stop_points=0.25, min_stop_points=1.5),
         messages.symbol_not_listed_alarm(bare),
+        messages.entry_standby_skip_notice(bare),
     ]
 
     assert all(text and "None" not in text for text in texts)

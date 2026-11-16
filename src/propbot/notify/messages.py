@@ -370,6 +370,21 @@ def entry_risk_too_wide_notice(
     )
 
 
+def entry_standby_skip_notice(row: SignalRow) -> str:
+    """An entry while another process answers the bot's commands (this copy is on standby)."""
+    return "\n".join(
+        [
+            _entry_header("[SİNYAL — ATLA]", row),
+            "Bu kopya BEKLEMEDE: aynı bot token'ıyla başka bir süreç komutları alıyor; /kill "
+            "ve /duraklat bu kopyaya ulaşmaz. Giriş sinyalleri iletilmiyor (stop/çıkış/iptal "
+            "mesajları gelir). Bu girişi ALMA.",
+            "Öbür süreci durdur, sonra bu kopyayı yeniden başlat; bir dakika içinde ETKİN "
+            "bildirimi gelir.",
+            _id_line(row),
+        ]
+    )
+
+
 def entry_symbol_skip_notice(row: SignalRow, *, venue: VenueProfile) -> str:
     """The alert comes from a chart whose prices are not on the venue symbol's scale."""
     return "\n".join(

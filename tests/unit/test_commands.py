@@ -395,6 +395,146 @@ def test_durum_counts_todays_signals_by_outcome(world: World) -> None:
     )
 
 
+def test_durum_names_the_automatic_skips(world: World) -> None:
+    # Different counts per outcome, so that two swapped labels cannot pass.
+    skips = [Outcome.SKIP_SYMBOL] + [Outcome.SKIP_STOP_TOO_TIGHT] * 2 + [Outcome.SKIP_STANDBY] * 3
+    for minute, outcome in enumerate(skips):
+        tg.add_signal(world.store, outcome=outcome, bar_time_ms=BAR_TIME_MS + minute * MINUTE_MS)
+
+    assert world.text("/durum").splitlines()[4] == (
+        "Bugünkü sinyaller (prop günü 2026-07-21): sembol listede değil 1 · stop çok dar 2 · "
+        "kopya beklemede 3"
+    )
+
+
+# --- standby: a message that reached the copy that does not hold the bot ---------------------
+
+STANDBY_REFUSAL = (
+    "Bu kopya BEKLEMEDE (aynı bot token'ıyla başka bir süreç komutları alıyor): komutun "
+    "UYGULANMADI. Yeniden gönder; öbür süreç yanıtlar."
+)
+STANDBY_NOTE = (
+    "\n[BEKLEMEDE] Bu yanıt bekleme durumundaki kopyadan geldi: komut aynı bot token'ıyla "
+    "çalışan öbür sürece ULAŞMADI. Yeniden gönder."
+)
+
+
+def on_standby(world: World, text: str, *, age_ms: int = 0) -> Reply:
+    return world.commands.handle(text, sent_at_ms=world.clock.now_ms - age_ms, standby=True)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "/durum",
+        "/pnl",
+        "/risk",
+        "/saglik",
+        "/mod",
+        "/yardim",
+        "/devam",
+        "/atladim",
+        "/atladim 1",
+        "/aldim 1",
+        "/bilinmeyen",
+        "selam",
+        "",
+    ],
+)
+def test_a_copy_on_standby_refuses_everything_that_is_not_a_stop(world: World, text: str) -> None:
+    signal_id = world.entry()
+    with world.store.transaction() as tx:
+        tx.set_state(StateKey.PAUSED, "1", NOW_MS)
+    before = world.state()
+
+    reply = on_standby(world, text)
+
+    assert reply == Reply(text=STANDBY_REFUSAL, delete_request=False)
+    assert world.state() == before  # /devam lifted nothing
+    assert world.counted(signal_id) == (True, None)  # /atladim released nothing
+
+
+def test_devam_with_the_pin_is_refused_on_standby_and_its_message_is_deleted(world: World) -> None:
+    world.say(f"/kill {PIN}")
+
+    reply = on_standby(world, f"/devam {PIN}")
+
+    assert reply == Reply(text=STANDBY_REFUSAL, delete_request=True)
+    assert world.flag(StateKey.KILLED) == "1"
+    # Not even looked at: a refused message costs no PIN attempt.
+    assert world.flag(StateKey.PIN_FAIL_COUNT) is None
+
+
+def test_a_long_number_is_deleted_on_standby_too(world: World) -> None:
+    assert on_standby(world, "123456") == Reply(text=STANDBY_REFUSAL, delete_request=True)
+
+
+def test_kill_is_carried_out_on_standby_and_says_where(world: World) -> None:
+    reply = on_standby(world, f"/kill {PIN}")
+
+    assert world.flag(StateKey.KILLED) == "1"
+    assert reply.delete_request
+    assert reply.text.startswith("KILL etkin: giriş sinyalleri kesildi.")
+    assert reply.text.endswith(STANDBY_NOTE)
+    assert PIN not in reply.text
+
+
+def test_pause_is_carried_out_on_standby_and_says_where(world: World) -> None:
+    # Old or not: /duraklat is never refused for its age, and not for standby either.
+    reply = on_standby(world, "/duraklat", age_ms=10 * MINUTE_MS)
+
+    assert world.flag(StateKey.PAUSED) == "1"
+    assert reply.text.startswith("Duraklatıldı: yeni GİRİŞ sinyalleri iletilmez.")
+    assert reply.text.endswith(STANDBY_NOTE)
+    assert not reply.delete_request
+
+
+def test_a_wrong_pin_on_standby_is_counted_like_anywhere_else(world: World) -> None:
+    reply = on_standby(world, "/kill 000000")
+
+    assert world.flag(StateKey.KILLED) is None
+    assert world.flag(StateKey.PIN_FAIL_COUNT) == "1"
+    assert reply.delete_request
+    assert reply.text.endswith(STANDBY_NOTE)
+    assert "000000" not in reply.text
+
+
+def test_without_standby_nothing_is_added_or_refused(world: World) -> None:
+    assert world.text("/duraklat").startswith("Duraklatıldı")
+    assert STANDBY_NOTE not in world.text("/duraklat")
+    assert world.text("/mod") != STANDBY_REFUSAL
+
+
+@pytest.mark.parametrize(
+    ("flags", "state"),
+    [
+        (
+            [StateKey.STANDBY],
+            "beklemeden çıkıyor (başka bir kopya algılanmıştı; ETKİN bildirimi gelene kadar "
+            "giriş sinyalleri iletilmez)",
+        ),
+        (
+            [StateKey.STANDBY, StateKey.PAUSED],
+            "duraklatıldı (giriş sinyalleri iletilmiyor; açmak için /devam) · beklemeden "
+            "çıkıyor (başka bir kopya algılanmıştı; ETKİN bildirimi gelene kadar giriş "
+            "sinyalleri iletilmez)",
+        ),
+    ],
+)
+def test_durum_shows_a_standby_that_is_still_being_lifted(
+    world: World, flags: list[StateKey], state: str
+) -> None:
+    # After a restart the copy polls again and answers, while entries stay off until it
+    # has been alone at Telegram for a minute.
+    with world.store.transaction() as tx:
+        for key in flags:
+            tx.set_state(key, "1", NOW_MS)
+
+    assert world.text("/durum").splitlines()[1] == (
+        f"Mod: signal (emir gönderilmez) · Durum: {state}"
+    )
+
+
 def test_durum_dates_an_alert_of_another_day(world: World) -> None:
     tg.add_signal(world.store, received_at_ms=NOW_MS - 26 * 60 * MINUTE_MS)
     assert "Son sinyal alert'i: 2026-07-20 16:31 TR (1 gün 2 sa önce)\n" in world.text("/durum")
