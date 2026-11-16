@@ -255,6 +255,7 @@ def test_domain_like_tokens_become_code_spans() -> None:
         "rules_verified_at · tick_size · v1.2.3 · x.y · a.b1 · 5120.125–5126.375",
         ".env · /saglik · /durum · id 123 · bar 09:44 NY / 17:44 TR",
         "/atladimlar · /aldim_x · /aldim9 · atladim · aldim 12",
+        "/devamli · /devam_x · /devam2 · devam <PIN> · sinyaller gelmeye devam eder",
         "Cümle bitti. Yenisi başladı.",
         "",
     ],
@@ -292,6 +293,27 @@ def test_a_command_that_carries_an_id_becomes_one_code_span() -> None:
 def test_the_ledger_commands_are_never_left_tappable(text: str, tokens: list[str]) -> None:
     # Telegram links a command and SENDS it bare on a tap: a tap on the help line
     # "/atladim [id]" would release the last entry's risk. A code span is copied instead.
+    assert [text[start : start + length] for start, length in code_entity_spans(text)] == tokens
+
+
+@pytest.mark.parametrize(
+    ("text", "tokens"),
+    [
+        ("/devam", ["/devam"]),
+        ("Açmak için: /devam", ["/devam"]),
+        ("açmak için /devam)", ["/devam"]),
+        ("/devam: komut eski, yok sayıldı", ["/devam"]),
+        ("/devam'ı elle yaz · /devamı", ["/devam", "/devam"]),
+        ("KILL (açmak için /devam <PIN>)", ["/devam <PIN>"]),
+        ("/devam — yeniden başlat (KILL sonrası: /devam <PIN>)", ["/devam", "/devam <PIN>"]),
+        ("/kill <PIN> — yalnızca /devam <PIN> açar", ["/devam <PIN>"]),
+        ("/devam 123456", ["/devam 123456"]),
+        ("/devam <pin> · /devam <Pin> · /devam  <PIN>", ["/devam <pin>", "/devam", "/devam"]),
+    ],
+)
+def test_devam_is_never_left_tappable(text: str, tokens: list[str]) -> None:
+    # User decision 51: a tap on a linked "/devam" would lift a pause that was set on
+    # purpose. Every mention goes out as a code span, with its "<PIN>" placeholder if any.
     assert [text[start : start + length] for start, length in code_entity_spans(text)] == tokens
 
 
@@ -551,16 +573,22 @@ def test_a_command_from_the_owner_is_answered_in_plain_text() -> None:
 @pytest.mark.parametrize(
     ("command", "marked"),
     [
-        ("/yardim", ["/atladim [id]", "/aldim <id>", "/atladim"]),
+        (
+            "/yardim",
+            ["/devam", "/devam <PIN>", "/devam <PIN>", "/atladim [id]", "/aldim <id>", "/atladim"],
+        ),
         ("/aldim", ["/aldim <id>", "/atladim"]),
         ("/atladim abc", ["/atladim [id]"]),
+        ("/kill", ["/devam <PIN>"]),
+        ("/duraklat", ["/devam"]),
     ],
 )
 def test_help_and_usage_replies_leave_no_ledger_command_tappable(
     command: str, marked: list[str]
 ) -> None:
     # A tap on a linked "/atladim" in the help would send it bare: the last entry's risk
-    # would leave the budget. Every mention goes out as a code span instead.
+    # would leave the budget; a tap on "/devam" would lift a pause. Every mention goes out
+    # as a code span instead.
     async def scenario(h: Harness) -> None:
         await h.say(command)
         (params,) = h.fake.calls_to("sendMessage")
@@ -573,7 +601,31 @@ def test_help_and_usage_replies_leave_no_ledger_command_tappable(
         ]
         assert all(entity["type"] == "code" for entity in params["entities"])
         assert spans == marked
-        assert params["text"].count("/atladim") + params["text"].count("/aldim") == len(marked)
+        mentions = sum(params["text"].count(name) for name in ("/atladim", "/aldim", "/devam"))
+        assert mentions == len(marked)
+
+    drive(scenario)
+
+
+def test_pause_and_status_replies_carry_devam_as_code() -> None:
+    # User decision 51: the two replies a paused user reads most are the ones where a slip
+    # of the thumb on a linked /devam would silently lift the pause.
+    async def scenario(h: Harness) -> None:
+        await h.say("/duraklat")
+        await h.say("/durum")
+        replies = h.fake.calls_to("sendMessage")
+        assert len(replies) == 2
+        for params in replies:
+            assert params["text"].count("/devam") == 1
+            encoded = params["text"].encode("utf-16-le")
+            marked = [
+                encoded[2 * entity["offset"] : 2 * (entity["offset"] + entity["length"])].decode(
+                    "utf-16-le"
+                )
+                for entity in params["entities"]
+                if entity["type"] == "code"
+            ]
+            assert "/devam" in marked
 
     drive(scenario)
 

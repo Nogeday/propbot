@@ -98,14 +98,15 @@ _DOMAIN_LIKE: Final = re.compile(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2
 # bare command when tapped; without its id that command would act on another entry. As
 # `code` the whole "/atladim 126" is copied instead.
 _COMMAND_WITH_ID: Final = re.compile(r"/[a-z_]+ [0-9]+")
-# The two commands that give risk back to the daily budget are never left tappable, with or
-# without an argument or a placeholder ("/atladim", "/atladim <id>", "/atladim [id]"): a tap
-# on a help line would send the bare command, and a bare /atladim releases the LAST entry.
-_LEDGER_COMMAND: Final = re.compile(
-    r"/(?:atladim|aldim)(?![A-Za-z0-9_])(?: (?:[0-9]+|<[a-z]+>|\[[a-z]+\]))?"
+# The commands that give risk back are never left tappable, with or without an argument or
+# a placeholder ("/atladim", "/atladim <id>", "/atladim [id]", "/devam", "/devam <PIN>"): a
+# tap on a linked command SENDS it bare. A bare /atladim releases the LAST entry, and a bare
+# /devam lifts a pause that was set on purpose.
+_TYPED_COMMAND: Final = re.compile(
+    r"/(?:atladim|aldim|devam)(?![A-Za-z0-9_])(?: (?:[0-9]+|<(?:[a-z]+|PIN)>|\[[a-z]+\]))?"
 )
 _CODE_TOKEN: Final = re.compile(
-    f"{_LEDGER_COMMAND.pattern}|{_COMMAND_WITH_ID.pattern}|{_DOMAIN_LIKE.pattern}"
+    f"{_TYPED_COMMAND.pattern}|{_COMMAND_WITH_ID.pattern}|{_DOMAIN_LIKE.pattern}"
 )
 # Exceptions (httpx / httpcore) proving that the HTTP request was never written: the
 # connection could not be opened, or no pooled connection became free.
@@ -329,7 +330,8 @@ def code_entity_spans(text: str) -> list[tuple[int, int]]:
 
     Three kinds of token: domain-like words ("US500.cash"), which Telegram would turn into
     links; commands that carry an id ("/atladim 126"), whose tap would otherwise send the
-    command without the id; and every mention of /atladim and /aldim, which must be typed.
+    command without the id; and every mention of /atladim, /aldim and /devam, which must
+    be typed.
 
     Telegram counts entity positions in UTF-16: a character outside the Basic Multilingual
     Plane (most emoji) is two units, a Turkish letter is one. The tokens are ASCII, so a
