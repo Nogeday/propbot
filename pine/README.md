@@ -5,7 +5,7 @@ mantığının referansı bu dosyalardır (`docs/SPEC.md` §3) ve düzeltilen do
 
 | Dosya | Strateji | Grafik | `strategy_id` (alert) | SPEC |
 |---|---|---|---|---|
-| `master_prop_firm_portfolio.pine` | Master: S1 NY ORB + S2 Asian Sweep, ortak günlük risk kalkanı | 1m | S1 `ny_orb_fvg` · S2 `asian_sweep` | §3.4.1 |
+| `master_prop_firm_portfolio.pine` | Master: S1 NY ORB + S2 Asian Sweep, ortak günlük risk kalkanı | 1m | S1 `master_ny_orb_fvg` · S2 `master_asian_sweep` | §3.4.1 |
 | `ny_open_fvg_strategy.pine` | NY Open ORB + FVG/IFVG | 1m | `ny_orb_fvg` | §3.2 |
 | `asian_sweep_reversal_strategy.pine` | Asian Range Sweep & Reversal | 1m | `asian_sweep` | §3.3 |
 | `ict_silver_bullet_strategy.pine` | ICT Silver Bullet (Sweep → MSS → FVG, limit giriş) | 1m / 5m | `ict_silver_bullet` | §3.4.2 |
@@ -14,8 +14,11 @@ mantığının referansı bu dosyalardır (`docs/SPEC.md` §3) ve düzeltilen do
 | `heartbeat_indicator.pine` | Gösterge (strateji değil): alarm hattı için saat başı heartbeat | 1m | `heartbeat` | §5.5 |
 
 - Hepsi Pine v5, tek parça ve doğrudan yapıştırılabilir. v6'ya yükseltme yok.
-- **Master ile bağımsız NY Open / Asian Sweep script'leri aynı `strategy_id`'leri gönderir.** Sinyal botuna aynı sembolde
-  ya Master'ı ya da bağımsız ikisini bağla, hepsini birlikte değil (`docs/runbook.md` §8, CHANGELOG açık bulgu 47).
+- **Her script kendi `strategy_id`'sini gönderir; hiçbir kimlik iki dosyada geçmez** (`tests/unit/test_pine_sources.py`
+  bunu sabitler). Master'ın bacakları `master_…` önekiyle ayrıdır (E14, 2026-11-16): Master ile bağımsız NY Open /
+  Asian Sweep script'leri sinyal botuna aynı sembolde yan yana bağlanabilir (`docs/runbook.md` §8).
+- **"Webhook token" girdisi yedi dosyada da `display = display.none` ile tanımlıdır** (E13, 2026-11-16): değer grafiğin
+  durum satırında yazmaz. Derlenip gözle doğrulanmadı (doğrulama listesi H).
 - Varsayılanlar `CME_MINI:MES1!` test profilidir: komisyon kontrat başı $0,50 (taraf başı), slipaj 1 tick, başlangıç
   sermayesi 100.000, marjin %0. Başka enstrümanda Properties'ten değiştir (her dosyanın başlığındaki COSTS notu).
 - Asian Sweep ve Master'ın S2 motoru ~23 saat işlem gören enstrüman ister (MES/ES, US500 CFD); SPY/SPX'te çalışmaz.

@@ -32,8 +32,8 @@ kabulü ve Faz 1 beklenmeden yapıldı (SPEC §6 başındaki not). Faz sırası 
 - `pine/` dosyalarının kaynağı kullanıcının TradingView'daki güncel script'leridir; düzeltilen dosya TradingView'a
   geri yapıştırılır. Her dosya tek parça ve doğrudan yapıştırılabilir kalır.
 - Pine v5'te kal; v6'ya yükseltme (davranış farkları sonuçları değiştirir, önce/sonra karşılaştırmasını bozar).
-- Faz 0'da yalnızca SPEC §4.1'deki B-maddeleri ve §4.3'teki E-maddeleri (2026-11-12 kullanıcı kararı) değişir; bunların
-  dışında giriş/çıkış mantığı ve girdi varsayılanları aynı kalır.
+- Faz 0'da yalnızca SPEC §4.1'deki B-maddeleri ve §4.3'teki E-maddeleri (2026-11-12 kullanıcı kararı; E13–E14:
+  2026-11-16) değişir; bunların dışında giriş/çıkış mantığı ve girdi varsayılanları aynı kalır.
   Başka sorun görürsen düzeltme, `CHANGELOG.md`'de "Açık bulgular" altında listele.
 - Pine'ı derleyemez ve çalıştıramazsın. Kullanıcının TradingView'da yapacağı kontrolleri
   `docs/tv-verification-checklist.md`'ye yaz; derleme hatalarını ve test sonuçlarını kullanıcıdan iste.
@@ -45,13 +45,16 @@ kabulü ve Faz 1 beklenmeden yapıldı (SPEC §6 başındaki not). Faz sırası 
 2. SL ve TP brokerda native emir olarak girişle aynı istekte gider. Açık pozisyonun stop'u asla kaldırılmaz, asla genişletilmez.
 3. Risk motoru her emirden önce çalışır ve veto eder. Belirsizlikte fail-closed: yeni giriş yok + Telegram alarmı
    (veri gecikmesi, köprü kopukluğu, pozisyon uyuşmazlığı, saat sapması > 2 sn, kural dosyası eskimiş).
+   `signal` modunda (emir yok) kural dosyası eskimişse girişler kesilmez: mesaja "[KURALLAR DOĞRULANMADI …]" satırı +
+   günde bir alarm (2026-11-16 kullanıcı kararı, ADR-0005). Emir gönderen modlar kural 1 gereği kilitli kalır.
 4. Martingale, grid, ortalama düşürme, kayıptan sonra risk artırma: yasak.
 5. Idempotency: (`strategy_id`, `symbol`, `bar_time`, `action`) en fazla bir emir üretir.
 6. Sırlar yalnızca `.env`'de (gitignore, chmod 600); asla loglanmaz. Broker/prop şifresi Python'a hiç girmez (yalnızca MT5 terminalinde).
 7. Sinyaller yalnızca whitelist'teki tek `chat_id`'ye gider. Kamuya açık kanal, başkasına sinyal, kopya işlem servisi yok.
 8. İstek bütçesi ≤ 300 sunucu isteği/gün/hesap; trail güncellemesi bar başına en fazla 1 ve ≥ `trail_min_step_ticks`.
 9. Zaman: depolama UTC; seans mantığı `America/New_York` (zoneinfo); prop günü venue profilindeki reset saatine göre.
-10. Prop kural değerleri koda gömülmez; yalnızca `config/venues/*.yaml` (VERIFY alanlarıyla).
+10. Prop kural değerleri koda gömülmez; yalnızca `config/venues/*.yaml` (VERIFY alanlarıyla). Botun kendi giriş süzgeci
+    de oradadır: `signal.tv_symbols` (kabul edilen TradingView sembolleri) ve `signal.min_stop_points` (ADR-0006).
 
 ## Mekan (venue) kararları
 - Kullanıcı Türkiye'de: Topstep uygun değil → Topstep adaptörü yazma.

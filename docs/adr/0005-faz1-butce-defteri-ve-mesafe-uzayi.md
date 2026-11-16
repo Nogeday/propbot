@@ -65,6 +65,10 @@ girişe atfediyordu. Aynı tarihte eklenenler: kalıcı hata alan "iletim belirs
 
 **Kuralların tazeliği.** Venue kuralları 30 günden eskiyse `signal` modu SPEC §8.1 gereği çalışmaya devam eder; giriş
 mesajlarının başına "[KURALLAR DOĞRULANMADI …]" satırı eklenir ve günde bir alarm gönderilir.
+*(2026-11-16, kullanıcı kararı 32: bu davranış kalıcıdır. Seçenek "girişleri tamamen kes" idi — değişmez kural 3'ün
+harfi. Reddedildi: `signal` modunda bot emir göndermez, kararı mesajı okuyan kullanıcı verir; girişleri kesmek,
+kullanıcının elle izlediği stratejilerde sinyalleri habersiz susturur ve aynı uyarıyı zaten taşıyan mesajdan daha az
+bilgi verir. Emir gönderen modlar (`approve`, `auto`) kurallar bayatken kilitli kalır: değişmez kural 1.)*
 
 ## Sonuçlar
 
@@ -78,6 +82,6 @@ mesajlarının başına "[KURALLAR DOĞRULANMADI …]" satırı eklenir ve günd
 - Stop/TP dolumu bildirilmediği için bot bir pozisyonun kapandığını bilemez: her giriş mesajı "pozisyonun hâlâ açıksa
   seans sonunda kendin kapat" der. Yarım günlerde `exit` alert'ine güvenilmez (açık bulgu 18).
 - Kurallar bayatken girişleri tamamen kesmek (değişmez kural 3'ün harfi) yerine uyarı satırı + günlük alarm seçildi
-  (SPEC §8.1 `signal` modunu açık tutuyor). Bu, kullanıcı kararına açık bir noktadır; istenirse tek satırlık değişiklikle
-  "bayat kurallarla giriş iletme" yapılır.
+  (SPEC §8.1 `signal` modunu açık tutuyor). Kullanıcı 2026-11-16'da bu davranışı onayladı (karar 32); CLAUDE.md'deki
+  değişmez kural 3'e `signal` modu için aynı not eklendi.
 - Risk motoru (Faz 3) geldiğinde defterin yerini gerçek `realized_today + open_risk` alır; `suggest_size` aynen kullanılır.

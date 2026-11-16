@@ -141,7 +141,9 @@ Strateji kodu saat, dosya, ağ ya da ortam değişkeni okumaz; her şey `ctx` il
   bacak o barın kapanışında kapatılır. Kapanış sırasına göre birleşik ardışık zarar ≥ `maxConsecLoss` (2) → yeni giriş yok.
 - **Zorunlu kapanışlar:** S1 seans sonu ve S2 aktif pencere sonu bacak bazında; günlük zarar ihlali ve End date tüm
   pozisyon. Hepsi barın kapanışında. İhlal/End date barında motor bazlı kapanışlar devre dışıdır (bacak başına tek emir).
-- **Alert:** S1 → `ny_orb_fvg`, S2 → `asian_sweep` (tek TradingView alarmı yeterli).
+- **Alert:** S1 → `master_ny_orb_fvg`, S2 → `master_asian_sweep` (tek TradingView alarmı yeterli). Kimlikler bağımsız
+  NY Open / Asian Sweep script'lerinkinden ayrıdır (E14): Master ile bağımsız script'ler aynı sembolde yan yana
+  alarmlanabilir.
 
 #### 3.4.2 ICT Silver Bullet (`pine/ict_silver_bullet_strategy.pine`)
 - **Grafik:** 1m veya 5m. **Pencereler (NY):** AM [10:00, 11:00) ve PM [14:00, 15:00); ayrı ayrı açılıp kapatılabilir.
@@ -302,7 +304,8 @@ if strategy.position_size == 0 and strategy.closedtrades > strategy.closedtrades
 ### 4.3 Faz 0 genişletme — E-maddeleri (kullanıcı kararı, 2026-11-12)
 TradingView doğrulamasından önce script'lerin nihai hâle gelmesi için `CHANGELOG.md` "Açık bulgular" 2–11 Faz 0'a alındı.
 B-maddelerinden farklı olarak bunlar hata düzeltmesi değil, **kural ve varsayılan hizalamasıdır**; önce/sonra
-karşılaştırmasında orijinalle fark beklenir. Ayrıntı ve gerekçe: `CHANGELOG.md`.
+karşılaştırmasında orijinalle fark beklenir. Ayrıntı ve gerekçe: `CHANGELOG.md`. E13–E14, Faz 1 kabul koşusundan önce
+verilen 2026-11-16 kullanıcı kararlarıdır; backtest sonuçlarını değiştirmezler (bir girdi görünürlüğü, bir alert kimliği).
 
 | ID | Kapsam | Değişiklik |
 |---|---|---|
@@ -318,19 +321,22 @@ karşılaştırmasında orijinalle fark beklenir. Ayrıntı ve gerekçe: `CHANGE
 | E10 | Doküman | `pine/README.md`, §3.4 semantiği, CHANGELOG, doğrulama listesi. |
 | E11 | 6 dosya | Yürütme modeli bayrakları açıkça yazıldı (`calc_on_every_tick`, `calc_on_order_fills`, `process_orders_on_close` = `false`); davranış değişmez. |
 | E12 | NY, Asian, Master, MR, MTF | `backtest_fill_limits_assumption = 1`: TP limitleri fiyat seviyeyi 1 tick geçince dolar (Silver Bullet'ta zaten vardı). |
+| E13 | 6 dosya | Webhook token girdisi `display = display.none` ile tanımlı: değer grafiğin durum satırında yazmaz (kullanıcı kararı 45, 2026-11-16). Mantık ve varsayılan değişmez. |
+| E14 | Master | Alert'lerde bacak kimlikleri `master_ny_orb_fvg` / `master_asian_sweep` (kullanıcı kararı 47, 2026-11-16). Yalnızca `f_alert` çağrılarının kimlik argümanı; giriş/çıkış mantığı değişmez. |
 
 ## 5. Faz 1 — TradingView → Telegram sinyal botu (emir yok)
 
-> Uygulama durumu (2026-11-13): kod `src/propbot/signals/`, `notify/`, `store/`, `risk/sizing.py`; kararlar ADR-0000,
-> ADR-0004, ADR-0005; kurulum ve işletim `docs/runbook.md`. Bu bölüm uygulanan davranışı anlatır.
+> Uygulama durumu (2026-11-16): kod `src/propbot/signals/`, `notify/`, `store/`, `risk/sizing.py`; kararlar ADR-0000,
+> ADR-0004, ADR-0005, ADR-0006; kurulum ve işletim `docs/runbook.md`. Bu bölüm uygulanan davranışı anlatır
+> (2026-11-16 kullanıcı kararları 32, 33, 45, 46, 47, 51, 53 dahil; ayrıntı `CHANGELOG.md`).
 
 ### 5.1 Alert yükü (Pine `alert()` → JSON)
 | Alan | Tip | Açıklama |
 |---|---|---|
 | `v` | int | şema sürümü (1) |
 | `token` | str | yalnızca webhook'a özel rastgele değer (login bilgisi değil) |
-| `strategy_id` | str | `ny_orb_fvg`, `asian_sweep`, `ict_silver_bullet`, `mr_bb_kc_rsi2`, `mtf_trend_cont` (Master: S1 = `ny_orb_fvg`, S2 = `asian_sweep`); heartbeat göstergesi: `heartbeat` |
-| `symbol` | str | `syminfo.tickerid` (düz `BORSA:SEMBOL`; harf, rakam, `_ . : ! -`, en çok 64 karakter) |
+| `strategy_id` | str | `ny_orb_fvg`, `asian_sweep`, `ict_silver_bullet`, `mr_bb_kc_rsi2`, `mtf_trend_cont`; Master bacakları: S1 = `master_ny_orb_fvg`, S2 = `master_asian_sweep`; heartbeat göstergesi: `heartbeat` |
+| `symbol` | str | `syminfo.tickerid` (düz `BORSA:SEMBOL`; harf, rakam, `_ . : ! -`, en çok 64 karakter). Giriş için venue profilindeki `signal.tv_symbols` listesinde olmalı (§5.2) |
 | `tf` | str | `timeframe.period`; yalnızca gün içi: dakika `1`–`1440`, saniye `1S`–`59S` |
 | `bar_time` | int | sinyal barının açılış zamanı, epoch ms (`time`) |
 | `action` | str | `entry` · `stop_update` · `exit` · `cancel` (bekleyen limit girişi geri çek) · `heartbeat` |
@@ -345,8 +351,10 @@ karşılaştırmasında orijinalle fark beklenir. Ayrıntı ve gerekçe: `CHANGE
 
 Fiyatları `str.tostring(x, format.mintick)` ile yaz; olmayan sayısal alan `null` (ör. `exit`'te `stop`/`tp`). Strateji başına TradingView'da bir alarm: koşul
 "alert() function calls only", webhook URL'si alıcı adresi. **Bir `strategy_id`'nin (sembol başına) tek kaynağı olur:**
-Master ile bağımsız NY Open / Asian Sweep script'leri aynı kimlikleri gönderdiği için birlikte alarmlanmaz; alıcı iki
-akışı ayırt edemez (açık bulgu 47). Sembolün verisi gerçek zamanlı olmalıdır; gecikmeli veride her giriş bayattır.
+aynı script aynı sembolde iki grafikte alarmlanmaz. Master'ın bacakları kendi kimliklerini gönderir (E14, kullanıcı
+kararı 47): Master ile bağımsız NY Open / Asian Sweep script'leri aynı sembolde **yan yana** alarmlanabilir; her biri
+ayrı işlem olarak iletilir ve günlük bütçede ayrı sayılır. Sembolün verisi gerçek zamanlı olmalıdır; gecikmeli veride
+her giriş bayattır.
 
 Kurallar (`src/propbot/signals/schema.py`): bilinmeyen anahtar, yinelenen anahtar, `NaN`/`Infinity`, sayı yerine metin ya
 da `true/false` reddedilir. `entry`: `side`, `setup`, `order_type`, `est_entry`, `stop` zorunlu; stop zarar tarafında,
@@ -367,6 +375,18 @@ dilimleri reddedilir: bar kapanışı seans takvimine bağlıdır, tazelik denet
   stop/çıkış/iptal "[GEÇ GELDİ]" önekiyle yine iletilir (risk azaltır).
 - Giriş alert'i hesaplanan bar kapanışından > 2 sn **önce** gelirse sunucu saati TradingView ile uyuşmuyordur: sinyal
   "ATLA" olarak iletilir (değişmez kural 3).
+- **Sembol listesi** (kullanıcı kararı 46, ADR-0006): stop/TP mesafeleri venue sembolüne olduğu gibi uygulandığı için
+  giriş yalnızca puan ölçeği venue sembolüyle aynı olan grafiklerden kabul edilir: venue profili →
+  `signal.tv_symbols`. Karşılaştırma birebirdir (büyük/küçük harf dahil, önek tahmini yok). Listede olmayan sembolün
+  girişi "[SİNYAL — ATLA] Sembol kabul listesinde değil" olur ve bütçede sayılmaz. İletilmiş bir girişin
+  stop/çıkış/iptal mesajları listeye bakılmadan iletilir (liste işlem açıkken değişmiş olabilir); listede olmayan bir
+  sembolden gelen ve bu botun hiçbir girişine bağlanamayan takip alert'i iletilmez, 10 dakikada en çok bir alarm
+  üretir. Heartbeat sembole bakılmadan sayılır.
+- **Asgari stop** (kullanıcı kararı 33, ADR-0006): giriş ile stop arası `signal.min_stop_points`'ten (FTMO US500.cash:
+  1,5 puan) küçükse giriş "[SİNYAL — ATLA] Stop çok dar" olur; eşitse iletilir. Kural `contract.*` boşken de geçerlidir
+  (lotu kullanıcı elle hesaplarken en çok orada gerekir). Stop güncellemelerini etkilemez.
+- Giriş karar sırası (ilk eşleşen): saat uyuşmazlığı → KILL → duraklatma → sembol listesi → bayat → stop çok dar →
+  stop çok geniş (en küçük lot bütçeyi aşıyor) → günlük bütçe → iletildi.
 - Idempotency: `UNIQUE(strategy_id, symbol, bar_time, action)`; yinelenen istek 200 `duplicate` alır, ikinci mesaj üretmez.
 - Boyut önerisi: venue profili + `risk.yaml` ile lot hesabı (yalnızca öneri; Faz 1'de emir yok). `contract.*` boşsa
   mesajda "boyut hesaplanamadı" ve en fazla risk yazar (hata değildir).
@@ -387,15 +407,17 @@ dilimleri reddedilir: bar kapanışı seans takvimine bağlıdır, tazelik denet
    fazla saatte bir Telegram uyarısı gider. Sayılar uyarı gerçekten gönderilene kadar tutulur ve izinli adresten gelen
    sonraki herhangi bir istek (geçerli bir heartbeat dahil) bekleyen uyarıyı tetikler: eski token'la gönderen kendi
    alarmımız, kapıyı önce açmış yabancı bir isteğin arkasında kaybolmaz.
-7. Token'ın göründüğü yerler (grafik durum satırı, alarm bildirimleri, Alert Log) ve yenileme adımları:
-   `docs/runbook.md` §8.1–8.2. Alarmlarda yalnızca "Webhook URL" bildirimi açık olmalıdır.
+7. Token'ın göründüğü yerler (alarm bildirimleri, Alert Log) ve yenileme adımları: `docs/runbook.md` §8.1–8.2.
+   Alarmlarda yalnızca "Webhook URL" bildirimi açık olmalıdır. Yedi Pine dosyasında token girdisi
+   `display = display.none` ile tanımlıdır (E13): değer grafiğin durum satırında yazmaz.
 
 ### 5.4 Telegram
 - Yalnızca `TELEGRAM_ALLOWED_CHAT_ID` (pozitif = özel sohbet; grup/kanal kimlikleri reddedilir); diğer sohbetler yok
   sayılır ve sayılır/loglanır (metin loglanmaz).
 - Mesaj şablonu (Türkçe, düz metin; `US500.cash` gibi alan-adı görünümlü sözcükler bağlantıya dönüşmesin diye `code`
-  olarak işaretlenir; `/atladim` ve `/aldim` de — kimlikli, yer tutuculu ya da çıplak — her geçtiği yerde `code` olur:
-  Telegram komutu bağlantı yapar ve dokununca **çıplak** gönderir, çıplak `/atladim` ise son girişin riskini düşer):
+  olarak işaretlenir; `/atladim`, `/aldim` ve `/devam` da — kimlikli, yer tutuculu ya da çıplak — her geçtiği yerde
+  `code` olur: Telegram komutu bağlantı yapar ve dokununca **çıplak** gönderir; çıplak `/atladim` son girişin riskini
+  düşer, çıplak `/devam` bilerek konmuş bir duraklatmayı kaldırır (kullanıcı kararı 51)):
 ```
 [SİNYAL] {strateji} · {setup} · {LONG/SHORT} · {symbol}
 Referans giriş ≈ {est_entry} (TradingView bar kapanışı)
@@ -413,7 +435,7 @@ id {signal_id} · bar {NY saati} NY / {TR saati} TR
   dolup kullanıcının kendi emri (başka enstrüman) dolmayabilir; o durumda İPTAL gelmez. Limit girişin (ya da botun
   görmediği bir girişin) `[ÇIKIŞ]` mesajı "limit emrin hâlâ bekliyorsa İPTAL ET" der. Diğer mesajlar: `[STOP GÜNCELLE]`
   (mesafe olarak: "stop = kendi giriş fiyatın −3.50 puan"), `[ÇIKIŞ]`, `[İPTAL]`, `[SİNYAL — ATLA]` (stop çok geniş ·
-  bütçe yetersiz · saat uyuşmazlığı), `[BAYAT SİNYAL — ATLA]`, `[İLETİLEMEDİ — ATLA]`, `[İLETİM BELİRSİZ]`, `[UYARI]`
+  stop çok dar · sembol listede değil · bütçe yetersiz · saat uyuşmazlığı), `[BAYAT SİNYAL — ATLA]`, `[İLETİLEMEDİ — ATLA]`, `[İLETİM BELİRSİZ]`, `[UYARI]`
   (stop genişletme reddedildi), `[ALARM]`.
 - Günlük bütçe satırı temkinlidir (ADR-0005): iletilen her giriş prop günü boyunca sayılır; almadığın sinyali `/atladim`
   ile bildirirsin. Stop güncellemeleri mesafe uzayında karşılaştırılır; stop'u genişleten güncelleme iletilmez.
@@ -462,9 +484,14 @@ Ubuntu · systemd (`Restart=always`) · chrony · journald. İki ücretsiz yol (
 Caddy (Let's Encrypt) + ufw; **B** kendi bilgisayarın + Tailscale Funnel (ya da yalnızca deneme için Cloudflare hızlı
 tünel). Örnek dosyalar `deploy/`. Yeniden başlatmalar izlenen pencerelerin dışında yapılır. Dinleme soketi, hiçbir
 arka plan görevi başlamadan önce bağlanıp dinlemeye alınır ve bir veritabanında tek `serve` çalışır (`<db>.lock`):
-yanlışlıkla başlatılan ikinci kopya canlı veritabanına ve bota dokunmadan `HATA` ile çıkar. Kilit veritabanı
-başınadır: ayrı veritabanı ve portla başlatılan kopya aynı bot token'ını dinler ve komutları (`/kill` dahil) canlı
-servisin elinden alabilir; deneme kopyası ayrı bot token'ı ister (runbook §4).
+yanlışlıkla başlatılan ikinci kopya canlı veritabanına ve bota dokunmadan `HATA` ile çıkar. Aynı bot token'ıyla ikinci
+kopya da engellenir (kullanıcı kararı 53, ADR-0004): iki dinleyici botun komutlarını rastgele paylaşır, `/kill` yanlış
+kopyaya düşebilir. (1) Aynı makinede: bot kimliğine bağlı, makine genelinde bir kilit (Linux soyut soket adı; dosya
+yok, `PrivateTmp`'ten etkilenmez) — ayrı `--db` ve `--port` ile başlatılan kopya afişten önce `HATA` ile çıkar.
+(2) Kilidin görmediği yerde (başka makine, konteyner): polling'in ilk 60 saniyesinde Telegram'dan 409 Conflict alan
+süreç yeni gelendir; polling'i hemen durdurur, "[ALARM] Bu PropBot kopyası (makine adı) kendini DURDURDU" mesajını
+gönderir (veritabanı üzerinden saatte en çok bir) ve hata koduyla çıkar. 60 saniyeden uzun süredir çalışan süreç
+botu tutar ve "Aynı bot token'ıyla başka bir süreç…" alarmını verir. Deneme kopyası ayrı bot token'ı ister (runbook §4).
 
 ### 5.7 Kabul
 - 10 işlem günü kesintisiz; kaçan/çift sinyal 0 (TradingView Alert Log ile karşılaştırma); uçtan uca medyan gecikme < 5 sn.
@@ -563,11 +590,14 @@ canlı sonuçlar backtest'in %95 güven aralığında.
   (FTMO: reset anındaki bakiye; reset'te yüzen kâr varsa botun tabanı daha yüksek, yani daha sıkıdır).
 - Toplam kayıp: statik → `initial × (1 − max_loss_pct)`; gün sonu trailing → profilde tanımlı formül.
 - Boyut: `lots = floor_to_step(risk_usd / (stop_points × value_per_point_per_lot))`; `< min_lot` → işlem atla
-  (`RISK_TOO_WIDE`); asla yukarı yuvarlama.
+  (`RISK_TOO_WIDE`); asla yukarı yuvarlama. `stop_points < signal.min_stop_points` → işlem atla (çok dar stop çok büyük
+  lot ister; ADR-0006). Azami kaldıraç / marjin sınırı ayrıca denetlenmez (açık bulgu 16).
 - Strateji başına `max_consecutive_losses` → bir sonraki işlem günü durdur + rapor. Haftalık `weekly_cap_pct` → manuel `/devam`'a kadar dur.
 - Eşzamanlılık: strateji başına 1, toplam `max_positions_total`.
 - Haber: profil `news_rule`; kaynak `data/news.yaml` (haftalık elle güncellenir; site kazıma yok).
-- `rules_verified_at` boş veya > 30 gün → `signal`/`paper` dışındaki modlar kilitli.
+- `rules_verified_at` boş veya > 30 gün → `signal`/`paper` dışındaki modlar kilitli. `signal` modu çalışmaya devam eder:
+  giriş mesajına "[KURALLAR DOĞRULANMADI …]" satırı eklenir ve günde bir alarm gider; girişler kesilmez (kullanıcı
+  kararı 32, 2026-11-16: bot emir göndermez, mesajı gören kullanıcı karar verir; ADR-0005).
 - Config yüklenirken doğrulanır (`src/propbot/risk`): tavanı aşan değer, yanlış tip ya da bilinmeyen anahtar **yükleme
   hatasıdır** (sessizce kırpılmaz); `null` yalnızca VERIFY / çalışma-anı alanlarında kabul edilir ve raporlanır (ADR-0003).
 
@@ -585,6 +615,8 @@ günlük bütçe birlikte hesaplanır.
 
 ### 8.3 Venue profili
 Örnek: `config/venues/ftmo_2step_100k.yaml`. Sembol özellikleri profilde boş bırakılır; çalışma anında terminalden okunur.
+`signal` bölümü firmanın kuralı değil, botun kendi giriş süzgecidir (ADR-0006): `tv_symbols` (puan ölçeği `symbol` ile
+aynı olan TradingView sembolleri; en az 1, en çok 32, yinelemesiz) ve `min_stop_points` (> 0). İkisi de zorunludur.
 
 ## 9. Go/No-Go kapısı (ücretli sınav öncesi; hepsi şart)
 - **G1** ≥ 2 yıllık 1m veri, işlem yapılacak mekanın (veya eşdeğer) beslemesinde; veri raporu temiz.

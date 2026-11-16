@@ -21,7 +21,9 @@ Tasarım kararları: `docs/adr/0000`, `docs/adr/0004`. Spesifikasyon: `docs/SPEC
   vadelileri (`CME_MINI:MES1!`) ek veri aboneliği olmadan gecikmeli gelir ve alarmlar gecikmeli barlarda tetiklenir. O
   durumda her giriş "[BAYAT SİNYAL — ATLA]" olur, o işlemin stop/çıkış mesajları hiç gelmez, heartbeat ise gelmeye
   devam eder: bot sağlıklı görünür ama kullanılabilir tek sinyal iletmez. Gerçek zamanlı veri yoksa abonelik al ya
-  da stratejileri gerçek zamanlı gelen bir sembolde çalıştır (o sembolün puanı `US500.cash` ile aynı ölçekte olmalı).
+  da stratejileri gerçek zamanlı gelen bir sembolde çalıştır. Sembolün puanı `US500.cash` ile aynı ölçekte olmalı
+  **ve** venue profilindeki `signal.tv_symbols` listesinde yazmalı (3.3); listede olmayan sembolün girişleri
+  "[SİNYAL — ATLA] Sembol kabul listesinde değil" olarak gelir.
 - Bir Telegram hesabı.
 - İki dağıtım yolundan biri (ikisi de ücretsiz):
   - **Seçenek A:** internetten 80 ve 443 portlarına ulaşılabilen bir Ubuntu makine (ücretsiz katmanlı bir VPS ya da evdeki
@@ -103,7 +105,20 @@ Broker ya da prop firması şifresi **hiçbir yere** yazılmaz (değişmez kural
   | `lot_step` | Volume step (hacim adımı) |
 
   Bu alanlar boşken bot çalışır; mesajda lot yerine "boyut hesaplanamadı, risk ≈ $250" yazar.
-- Her değişiklikten sonra: `uv run propbot config check`.
+- `config/venues/ftmo_2step_100k.yaml` → `signal` (firmanın kuralı değil, botun kendi giriş süzgeci; ADR-0006):
+  - `tv_symbols`: girişine izin verilen TradingView sembolleri. Buraya yalnızca **puan ölçeği `US500.cash` ile aynı**
+    olan grafikleri yaz (S&P 500 endeksi 5000 civarındayken 1 puan = 1 endeks puanı). Bot stop/TP **mesafesini**
+    olduğu gibi `US500.cash`'e uygulatır; başka ölçekteki bir grafiğin (ör. `CME_MINI:NQ1!`, bir hisse, `SPY`)
+    mesafesi anlamsız bir işlem olurdu. Karşılaştırma **birebirdir**: alert'in gönderdiği yazım (`syminfo.tickerid`,
+    çoğunlukla `BORSA:SEMBOL`) listede harfi harfine olmalı. Bir sembolü ilk kez kullanmadan önce: (1) TradingView'da
+    o sembolün fiyatını MT5'teki `US500.cash` fiyatıyla karşılaştır (aradaki fark birkaç puanı geçmemeli; vadeli
+    sözleşmede baz farkı olağandır), (2) duman testinden sonra ilk gerçek alert'te mesaj başlığındaki sembolün listedekiyle
+    aynı yazıldığına bak. Yazım tutmazsa bot "[SİNYAL — ATLA] Sembol kabul listesinde değil (…)" der ve parantez içinde
+    TradingView'ın gönderdiği yazımı gösterir: o yazımı listeye ekle, `uv run propbot config check`, servisi yeniden başlat.
+  - `min_stop_points` (1.5): giriş ile stop arası bundan darsa giriş "[SİNYAL — ATLA] Stop çok dar" olur. Çok dar stop
+    çok büyük lot ister; spread ve kayma tek başına stop'a götürebilir. Değeri değiştirmek bir risk kararıdır: gerekçesini
+    `docs/adr/` altına yaz.
+- Her değişiklikten sonra: `uv run propbot config check` (çıktıdaki "Sinyal süzgeci" satırı listeyi ve eşiği gösterir).
 
 ## 4. Servis (systemd)
 
@@ -120,12 +135,19 @@ curl -s http://127.0.0.1:8000/healthz              # {"status":"ok"}
 - Bot yalnızca `127.0.0.1:8000`'i dinler; dışarıya TLS vekili (Caddy) ya da tünel açar.
 - **Bir veritabanında tek `propbot serve` çalışır** (`data/propbot.db.lock` kilidi). Servis çalışırken elle ikinci bir
   kopya başlatırsan kopya hiçbir şeye dokunmadan `HATA: …` ile çıkar; port doluysa da öyle.
-- **Bir bot token'ıyla da tek kopya çalışmalı; bunu kilit engellemez.** Ayrı `--db` ve `--port` verilmiş ikinci bir kopya
-  başlar, ama aynı Telegram botunu dinler: Telegram her komutu iki kopyadan yalnızca birine verir. `/kill <PIN>` deneme
-  kopyasına düşerse "KILL etkin" yanıtını görürsün, canlı servis ise sinyal göndermeye devam eder. Bir şey denemek
-  için **önce servisi durdur** (`sudo systemctl stop propbot`); yan yana deneme kopyası gerekiyorsa ona BotFather'dan
-  ayrı bir bot ve ayrı bir `--env-file` ver. İki kopya aynı token'la çalışırsa bot "Aynı bot token'ıyla başka bir süreç
-  güncelleme çekiyor" alarmı gönderir.
+- **Bir Telegram botuyla da tek kopya çalışır.** İki kopya aynı botu dinlerse Telegram her komutu yalnızca birine verir:
+  `/kill <PIN>` deneme kopyasına düşerse "KILL etkin" yanıtını görürsün, canlı servis ise sinyal göndermeye devam eder.
+  Bot bunu iki katmanda engeller (kullanıcı kararı 53):
+  - **Aynı makinede:** ayrı `--db` ve `--port` verilmiş olsa bile ikinci kopya `HATA: bu Telegram botuyla çalışan
+    başka bir propbot serve var` ile, hiçbir şeye dokunmadan çıkar (bot kimliğine bağlı, makine genelinde kilit).
+  - **Başka makinede / konteynerde** (kilit oraya ulaşmaz): yeni başlayan kopya ilk dakikasında Telegram'dan "başka
+    biri de dinliyor" (409 Conflict) yanıtı alırsa kendini durdurur ve "[ALARM] Bu PropBot kopyası (makine adı) kendini
+    DURDURDU" mesajını gönderir; zaten çalışan kopya botu tutar ve "Aynı bot token'ıyla başka bir süreç güncelleme
+    çekiyor" alarmını verir. Yeni kopyanın başladığı birkaç saniye içinde gönderdiğin bir komut o kopyaya gitmiş
+    olabilir: bu alarmlardan birini görürsen `/durum` ile kontrol et, gerekirse komutu yeniden gönder.
+  - Bir şey denemek için **önce servisi durdur** (`sudo systemctl stop propbot`); yan yana deneme kopyası gerekiyorsa
+    ona BotFather'dan ayrı bir bot ve ayrı bir `--env-file` ver. Canlı servisi yeniden başlatırken başka bir makinede
+    aynı token'la kopya çalışıyorsa **duran, canlı servis olur** (yeni gelen odur): önce öbür kopyayı kapat.
 - Arka plan görevlerinden biri ölürse süreç hata koduyla çıkar, systemd 5 sn sonra yeniden başlatır. Kuyruk ve Telegram
   kutusu `data/propbot.db`'de durur; kaldığı yerden devam eder. Süresi geçmiş giriş sinyalleri "BAYAT" ya da
   "İLETİLEMEDİ" olarak bildirilir, hiçbir zaman geçerli sinyal gibi iletilmez.
@@ -238,11 +260,20 @@ başlığı hiç yazmamıştır).
 
 ## 8. TradingView alarmları
 
-Her strateji için (ve heartbeat göstergesi için) **bir** alarm. **Bir `strategy_id`'nin tek kaynağı olmalı:** Master
-script'i S1 ve S2 bacakları için `ny_orb_fvg` ve `asian_sweep` gönderir, yani bağımsız NY Open ve Asian Sweep
-script'leriyle aynı kimlikleri. Aynı sembolde **ya Master'ı ya da bağımsız NY/Asian script'lerini** alarmla, ikisini
-birlikte değil: bot iki akışı tek işlem sanar (ikinci giriş ayrı bir pozisyon gibi iletilir, stop güncellemesi yanlış
-girişe bağlanır, aynı bardaki ikinci alert "yinelenen" diye düşer). Ayrıntı: CHANGELOG açık bulgu 47.
+Her strateji için (ve heartbeat göstergesi için) **bir** alarm. **Bir `strategy_id`'nin tek kaynağı olmalı:** aynı
+script'i aynı sembolde iki grafikte alarmlama (bot iki akışı tek işlem sanar; aynı bardaki ikinci alert "yinelenen"
+diye düşer).
+
+**Master ile bağımsız script'ler yan yana çalışabilir** (kullanıcı kararı 47). Master'ın bacakları kendi kimliklerini
+gönderir: S1 = `master_ny_orb_fvg`, S2 = `master_asian_sweep`; bağımsız NY Open ve Asian Sweep `ny_orb_fvg` ve
+`asian_sweep` göndermeye devam eder. Mesaj başlığında "Master NY ORB FVG" / "NY ORB FVG" diye ayrılırlar. Dikkat:
+- İki script aynı barda aynı kurulumu görürse **iki giriş mesajı** gelir ve günlük bütçede **ikisi de** sayılır. İkisini
+  birden almayacaksan almadığını `/atladim <id>` ile bildir.
+- Her script'in stop güncellemesi ve çıkışı kendi girişine bağlanır (mesajın son satırındaki "giriş id").
+- Master'ı bu sürümden önce alarmladıysan: script'i TradingView'a yeniden yapıştır ve **alarmını silip yeniden kur**
+  (eski alarm eski kimlikleri göndermeye devam eder).
+
+Alarmı kurduğun grafiğin sembolü venue profilindeki `signal.tv_symbols` listesinde olmalı (3.3).
 
 1. Script'in **Inputs → Webhook token** alanına `.env`'deki `TV_WEBHOOK_TOKEN` değerini yaz.
 2. Alarm oluştur → Condition: strateji için **"alert() function calls only"**, `pine/heartbeat_indicator.pine` için
@@ -263,12 +294,12 @@ pencerede 75 dakika hiçbir alert gelmezse bot "TradingView alarm hattı sessiz"
 günlerinde bu uyarı beklenen bir şeydir.
 
 ### 8.1 Token'ı kimler görebilir
-- **Grafik:** strateji script'lerinde "Webhook token" girdisinin değeri, grafikte script adının yanındaki durum
-  satırında (girdi değerleri) yazar. Ekran görüntüsü, yayınlanan fikir ya da paylaşılan grafik bağlantısı token'ı
-  gösterir. Paylaşmadan önce grafik ayarlarından durum satırındaki gösterge girdilerini/argümanlarını kapat (seçeneğin
-  adı TradingView sürümüne göre değişebilir) ya da script'i grafikten kaldır. Heartbeat göstergesinde girdi
-  `display.none` ile tanımlıdır; altı strateji dosyasında aynı tek satırlık değişiklik onayını bekliyor (CHANGELOG
-  açık bulgu 45).
+- **Grafik:** yedi Pine dosyasının hepsinde "Webhook token" girdisi `display = display.none` ile tanımlıdır (kullanıcı
+  kararı 45): değer, grafikte script adının yanındaki durum satırında yazmaz. Bu, TradingView'da derlenip gözle
+  doğrulanana kadar varsayımdır (doğrulama listesi H): script'i yapıştırdıktan sonra token'ı gir ve durum satırında
+  görünmediğine bak. Görünüyorsa paylaşmadan önce grafik ayarlarından durum satırındaki girdileri kapat ve Claude
+  Code'a bildir. Girdi, script'in **Inputs** penceresinde her zaman görünür; ekran paylaşırken o pencereyi açma.
+  Script'in eski sürümü grafikte duruyorsa token hâlâ durum satırındadır: yeni sürümü yapıştır.
 - **Alarm bildirimleri:** 3. adım (yalnızca Webhook URL).
 - **TradingView Alert Log:** mesajların tamamı (token dahil) hesabında durur; hesabını 2FA ile koru.
 - Token bir giriş bilgisi değildir, ama token'ı **ve** webhook adresini bilen biri kendi TradingView alarmıyla sana
@@ -329,8 +360,12 @@ Uçtan uca test TradingView'dan yapılır: heartbeat alarmını kur, saat başı
   fiyat). O durumda İPTAL mesajı gelmez; TradingView işlemi stop/TP ile kapanırsa hiç mesaj gelmez. Emrin İPTAL ya da
   ÇIKIŞ mesajına kadar, en geç seans sonuna kadar bekler; o anda hâlâ bekliyorsa **sil**. MT5 bekleyen emre son kullanma
   süresi tanımlamaya izin veriyorsa (terminalde doğrula) emri girerken seans sonunu yaz.
-- **`/atladim` ve `/aldim` mesajlarda dokunulabilir bağlantı değildir** (kopyalanır ya da elle yazılır): dokununca
-  gönderilen çıplak `/atladim` son girişin riskini bütçeden düşerdi.
+- **`/atladim`, `/aldim` ve `/devam` mesajlarda dokunulabilir bağlantı değildir** (kopyalanır ya da elle yazılır):
+  dokununca gönderilen çıplak `/atladim` son girişin riskini bütçeden düşerdi; çıplak `/devam` bilerek koyduğun
+  duraklatmayı kaldırırdı. `/duraklat`, `/durum` gibi yalnızca durduran ya da okuyan komutlar dokunulabilir kalır.
+- **Kurallar 30 günden eskiyse** (`rules_verified_at`) giriş sinyalleri **kesilmez**: her giriş mesajının başına
+  "[KURALLAR DOĞRULANMADI …]" satırı eklenir ve günde bir alarm gelir (kullanıcı kararı 32). Boyut ve bütçe o sırada
+  doğrulanmamış kurallara göre hesaplanır; kuralları doğrulayıp tarihi güncelleyene kadar mesajlara bu gözle bak.
 - **Yeniden başlatma alarmı:** bot izlenen pencerede yeniden başlarsa "[ALARM] Bot … yeniden başladı" yazar (en çok 30
   dakikada bir). "… alarmından beri N. kez" diyorsa servis çöküp duruyor demektir: `journalctl -u propbot -n 100`.
 - **`/duraklat` ve `/kill` gecikmeli ulaşsa da uygulanır**; `/devam`, `/atladim`, `/aldim` 60 saniyeden eskiyse reddedilir.
@@ -354,6 +389,9 @@ Uçtan uca test TradingView'dan yapılır: heartbeat alarmını kur, saat başı
 | Günlükte `bad_json` (400) | sembol adı düz `BORSA:SEMBOL` değil (grafikte uzatılmış seans / ayarlama açık) ve JSON bozuluyor | TradingView Alert Log'daki mesaj |
 | Telegram'da "dakikada 30 istekten fazlasını gönderiyor" (429) | bir alarm döngüde ya da aynı alarm birkaç kez kurulmuş | TradingView Alerts paneli |
 | "[SİNYAL — ATLA] Sunucu saati TradingView ile uyuşmuyor" | sunucu saati geride | `chronyc tracking`; `sudo systemctl restart chrony` |
+| "[SİNYAL — ATLA] Sembol kabul listesinde değil (…)" | alarm, listede olmayan bir grafikte kurulu; ya da TradingView sembolü listedekinden farklı yazıyor (önek, büyük/küçük harf) | parantezdeki yazım. Ölçeği `US500.cash` ile aynıysa `signal.tv_symbols`'a o yazımla ekle, `config check`, yeniden başlat (3.3); değilse alarmı doğru grafiğe kur |
+| "[ALARM] … alert'i geldi, ama sembol kabul listesinde değil" | listede olmayan bir grafikten stop/çıkış/iptal geldi ve botun ilettiği bir girişi yok | TradingView Alerts panelinde o alarmın sembolü; o grafiğe bakarak elle aldığın pozisyon varsa stop/çıkışı TradingView'dan izle |
+| "[SİNYAL — ATLA] Stop çok dar" | stop mesafesi `signal.min_stop_points`'ten (1,5 puan) küçük | beklenen davranış; sık oluyorsa stratejinin stop girdileri (buffer) çok küçük |
 | "[İLETİM BELİRSİZ]" | Telegram yanıtı gecikti; mesaj ulaşmış olabilir | sinyali gördüysen bir şey yapma; görmediysen `/atladim <id>` |
 | "Sinyal işlenemedi" alarmı | o sinyalde yazılım hatası; kuyruk devam eder | `journalctl -u propbot \| grep signal_processing_failed`; Claude Code'a bildir |
 | Telegram'da "Geçersiz alert gövdesi" | script eski sürüm; desteklenmeyen zaman dilimi (günlük+); sembol adında beklenmeyen karakter | mesajdaki alan adları |
@@ -367,7 +405,11 @@ Uçtan uca test TradingView'dan yapılır: heartbeat alarmını kur, saat başı
 | `HATA: … dinlenemiyor` | port başka bir süreçte (çoğunlukla zaten çalışan servis) | `ss -ltnp \| grep 8000`; elle ikinci bir `propbot serve` başlatma |
 | `HATA: bu veritabanıyla çalışan başka bir propbot serve var` | servis çalışırken elle bir kopya daha başlatıldı | `systemctl status propbot`; kopya hiçbir şeye dokunmadan çıkar |
 | `HATA: kilit dosyası açılamıyor` | `data/` klasörü yok ya da servis kullanıcısına ait değil | `mkdir -p data && chmod 700 data`; klasörün sahibi birimdeki `User=` olmalı |
-| `/kill` "KILL etkin" dedi ama sinyaller gelmeye devam ediyor | aynı bot token'ıyla ikinci bir kopya çalışıyor ve komutu o aldı | "Aynı bot token'ıyla başka bir süreç…" alarmı; fazla kopyayı durdur, `/kill <PIN>`'i yeniden gönder |
+| `HATA: bu Telegram botuyla çalışan başka bir propbot serve var` | bu makinede aynı `TELEGRAM_BOT_TOKEN` ile bir kopya zaten çalışıyor (çoğunlukla systemd servisi) | `systemctl status propbot`, `pgrep -af "propbot serve"`; kopya hiçbir şeye dokunmadan çıkar. Deneme için ayrı bot (4. bölüm) |
+| "[ALARM] Bu PropBot kopyası (…) kendini DURDURDU" · günlükte `telegram_conflict_at_start` | bu kopya başlarken aynı token'la başka bir süreç (başka makine, konteyner) zaten dinliyordu | hangi kopya çalışmalıysa öbürünü durdur; systemd duran kopyayı 5 sn'de bir yeniden dener ve öbürü kapanınca kendiliğinden başlar. Başka kopyan yoksa token'ı yenile (BotFather → /revoke) |
+| "[ALARM] Aynı bot token'ıyla başka bir süreç güncelleme çekiyor" | bu kopya çalışırken aynı token'la ikinci bir süreç dinlemeye başladı | ikinci kopyayı durdur; `/durum` ile durumu kontrol et, o sırada gönderdiğin komutu yeniden gönder. Başka kopyan yoksa token sızmıştır: BotFather → /revoke, `.env`, PIN |
+| `/kill` "KILL etkin" dedi ama sinyaller gelmeye devam ediyor | komutu başka bir makinedeki ikinci kopya aldı (yeni kopya kendini durdurmadan önceki birkaç saniye) | yukarıdaki iki alarm; fazla kopyayı durdur, `/kill <PIN>`'i yeniden gönder ve `/durum` ile doğrula |
+| `HATA: veritabanı şema sürümü uyuşmuyor: beklenen 2, okunan '1'` | `data/propbot.db` bu sürümden önce oluşturulmuş (yeni iki sonuç türü eski dosyaya yazılamaz; geçiş desteği yok) | servis durmuşken `mv data/propbot.db data/propbot-v1.db` (varsa `-wal` ve `-shm` dosyalarıyla birlikte); servis yeni dosya oluşturur. Eski kayıtlar eski dosyada kalır; duraklatma/KILL durumu ve günlük bütçe defteri sıfırlanır |
 | `status=226/NAMESPACE` | birimdeki `ReadWritePaths` klasörü yok (depo yolu değişti ama satır değişmedi; `data/` oluşturulmadı) | birimdeki işaretli dört satır; `mkdir -p data` |
 | `/saglik` yanıt vermiyor | Telegram token/sohbet kimliği yanlış; ağ yok | `journalctl -u propbot -n 50` |
 | Mesajda "boyut hesaplanamadı" | venue profilinde `contract.*` boş | 3.3 |

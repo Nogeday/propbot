@@ -412,25 +412,108 @@ Faz 1'in kodu bitti; kabul koşusu kullanıcının yapacağı işlere bağlı. S
 2. **MT5'ten sözleşme değerlerini yaz:** `config/venues/ftmo_2step_100k.yaml` → `contract.*` (runbook §3.3). Boşken bot
    çalışır, lot yerine "boyut hesaplanamadı" yazar.
 3. **Kur:** runbook §1–§9 (Seçenek A ya da B), duman testi, heartbeat alarmı. TradingView verisi gerçek zamanlı olmalı
-   (açık bulgu 48); Master ile bağımsız NY/Asian script'leri birlikte alarmlanmaz (açık bulgu 47).
+   (açık bulgu 48); alarm kurulan grafiğin sembolü venue profilindeki `signal.tv_symbols` listesinde olmalı.
 4. **10 işlem günü kabul koşusu:** runbook §12; her gün `propbot signals report`.
 
-Karar bekleyenler (hiçbiri varsayımla kapatılmadı):
+Karar bekleyen yedi bulgu (32, 33, 45, 46, 47, 51, 53) 2026-11-16'da karara bağlandı ve uygulandı: aşağıdaki bölüm.
 
-| Bulgu | Karar |
-|---|---|
-| 32 | Kurallar 30 günden eskiyken girişler tamamen kesilsin mi, yoksa bugünkü gibi uyarı satırı + günlük alarm mı? |
-| 33 (16 ile) | Asgari stop / azami kaldıraç eşiği: çok dar stop'ta otomatik "ATLA" olsun mu, eşik ne? |
-| 45 | Altı strateji dosyasında token girdisine `display = display.none` eklensin mi (B/E dışı tek argüman)? |
-| 46 | Hangi TradingView sembolleri `US500.cash` ile aynı ölçekte sayılacak (sembol listesi)? |
-| 47 | Master ve bağımsız script'ler yan yana çalışacak mı (Master bacaklarına ayrı `strategy_id`)? |
-| 51 | `/devam` mesajlarda dokunulamaz (`code`) olsun mu? |
-| 53 | Aynı bot token'ıyla ikinci kopyayı kod da engellesin mi (makine genelinde kilit), yoksa belge + Conflict alarmı yeterli mi? |
+## Faz 1 — kullanıcı kararları 32, 33, 45, 46, 47, 51, 53 (2026-11-16)
+
+Kullanıcı, Faz 1 teslim raporundaki yedi açık kararı verdi ve dal geçmişinin temizlenmesini istedi. Faz değişmedi (Faz 1,
+tek mod `signal`, emir yolu yok). Kararlar: `docs/adr/0004` (güncelleme), `0005` (güncelleme), `0006` (yeni).
+
+| Karar | Kullanıcının tercihi | Uygulama |
+|---|---|---|
+| 32 | Kurallar bayatken bugünkü davranış kalsın (uyarı satırı + günlük alarm; girişler kesilmesin) | Kod değişmedi. ADR-0005, SPEC §8.1, runbook §10 ve CLAUDE.md değişmez kural 3'e `signal` modu notu |
+| 33 | Çok dar stop'ta otomatik "ATLA"; eşik 1,5 puan, config'te ayarlanabilir | Venue profili `signal.min_stop_points: 1.5`; sonuç `skip_stop_too_tight` |
+| 45 | Token girdisi grafikte görünmesin | Altı strateji dosyasında `display = display.none` (E13) |
+| 46 | Yedi TradingView sembolü `US500.cash` ile aynı ölçekte kabul edilsin | Venue profili `signal.tv_symbols`; listede olmayan sembolün girişi `skip_symbol` |
+| 47 | Master bacaklarına ayrı kimlik; alıcı tanısın | `master_ny_orb_fvg`, `master_asian_sweep` (E14) |
+| 51 | `/devam` mesajlarda dokunulamaz olsun | Her `/devam` geçişi `code` varlığı |
+| 53 | Aynı bot token'ıyla ikinci kopyayı kod da engellesin (409 Conflict dahil) | Makine genelinde bot kilidi + başlangıçta Conflict gören kopya kendini durdurur |
+
+Commit'ler: `21da0db` /devam · `3d2b72f` sembol listesi ve asgari stop · `fb202c9` Master kimlikleri · `b5aa6cd` token
+girdisi · `43c87d9` bot kilidi ve Conflict.
+
+### Karar 46 ve 33 — giriş süzgeci (`signal` bölümü, ADR-0006)
+- `config/venues/*.yaml`'a zorunlu `signal` bölümü: `tv_symbols` (1–32 sembol, yinelemesiz, alıcı şemasının kabul ettiği
+  biçimde) ve `min_stop_points` (> 0). Eksik ya da hatalı bölüm yükleme hatasıdır (ADR-0003).
+- Gerçek profildeki liste kullanıcının verdiği yedi semboldür: `CME_MINI:MES1!`, `CME_MINI:ES1!`, `US500.cash`,
+  `OANDA:SPX500USD`, `FOREXCOM:SPXUSD`, `PEPPERSTONE:US500`, `CAPITALCOM:US500`. Eşleşme **birebirdir** (büyük/küçük
+  harf dahil). Her beslemenin ölçeği kullanıcının beyanıdır; bu ortamdan doğrulanamadı (açık bulgu 55).
+- İşleyici (`signals/processor.py`) giriş karar sırası: saat uyuşmazlığı → KILL → duraklatma → **sembol listesi** → bayat →
+  **stop çok dar** → stop çok geniş → günlük bütçe → iletildi. İki yeni bildirim "[SİNYAL — ATLA]" başlığıyla gider,
+  bütçede sayılmaz, kural alarmı taşımaz.
+- Takip alert'leri: iletilmiş bir girişin stop/çıkış/iptali listeye bakılmadan iletilir (liste işlem açıkken değişmiş
+  olabilir). Hiçbir girişe bağlanamayan **ve** listede olmayan sembolden gelen takip alert'i iletilmez; 10 dakikada en
+  çok bir alarm (`symbol_not_listed`). Heartbeat sembole bakılmaz.
+- Asgari stop tam ondalıkla karşılaştırılır (eşit olan geçer); `contract.*` boşken de geçerlidir; stop güncellemelerine
+  uygulanmaz. Stop'u girişe eşit olan giriş önceki gibi "işlenemedi" alarmına gider.
+- Mesajda `signal.tv_symbols` yazılmaz, "venue profilindeki tv_symbols listesi" yazılır: Telegram `signal.tv`'yi alan
+  adı sanıp bağlantı yapardı.
+- **Veritabanı şema sürümü 2** (`signals.outcome` denetimine iki sonuç eklendi). Sürüm 1 dosyası açılmaz; hata mesajı ve
+  runbook §11 eski dosyanın yeniden adlandırılmasını söyler. Göç yazılmadı (kabul koşusu başlamadı).
+- `propbot config check` "Sinyal süzgeci" bölümünü, `serve` afişi "sinyal süzgeci" satırını basar; `/durum` ve
+  `signals report` yeni sonuçları adlandırır ("sembol listede değil", "stop çok dar").
+
+### Karar 47 — Master bacak kimlikleri (E14)
+- `pine/master_prop_firm_portfolio.pine`: `f_alert` çağrılarının kimlik argümanı `"ny_orb_fvg"` → `"master_ny_orb_fvg"`
+  (5 çağrı + zorunlu düzleştirme), `"asian_sweep"` → `"master_asian_sweep"` (3 çağrı + zorunlu düzleştirme); başlık
+  yorumu. Giriş/çıkış mantığı, girdiler ve varsayılanlar değişmedi. **Derlenmedi.**
+- Alıcı şeması iki kimliği tanır; mesajlarda "Master NY ORB FVG" / "Master Asian Sweep". S1 bacağı bağımsız NY Open ile
+  aynı notu taşır ("trailing stop güncellemeleri ayrı mesajla gelir").
+- Master ile bağımsız script'ler aynı sembolde yan yana alarmlanabilir: aynı bardaki iki giriş iki ayrı sinyaldir, her
+  birinin stop güncellemesi ve çıkışı kendi girişine bağlanır, günlük bütçede ikisi de sayılır.
+- `tests/unit/test_pine_sources.py` (yeni, yalnızca kaynak metnini okur): her Pine dosyasının gönderdiği kimlikler,
+  hiçbir kimliğin iki dosyada geçmediği ve alıcının tanıdığı kimliklerle birebir örtüştüğü sabitlendi.
+- Kullanıcı Master'ı önceden alarmladıysa alarmı silip yeniden kurmalı (eski alarm eski kimlikleri gönderir).
+
+### Karar 45 — token girdisi gizli (E13)
+- Altı strateji dosyasında `alertToken = input.string("", "Webhook token", …, display = display.none, …)`. Tek argüman;
+  mantık ve varsayılan değişmedi. Heartbeat göstergesinde zaten vardı. **Derlenmedi**: derleyicinin argümanı kabul
+  ettiği ve değerin durum satırından kalktığı doğrulama listesi H'de (E13 maddesi).
+
+### Karar 51 — `/devam` dokunulamaz
+- `notify/telegram.py`: `/devam`, `/devam <PIN>`, `/devam 123456` her geçtiği yerde `code` varlığıdır (`/atladim` ve
+  `/aldim` gibi). `/duraklat` ve `/durum` yanıtlarındaki `/devam` artık dokununca gönderilmez.
+
+### Karar 53 — aynı bot token'ıyla ikinci kopya
+- **Makine genelinde kilit** (`signals/service.py` `single_bot_instance`): bot kimliğiyle adlandırılmış soyut Unix
+  soketi. `serve` bunu veritabanı kilidinden hemen sonra, afişten ve veritabanına dokunmadan önce alır; ikinci kopya
+  `HATA: bu Telegram botuyla çalışan başka bir propbot serve var` ile çıkar. Dosya bırakmaz; `PrivateTmp` ve
+  `ProtectSystem`'den etkilenmez; `deploy/propbot.service` değişmedi. Gerçek iki süreçle denendi (ayrı `--db`/`--port`).
+- **Başlangıçtaki Conflict** (`notify/telegram.py`): polling'e başlayalı ≤ 60 sn olan süreç 409 Conflict alırsa polling'i
+  durdurur, "[ALARM] Bu PropBot kopyası (makine adı) kendini DURDURDU…" mesajını gönderir (veritabanı üzerinden saatte
+  en çok bir; gönderilemezse kutuda kalır) ve `TelegramFatalError` ile süreci bitirir. Daha uzun süredir çalışan süreç
+  botu tutar; onun "Aynı bot token'ıyla başka bir süreç…" alarmına "bu sırada gönderdiğin bir komut öbür sürece gitmiş
+  olabilir: /durum ile kontrol et" cümlesi eklendi.
+- Kalan açıklar: açık bulgu 56.
+
+### Karar 32 — kurallar bayatken sinyal
+- Davranış aynı: girişler iletilir, başına "[KURALLAR DOĞRULANMADI …]" satırı, günde bir alarm. Belgelendi: ADR-0005,
+  SPEC §8.1, runbook §10. CLAUDE.md değişmez kural 3'e not eklendi ("`signal` modunda kural dosyası eskimişse girişler
+  kesilmez…"); `approve` / `auto` kilitleri (değişmez kural 1) değişmedi.
+
+### Dal geçmişi
+- `WIP: uncommitted changes, moved to the cloud` commit'i (`b6fcbc8`) bağımlılık commit'ine (`cd00945`) katıldı; dal
+  `--force-with-lease` ile yeniden yazıldı (açık bulgu 31). Eski Faz 1 commit kimlikleri artık dalda yok.
+
+### Testler
+- 3887 test (`uv run pytest -q`; 1 test bu ortamda atlanır: IPv6 loopback yok), ruff, `mypy --strict` (36 kaynak
+  dosya) temiz. Önceki durum 3593.
+- Yeni: sembol listesi ve asgari stop karar tablosu (sıra, sınır, tam ondalık, takip alert'leri, alarm kısıtlaması);
+  venue profili `signal` bölümü (7 yeni hatalı fixture); Master kimlikleriyle 12 yeni gövde biçimi (toplam 45) şemadan,
+  alıcıdan ve işleyiciden geçer; Master + bağımsız script yan yana senaryoları; Pine kaynak denetimleri; `/devam` kod
+  varlıkları; bot kilidi (süreçler arası, SIGKILL sonrası serbest kalma); başlangıç Conflict'i (60 sn sınırı, saat geri
+  gitmesi, yeniden başlatma döngüsünde alarm kısıtlaması, bekleyen mesajların sırası).
+- Gerçek `propbot serve` ile: aynı bot kimliğiyle ikinci kopya (başka veritabanı ve port) afişten önce reddedildi; başka
+  bot kimliğiyle kopya başladı.
 
 ## Açık bulgular
 
-Durum (2026-11-13): 1, 3–11 ve 24 kapandı; 2, 15 ve 23 kısmen. 12–23 ve 25–30 açık (18–23 denetimden, 25–27 Faz 2 ön
-diliminden, 28–30 FTMO doğrulamasından). 31–44 Faz 1'den, 45–54 Faz 1 uygulama denetiminden.
+Durum (2026-11-16): 1, 3–11, 24, 31, 32, 33, 45, 46, 47, 51 ve 53 kapandı; 2, 15, 16 ve 23 kısmen. 12–23 ve 25–30 açık
+(18–23 denetimden, 25–27 Faz 2 ön diliminden, 28–30 FTMO doğrulamasından). 31–44 Faz 1'den, 45–54 Faz 1 uygulama
+denetiminden, 55–58 2026-11-16 kararlarının uygulamasından.
 
 1. ~~**MTF derleme riski:** `riskPts := ...` bildirimi olmayan değişkene atama.~~ **Çözüldü** (`e997dd5`).
 2. **B4 sayısal değerleri — kısmen:** kod varsayılanı artık MES test profili (E9). FTMO `US500.cash` spread'i/komisyonu
@@ -453,8 +536,10 @@ diliminden, 28–30 FTMO doğrulamasından). 31–44 Faz 1'den, 45–54 Faz 1 uy
 15. **`exit` alert'inde neden alanı yok — kısmen:** seans sonu / günlük zarar ihlali / tarih sonu alıcıda ayırt
     edilemiyor. Alıcı şeması isteğe bağlı `reason` alanını kabul ediyor (2026-11-13 kararı); Pine dosyaları Faz 0 kabulü
     bitmeden değişmeyeceği için henüz göndermiyor.
-16. **Kaldıraç / marjin sınırı:** dar stop'larda risk-temelli boyutun notional'ı hesabın kaldıraç sınırını aşabilir;
-    venue profilinde kaldıraç alanı yok (VERIFY, Faz 2/3). TradingView tarafında marjin kontrolü kapalı (E9).
+16. **Kaldıraç / marjin sınırı — kısmen:** dar stop'larda risk-temelli boyutun notional'ı hesabın kaldıraç sınırını
+    aşabilir; venue profilinde kaldıraç alanı yok (VERIFY, Faz 2/3). TradingView tarafında marjin kontrolü kapalı (E9).
+    2026-11-16: asgari stop (`signal.min_stop_points`, 1,5 puan) en uç durumları keser, ama bir kaldıraç denetimi
+    değildir (ADR-0006: 1,5 puanlık stop hâlâ hesabın birkaç katı nominal önerebilir).
 17. **Yarım günlerde 1 barlık işlem:** E5 sınırı — sondan bir önceki bardaki sinyal son barda dolup aynı barın
     kapanışında kapanır.
 18. **Zorunlu kapanış fiyatı (denetim D4):** `immediately = true` kapanışları barın kapanış fiyatından dolar. Seansın son
@@ -497,12 +582,13 @@ diliminden, 28–30 FTMO doğrulamasından). 31–44 Faz 1'den, 45–54 Faz 1 uy
     commit'i `main-bz6vo7` dalında kalmıştı.~~ **Çözüldü (2026-11-16, kullanıcı isteği):** içeriği (bağımlılık
     satırları) `cd00945` commit'ine katıldı, dal geçmişi yeniden yazılıp `--force-with-lease` ile push edildi. Bu
     dosyadaki Faz 1 commit kimlikleri yeni geçmişe göre güncellendi; eski kimlikler artık dalda yok.
-32. **Kurallar bayatken sinyal davranışı (karar gerekir):** `rules_verified_at` 30 günü geçince `signal` modu çalışmaya
+32. ~~**Kurallar bayatken sinyal davranışı (karar gerekir):** `rules_verified_at` 30 günü geçince `signal` modu çalışmaya
     devam eder (SPEC §8.1); giriş mesajına "[KURALLAR DOĞRULANMADI …]" satırı eklenir ve günde bir alarm gider. Değişmez
-    kural 3'ün harfi "yeni giriş yok" der. Girişleri tamamen kesmek istenirse tek satırlık değişiklik (ADR-0005).
-33. **Asgari stop / azami kaldıraç kuralı yok:** çok dar stop çok büyük lot önerir (ör. 0,25 puan → 1000 lot). Mesaj
-    nominal büyüklüğü ve hesaba oranını gösterir, ama otomatik "ATLA" yok; eşik için karar + ADR gerekir (bulgu 16 ile
-    birlikte).
+    kural 3'ün harfi "yeni giriş yok" der.~~ **Karara bağlandı (2026-11-16):** davranış kalır; ADR-0005 ve CLAUDE.md
+    değişmez kural 3 notu.
+33. ~~**Asgari stop / azami kaldıraç kuralı yok:** çok dar stop çok büyük lot önerir (ör. 0,25 puan → 1000 lot). Mesaj
+    nominal büyüklüğü ve hesaba oranını gösterir, ama otomatik "ATLA" yok.~~ **Çözüldü (2026-11-16, `3d2b72f`):** asgari
+    stop 1,5 puan (`signal.min_stop_points`, ADR-0006). Azami kaldıraç ayrı kalır: bulgu 16.
 34. **Alert gövdeleri gerçek çıktıyla doğrulanmadı:** şema Pine kaynağı okunarak çıkarıldı. Sayı biçimleri (`5120.00`,
     `"rr":2`), `timeframe.period` değerleri ve özellikle `syminfo.tickerid`'nin uzatılmış seans / ayarlama açıkken
     `={"session":…}` biçiminde gelip JSON'u bozması (→ 400, saatlik uyarı) TradingView'da kontrol edilmeli
@@ -528,6 +614,8 @@ diliminden, 28–30 FTMO doğrulamasından). 31–44 Faz 1'den, 45–54 Faz 1 uy
     `ResilientBot`, kuramadığı partiyi ham almak için kütüphanenin korumalı `Bot._post` çağrısını kullanır (açık
     `do_api_request` aynı uç nokta için uyarı üretir); sürüm `uv.lock` ile sabit ve yol testlidir, yükseltmede bakılmalı.
 41. **Budama ve göç yok:** `data/propbot.db` büyür (yılda birkaç MB); şema sürümü değişirse eski dosya açılmaz.
+    2026-11-16'da sürüm 2 oldu: sürüm 1 ile oluşturulmuş bir dosya (yerel deneme, duman testi) yeniden adlandırılmalı
+    (runbook §11); duraklatma/KILL durumu ve günlük bütçe defteri yeni dosyada sıfırdan başlar.
 42. **`pine/heartbeat_indicator.pine` derlenmedi** (doğrulama listesi H); alarm koşulunun adı ("Any alert() function
     call"), `timeframe.in_seconds()` davranışı, token girdisindeki `display = display.none` parametresi, yeni atım kuralı
     (`slotClose != slotClose[1]`, `dayofmonth(time_close, tz)`) ve bar süresi denetimi TradingView'da doğrulanmalı (resmi
@@ -536,25 +624,14 @@ diliminden, 28–30 FTMO doğrulamasından). 31–44 Faz 1'den, 45–54 Faz 1 uy
     çıkışta yönü denetlemez, yön girişinkinden farklıysa çıkış mesajı girişe bağlanmadan iletilir.
 44. **Dağıtım belgesinde doğrulanamayanlar:** Tailscale ve cloudflared kurulum komutları, Cloudflare hızlı tünel
     sınırları ve DuckDNS sayfası bu ortamdan okunamadı; runbook'ta (VERIFY) olarak işaretli.
-45. **Strateji dosyalarında token girdisi durum satırında görünür (karar gerekir):** altı strateji script'inde
-    `alertToken = input.string("", "Webhook token", …)` varsayılan görünürlükle tanımlı; değer grafikte script adının
-    yanında yazar (ekran görüntüsü / paylaşılan grafik token'ı gösterir). Önerilen tek argümanlık değişiklik:
-    `display = display.none` (heartbeat göstergesinde uygulandı; giriş/çıkış mantığına ve varsayılanlara dokunmaz). B/E
-    maddelerinin dışında olduğu için Pine kuralı gereği uygulanmadı; onay verirsen altı dosyaya eklenir. O zamana kadar:
-    runbook §8.1 (durum satırında girdileri gizle, yalnızca Webhook URL bildirimi).
-46. **Alert sembolü venue sembolüyle eşleştirilmiyor (karar gerekir):** alıcı `symbol` alanının yalnızca biçimini denetler.
-    Strateji başka bir grafiğe (ör. `CME_MINI:NQ1!` ya da bir hisse) eklenip alarm kurulursa sinyal iletilir; stop/TP
-    mesafeleri **başka bir enstrümanın puan ölçeğinde** gelir ve `US500.cash`'e uygulanırsa anlamsız bir işlem olur (lot
-    o mesafeye göre hesaplandığı için işlem başı risk tavanı yine aşılmaz). Mesaj başlığı sembolü gösterir, ama otomatik
-    "ATLA" yok. Öneri: venue profiline (ya da `config/tv_alerts.yaml`'a) puanı
-    venue sembolüyle aynı ölçekte olan TradingView sembollerinin listesi (ör. `CME_MINI:MES1!`, `CME_MINI:ES1!`);
-    listede olmayan sembolün girişi "[SİNYAL — ATLA]" olur. Hangi sembollerde çalıştıracağını bilmeden liste
-    uydurulmadı; 10 günlük kabul koşusundan önce karar verilmeli.
-47. **Master ile bağımsız NY Open / Asian Sweep aynı `strategy_id`'leri gönderir (karar gerekir):** ikisi aynı sembolde
-    birlikte alarmlanırsa bot akışları ayırt edemez: uyuştuklarında ikinci alert "yinelenen" diye düşer (Alert Log
-    karşılaştırması tutmaz), ayrıştıklarında ikinci giriş ayrı pozisyon gibi iletilir ve bir script'in stop güncellemesi
-    öbürünün girişine bağlanır. Şimdilik belge kuralı: bir `strategy_id` tek kaynaktan (runbook §8). İkisini yan yana
-    çalıştırmak istenirse Master bacaklarına ayrı kimlik gerekir (Pine değişikliği, B/E dışı → onay).
+45. ~~**Strateji dosyalarında token girdisi durum satırında görünür (karar gerekir).**~~ **Çözüldü (2026-11-16,
+    `b5aa6cd`):** altı dosyada `display = display.none` (E13). Derlenmedi; doğrulama listesi H.
+46. ~~**Alert sembolü venue sembolüyle eşleştirilmiyor (karar gerekir).**~~ **Çözüldü (2026-11-16, `3d2b72f`):** venue
+    profili `signal.tv_symbols`; listede olmayan sembolün girişi "[SİNYAL — ATLA]" (ADR-0006). Listenin doğruluğu:
+    bulgu 55.
+47. ~~**Master ile bağımsız NY Open / Asian Sweep aynı `strategy_id`'leri gönderir (karar gerekir).**~~ **Çözüldü
+    (2026-11-16, `fb202c9`):** Master bacakları `master_ny_orb_fvg` / `master_asian_sweep` (E14). Derlenmedi; doğrulama
+    listesi H.
 48. **Gerçek zamanlı veri gereği doğrulanmadı (VERIFY):** CME vadelilerinin TradingView'da aboneliksiz gecikmeli geldiği
     ve alarmların gecikmeli barlarda tetiklendiği bu ortamdan doğrulanamadı (bilgi bellekten). Alıcı tarafı kanıtlı:
     10 dk gecikmeli alert'te giriş "BAYAT", takip mesajları `no_active_trade`. Doğrulama listesi H'de ölçüm maddesi var.
@@ -565,18 +642,31 @@ diliminden, 28–30 FTMO doğrulamasından). 31–44 Faz 1'den, 45–54 Faz 1 uy
     silahlı ama dolmamış bir limit için `strategy.cancel` çağırmadan ve `cancel` alert'i göndermeden `phase`'i sıfırlar.
     Yalnızca pencerenin son barı eksikse erişilir (olağan durumda 4. blok önce iptal eder). Ayrıca genel düşüş kesicisi
     `cancel` gönderip `phase`'i sıfırlamıyor (pozisyon yokken erişilemez). Kaynak okunarak bulundu, derlenip denenmedi.
-51. **`/devam` mesajlarda dokunulabilir (karar gerekir):** `/duraklat` ve `/durum` yanıtlarındaki `/devam` bağlantısına
-    yanlışlıkla dokunmak duraklatmayı kaldırır (yanıtı görünür; KILL sonrası PIN gerektiği için orada etkisi yok).
-    `/atladim` ve `/aldim` gibi `code` yapılabilir; kolaylık–güvenlik tercihi kullanıcıya bırakıldı.
+51. ~~**`/devam` mesajlarda dokunulabilir (karar gerekir).**~~ **Çözüldü (2026-11-16, `21da0db`):** her `/devam`
+    geçişi `code` varlığı.
 52. **Düzenlenen mesajlar alınmıyor:** bot yalnızca `message` güncellemelerini ister; eski bir mesaja sonradan düzenlemeyle
     yazılan PIN silinmez (komut olarak da işlenmez). PIN'i düzenlemeyle yazma.
-53. **Aynı bot token'ıyla ikinci kopya kodla engellenmiyor (karar gerekir):** `serve` kilidi veritabanı başınadır. Ayrı
-    `--db` ve `--port` ile başlatılan kopya aynı botu dinler; Telegram her güncellemeyi kopyalardan birine verir, `/kill`
-    deneme kopyasına düşebilir. Bugünkü koruma: runbook §4 uyarısı ve "Aynı bot token'ıyla başka bir süreç…" alarmı
-    (Conflict). Makine genelinde, bot kimliğine bağlı bir kilit eklenebilir; systemd'nin `PrivateTmp`'i yüzünden kilidin
-    yeri (ör. `/run/lock`) birim dosyasıyla birlikte kararlaştırılmalı. Telegram'ın iki dinleyiciye davranışı bu ortamdan
-    gözlenmedi.
+53. ~~**Aynı bot token'ıyla ikinci kopya kodla engellenmiyor (karar gerekir).**~~ **Çözüldü (2026-11-16, `43c87d9`):**
+    makine genelinde bot kilidi + başlangıçta Conflict gören kopya kendini durdurur (ADR-0004). Kalanlar: bulgu 56.
 54. **`systemctl stop` sonrası çıkış kodu:** uvicorn düzgün kapanıştan sonra sinyali yeniden yükseltir; süreç 143 ile biter,
     `run_service`'in dönüş değeri ve `Store.close()` çalışmaz (WAL ve çekirdek kilidi bunu taşır; veri kaybı yok).
     `Restart=always` olduğu için `systemctl stop` dışında davranışı etkilemez; gözlem doğrulayıcıdan, sistemde denenmedi.
+55. **Sembol listesi doğrulanmadı (VERIFY):** `signal.tv_symbols`'taki yedi sembol kullanıcının 2026-11-16 kararıdır;
+    bu ortamdan TradingView'a erişilemediği için (a) her beslemenin puan ölçeğinin `US500.cash` ile aynı olduğu ve
+    (b) TradingView'ın sembolü alert'te tam olarak nasıl yazdığı doğrulanmadı. Özellikle `US500.cash` öneksiz
+    yazılmıştır; `syminfo.tickerid` çoğunlukla `BORSA:SEMBOL` biçimindedir, bu yüzden o grafikten gelen girişler
+    "Sembol kabul listesinde değil (…)" olarak gelebilir — mesaj doğru yazımı gösterir, listeye o eklenir. Eşleşme
+    bilerek birebirdir (ADR-0006). Doğrulama listesi H'de iki madde.
+56. **İkinci kopya korumasının kalan açıkları:** (a) Telegram'ın 409 Conflict'i hangi isteğe verdiği bu ortamdan
+    gözlenemedi; kural yeni gelenin de 409 aldığı davranışa dayanır, yalnızca eski süreç alıyorsa önceki davranış
+    (alarm, iki kopya çalışır) sürer. (b) Başka makinedeki kopya kendini durdurana kadarki birkaç saniyede bir komut
+    almış olabilir (iki alarm da bunu söyler); systemd altında yeniden deneme döngüsünde bu pencere 5 sn'de bir yeniden
+    açılır. (c) Canlı servis, başka makinede aynı token'la bir kopya çalışırken yeniden başlarsa duran canlı servis
+    olur. (d) Bot kilidi Linux'a özgüdür (soyut soket) ve ağ ad alanıyla sınırlıdır; yerel başka bir kullanıcı aynı
+    adı önceden bağlayarak servisin başlamasını engelleyebilir (tek kullanıcılı sunucuda tehdit modeli dışı).
+57. **Master + bağımsız script yan yana: bütçe iki kez sayılır.** Aynı kurulumu iki script de görürse iki giriş mesajı
+    gelir ve günlük bütçede ikisi de sayılır (bot hangisinin alındığını bilemez); kullanıcı almadığını `/atladim <id>`
+    ile bildirir. İki mesajın aynı işlem fikri olduğu mesajda yazmaz.
+58. **Dar stop eşiği tek değer:** `min_stop_points` venue profili başınadır; strateji ya da zaman dilimi başına ayrı eşik
+    yok. Kabul koşusunda `signals report` "atla: stop çok dar" sayısına bakılıp eşik gözden geçirilmeli.
 

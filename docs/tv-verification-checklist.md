@@ -157,8 +157,24 @@ tablosundan (MTF'de tablo farklı: "Full trades", "Avg runner R"; Silver Bullet'
 - [ ] **Veri gerçek zamanlı mı?** Alert Log'daki tetiklenme saati, o barın kapanışından yalnızca birkaç saniye sonra
       olmalı. Dakikalarca (ör. 10 dk) sonraysa sembolün verisi gecikmelidir: bot her girişi "[BAYAT SİNYAL]" sayar
       (`docs/runbook.md` 1. bölüm). Gördüğün farkı yaz.
-- [ ] **Bir `strategy_id` tek kaynaktan:** aynı sembolde Master ile bağımsız NY Open / Asian Sweep alarmları birlikte
-      kurulu DEĞİL (Master S1 = `ny_orb_fvg`, S2 = `asian_sweep` gönderir). Hangisini kullandığını yaz.
+- [ ] **Bir `strategy_id` tek kaynaktan:** aynı script aynı sembolde iki grafikte alarmlı DEĞİL. Master ile bağımsız
+      NY Open / Asian Sweep script'leri yan yana alarmlanabilir (ayrı kimlikler, aşağıdaki madde).
+- [ ] **E14 Master bacak kimlikleri (kullanıcı kararı 47):** Master'ın Alert Log'daki mesajlarında `strategy_id`
+      S1 için `"master_ny_orb_fvg"`, S2 için `"master_asian_sweep"` yazıyor mu? Bağımsız NY Open `"ny_orb_fvg"`,
+      bağımsız Asian Sweep `"asian_sweep"` göndermeye devam etmeli. Master alarmını bu sürümden önce kurduysan sil ve
+      yeniden kur. Birer örnek gövdeyi (token maskeli) yapıştır.
+- [ ] **E13 Token girdisi gizli (kullanıcı kararı 45):** altı strateji dosyasının her birinde "Webhook token" girdisi
+      `display = display.none` ile tanımlı (doğrulanamadı: Pine burada derlenemiyor). Her dosya için: (1) derleniyor
+      mu — derleyici `display` argümanını reddederse hata metnini ve satırı kopyala; (2) token'ı Inputs'a yazdıktan
+      sonra grafikte script adının yanındaki durum satırında token **görünmüyor** mu; (3) öbür girdiler eskisi gibi
+      görünüyor mu (yalnızca token gizlenmeli). Dosya dosya geçti / kaldı yaz.
+- [ ] **Sembol listesi (kullanıcı kararı 46):** alarm kurduğun her grafiğin Alert Log'daki `"symbol"` değeri,
+      `config/venues/ftmo_2step_100k.yaml` → `signal.tv_symbols` listesindeki yazımla **harfi harfine** aynı mı
+      (ör. `CME_MINI:MES1!`)? `US500.cash` grafiğinde TradingView'ın tam olarak ne gönderdiğini (önek var mı:
+      `FTMO:US500.cash` gibi) buraya yaz; farklıysa liste ona göre düzeltilecek.
+- [ ] **Ölçek (kullanıcı kararı 46):** listedeki sembollerden kullandıklarının fiyatını aynı anda MT5'teki
+      `US500.cash` fiyatıyla karşılaştır ve farkı puan olarak yaz (vadeli sözleşmede birkaç puanlık baz farkı olağan;
+      fiyatın 10 katı / onda biri olması ölçeğin farklı olduğunu gösterir → o sembol listeden çıkarılır).
 - [ ] Alarmın bitiş tarihini `config/tv_alerts.yaml` → `alerts` altına yazdın mı?
 
 ## Claude Code'a yapıştırılacaklar

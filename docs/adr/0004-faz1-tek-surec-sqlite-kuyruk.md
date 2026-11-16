@@ -86,12 +86,35 @@ traceback olarak basılmaz, aynı zincirden geçer: python-telegram-bot'un `Inva
   *Güncelleme (2026-11-15, uygulama denetimi PORT-1):* aynı veritabanında ikinci bir `propbot serve` artık hiç
   başlamaz (`<db>.lock` üzerinde `flock`), ve dinleme soketi arka plan görevlerinden önce bağlanır. `Conflict` alarmı
   yalnızca başka bir veritabanı/makinede aynı token'la çalışan kopya için kalır.
+  *Güncelleme (2026-11-16, kullanıcı kararı 53):* aynı bot token'ıyla ikinci kopya kodla da engellenir. İki dinleyici
+  botun güncellemelerini rastgele paylaşır; `/kill` sinyal iletmeyen kopyaya düşebilir. İki katman:
+  1. **Makine genelinde bot kilidi.** `serve`, veritabanı kilidinden hemen sonra bot kimliğiyle (token'ın iki noktadan
+     önceki, gizli olmayan kısmı) adlandırılmış bir soketi Linux'un soyut ad alanına bağlar
+     (`\0propbot-telegram-bot-<id>`). Seçenekler: `/run/lock` altında `flock` (birim dosyasında `ReadWritePaths`
+     değişikliği ve servis kullanıcısı / elle çalıştıran kullanıcı arasında dosya izni sorunu ister), `/tmp` altında
+     dosya (`PrivateTmp=true` servisin `/tmp`'sini ayırır: elle başlatılan kopya kilidi göremez). Soyut soket dosya
+     bırakmaz, süreç nasıl ölürse ölsün çekirdek bırakır, birim dosyasına dokunmaz. Sınırı ağ ad alanıdır (konteyner,
+     başka makine görmez) ve Linux'a özgüdür; başka platformda `serve` kilidi alamadığı için başlamaz (dağıtım
+     hedefi Ubuntu).
+  2. **Başlangıçtaki Conflict.** Kilidin görmediği kopya için: polling'e başlayalı 60 saniyeyi geçmemiş bir süreç
+     409 Conflict alırsa yeni gelen odur ve çekilir — polling'i hemen durdurur, "[ALARM] Bu PropBot kopyası (makine
+     adı) kendini DURDURDU" mesajını kuyruğa yazıp göndermeyi dener (alarm veritabanında saatte bire kısıtlanır,
+     systemd'nin yeniden deneme döngüsünde tekrar etmez) ve `TelegramFatalError` ile süreci bitirir. 60 saniyeden
+     uzun çalışan süreç botu tutar ve eski alarmı verir. Seçenek "ikisi de çalışsın, yalnızca alarm" idi (önceki
+     davranış): komutların hangi kopyaya gittiği belirsiz kalırdı (değişmez kural 3: belirsizlikte fail-closed).
+  Kalan açıklar: (a) Telegram'ın 409'u hangi isteğe verdiği bu ortamdan gözlenemedi; kural, yeni gelenin de 409
+  aldığı (bilinen) davranışa dayanır — yalnızca eski süreç 409 alıyorsa önceki davranış (alarm) sürer. (b) Başka
+  makinedeki kopya, kendini durdurana kadarki birkaç saniyede bir komut almış olabilir; iki alarm da bunu söyler.
+  (c) Canlı servis, başka makinede aynı token'la bir kopya çalışırken yeniden başlarsa duran canlı servis olur
+  (yeni gelen odur): alarmı makine adıyla verir, systemd öbür kopya kapanana kadar yeniden dener.
 - Süreç kapalıyken gelen alert kaybolur (TradingView yeniden denemez). İzleyici, bir izleme penceresine denk gelen
   kapalı kalma süresini açılışta bildirir; heartbeat sessizliği ayrıca alarm üretir. Yeniden başlatmalar izlenen
   pencerelerin dışında yapılır.
 - Teslimat en az bir kez olduğu için, süreç tam gönderme anında ölürse aynı mesaj iki kez gelebilir; mesajda sinyal
   kimliği yazar.
 - Veritabanı büyür, budama yoktur (yılda birkaç MB). Şema sürümü değişirse eski dosya açılmaz; göç (migration) yoktur.
+  *(2026-11-16: şema sürümü 2 oldu — `signals.outcome` denetimine `skip_symbol` ve `skip_stop_too_tight` eklendi.
+  Sürüm 1 dosyası açılmaz; eski dosya yeniden adlandırılır, servis yenisini oluşturur: runbook §11.)*
 - Hız sınırı artık yabancı istekleri sınırlamaz; onları 4 KB gövde sınırı ve sabit maliyetli ret yolu sınırlar. Seçenek
   A'da ayrıca ufw ve Caddy yalnızca dört TradingView adresini geçirir.
 - `auto`, `approve` ve `paper` modları bu sürümde yoktur; emir yolu yazılmamıştır (ADR-0000).
