@@ -2,8 +2,8 @@
 
 Pine cannot be compiled or run here (the user does that in TradingView, see
 `docs/tv-verification-checklist.md`). These tests only read the source text and pin the
-few facts the Python side depends on: the strategy ids each script sends and that no two
-scripts share one.
+few facts the Python side depends on: the strategy ids each script sends, that no two
+scripts share one, and that the webhook token input is hidden from the chart.
 """
 
 import re
@@ -31,6 +31,7 @@ SENT_IDS: dict[str, set[str]] = {
 _LITERAL_ID = re.compile(r'"strategy_id":"([a-z0-9_]+)"')
 # `f_alert("master_ny_orb_fvg", ...)`: the Master script passes the id as the first argument.
 _ARGUMENT_ID = re.compile(r'\bf_alert\("([a-z0-9_]+)",\s*"(?:entry|stop_update|exit|cancel)"')
+_TOKEN_INPUT = re.compile(r"^alertToken\s*=\s*input\.string\(.*$", re.MULTILINE)
 
 
 def source(name: str) -> str:
@@ -72,6 +73,18 @@ def test_the_receiver_knows_every_id_a_script_sends_and_no_other() -> None:
     sent = set().union(*(sent_ids(name) for name in SENT_IDS))
 
     assert sent == set(STRATEGY_NAMES) | {HEARTBEAT_STRATEGY_ID}
+
+
+@pytest.mark.parametrize("name", sorted(SENT_IDS))
+def test_the_webhook_token_input_is_hidden_from_the_chart(name: str) -> None:
+    # User decision 45: with the default display the token is printed next to the script's
+    # name on the chart, so a screenshot or a shared chart would give it away.
+    (declaration,) = _TOKEN_INPUT.findall(source(name))
+
+    assert "display = display.none" in declaration
+    assert '"Webhook token"' in declaration
+    # The default stays empty: a token is never written into the source.
+    assert re.match(r'alertToken\s*=\s*input\.string\(""\s*,', declaration)
 
 
 @pytest.mark.parametrize("name", sorted(SENT_IDS))

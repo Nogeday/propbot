@@ -160,7 +160,7 @@ showSetupBg = input.bool(true,  "Shade background on forming setup", group = grp
 showLevels  = input.bool(true,  "Show active stop / target",       group = grpVis)
 
 // Alerts
-alertToken = input.string("", "Webhook token", group = grpAlert, tooltip = "Webhook-only random value (NOT a login or API key). Must match the receiver. Create ONE alert: condition = this strategy, 'alert() function calls only', webhook URL = receiver. Re-create the alert after changing any input.")
+alertToken = input.string("", "Webhook token", group = grpAlert, display = display.none, tooltip = "Webhook-only random value (NOT a login or API key). Must match the receiver. Create ONE alert: condition = this strategy, 'alert() function calls only', webhook URL = receiver. Re-create the alert after changing any input.")
 
 // ───────────────────────────── POSITION SIZING HELPER ─────────────────────────────
 // Risk base (SPEC §8.1): by default the STARTING balance, so the cash risk per trade neither

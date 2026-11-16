@@ -157,7 +157,7 @@ tablePos  = input.string("Bottom Right", "Table position", options = ["Bottom Ri
 tableSize = input.string("Small", "Table text size", options = ["Tiny", "Small", "Normal", "Large"], group = g_tbl)
 
 // Alerts
-alertToken = input.string("", "Webhook token", group = g_alert, tooltip = "Webhook-only random value (NOT a login or API key). Must match the receiver. Create ONE alert: condition = this strategy, 'alert() function calls only', webhook URL = receiver. Re-create the alert after changing any input.")
+alertToken = input.string("", "Webhook token", group = g_alert, display = display.none, tooltip = "Webhook-only random value (NOT a login or API key). Must match the receiver. Create ONE alert: condition = this strategy, 'alert() function calls only', webhook URL = receiver. Re-create the alert after changing any input.")
 
 // =====================================================================================
 //  MTF DATA  (non-repainting — see header)

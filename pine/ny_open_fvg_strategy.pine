@@ -154,7 +154,7 @@ boxProj    = input.int(40, "Entry box projection (bars)", minval = 1, group = gr
 fvgProj    = input.int(20, "FVG box projection (bars)",   minval = 1, group = grpVis)
 
 // Alerts
-alertToken = input.string("", "Webhook token", group = grpAlert, tooltip = "Webhook-only random value (NOT a login or API key). Must match the receiver. Create ONE alert: condition = this strategy, 'alert() function calls only', webhook URL = receiver. Re-create the alert after changing any input.")
+alertToken = input.string("", "Webhook token", group = grpAlert, display = display.none, tooltip = "Webhook-only random value (NOT a login or API key). Must match the receiver. Create ONE alert: condition = this strategy, 'alert() function calls only', webhook URL = receiver. Re-create the alert after changing any input.")
 
 // ───────────────────────────── STATE ─────────────────────────────
 var float orHigh = na
