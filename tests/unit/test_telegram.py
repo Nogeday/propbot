@@ -1273,7 +1273,7 @@ def test_an_entry_that_may_have_arrived_is_not_released_by_a_later_refusal() -> 
         assert h.row(message_id).status is OutboxStatus.FAILED
         assert h.counted(signal_id) == (True, None)
         assert h.fake.sent_texts()[-1] == uncertain_notice(
-            signal_id, "Telegram sonra kalıcı hata verdi: BadRequest"
+            signal_id, "gönderim kalıcı hatayla bitti: BadRequest"
         )
         assert not any("GÖNDERİLEMEDİ" in text for text in h.fake.sent_texts())
 
@@ -2184,10 +2184,73 @@ def test_a_poll_that_fails_although_every_update_builds_still_delivers_them(
         (delivered,) = await bot.get_updates(offset=0, timeout=10)
 
         assert delivered.update_id == update["update_id"]
-        assert seen.reports == [(0, True)]  # nothing skipped, but not explained either
+        # Nothing skipped, and the next poll confirms the batch: it cannot come back.
+        assert seen.reports == [(0, False)]
+        assert seen.sleeps == []
+
+    with_bot(scenario)
+
+
+def test_updates_in_hand_are_never_held_back_by_the_back_off() -> None:
+    # A stop during the wait would lose them: the updater's next call confirms them unhandled.
+    async def scenario(bot: ResilientBot, fake: FakeRequest, seen: Unparsed) -> None:
+        good = tg.private_update("/duraklat", sent_at_ms=NOW_MS)
+        nameless = unbuildable_update()
+        del nameless["update_id"]  # cannot be confirmed: it will come back
+        fake.script("getUpdates", tg.ok([good, nameless]), tg.ok([good, nameless]))
+
+        (delivered,) = await bot.get_updates(offset=0, timeout=10)
+
+        assert delivered.update_id == good["update_id"]
+        assert seen.reports == [(1, True)]
+        assert seen.sleeps == []  # handed out at once
+
+        # It comes back alone: now there is nothing to hand out, and polling slows down.
+        fake.script("getUpdates", tg.ok([nameless]), tg.ok([nameless]))
+        assert await bot.get_updates(offset=good["update_id"] + 1, timeout=10) == ()
         assert seen.sleeps == [1.0]
 
     with_bot(scenario)
+
+
+@pytest.mark.parametrize("timeout", [0, dt.timedelta(seconds=0), None])
+def test_a_short_poll_never_waits_even_when_polling_is_stuck(
+    timeout: int | dt.timedelta | None,
+) -> None:
+    # The updater's last call at shutdown is a short poll: a back-off there (up to 30 s)
+    # outlasts the service's shutdown grace.
+    async def scenario(bot: ResilientBot, fake: FakeRequest, seen: Unparsed) -> None:
+        for _ in range(4):
+            fake.script("getUpdates", tg.ok([unbuildable_update()]), tg.ok(True))
+            assert await bot.get_updates(offset=0, timeout=timeout) == ()
+
+        assert seen.reports == [(0, True)] * 4
+        assert seen.sleeps == []
+
+    with_bot(scenario)
+
+
+def test_a_stuck_service_still_stops_at_once() -> None:
+    # The state whose alarm tells the user to stop the service.
+    async def scenario(h: Harness) -> None:
+        async def never_a_list(call: tg.Call) -> tg.Response:
+            if call.params.get("timeout"):
+                return tg.ok([unbuildable_update()])  # the long poll: a batch that fails
+            return tg.ok(True)  # the salvage and the clean-up poll: nothing usable
+
+        h.fake.script("getUpdates", *([never_a_list] * 50))
+        stop = asyncio.Event()
+        task = asyncio.create_task(h.service.run(stop))
+        await until(lambda: STUCK_ALARM in h.fake.sent_texts())  # polling is backing off now
+        with capture_logs() as logs:
+            stop.set()
+            h.service.wake_sender()
+            # Well below the 2 s the clean-up poll would wait if it backed off as well.
+            await asyncio.wait_for(task, 1.5)
+        assert "telegram_stopped" in [entry["event"] for entry in logs]
+        assert h.fake.sent_texts().count(STUCK_ALARM) == 1
+
+    drive(scenario, polling=True)
 
 
 @pytest.mark.parametrize("failing_call", [1, 2], ids=["the_poll", "the_salvage_request"])

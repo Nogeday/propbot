@@ -159,7 +159,7 @@ def _after_permanent_failure(tx: Tx, row: OutboxRow, delivery: "_Delivery") -> N
             tx.enqueue_message(
                 kind=OutboxKind.NOTICE,
                 text=_uncertain_notice(
-                    row.signal_id, f"Telegram sonra kalıcı hata verdi: {delivery.error}"
+                    row.signal_id, f"gönderim kalıcı hatayla bitti: {delivery.error}"
                 ),
                 now_ms=delivery.at_ms,
             )
@@ -217,8 +217,10 @@ class ResilientBot(ExtBot[None]):
     Here such a batch is fetched once more as plain JSON and every update is built on its
     own. The ones that fail are dropped and counted, and the next poll confirms the whole
     batch to Telegram, so the commands around a bad update are still handled.
-    `on_unparsed(skipped, stuck)` is called each time; `stuck` means the failure could not
-    be worked around (polling then backs off instead of spinning). The callback must not
+    `on_unparsed(skipped, stuck)` is called each time; `stuck` means the batch could not be
+    confirmed as a whole, so the same failure may come straight back. Polling then backs
+    off instead of spinning, but only when it has nothing to hand out and only on a long
+    poll (the updater's last, short poll at shutdown never waits). The callback must not
     raise. Nothing about the updates themselves is kept or logged here.
     """
 
@@ -260,10 +262,12 @@ class ResilientBot(ExtBot[None]):
             self._resume_offset = None
             self._stuck_polls = 0
             return updates
-        return await self._salvage(offset, kwargs.get("allowed_updates"))
+        return await self._salvage(
+            offset, kwargs.get("allowed_updates"), long_poll=bool(kwargs.get("timeout"))
+        )
 
     async def _salvage(
-        self, offset: int | None, allowed_updates: Sequence[str] | None
+        self, offset: int | None, allowed_updates: Sequence[str] | None, *, long_poll: bool
     ) -> tuple[Update, ...]:
         """Build the pending updates one by one; skip, count and confirm the ones that fail."""
         raw: object = None
@@ -299,21 +303,24 @@ class ResilientBot(ExtBot[None]):
                 skipped += 1
         if highest is not None:
             self._resume_offset = highest + 1
-        # Worked around: we know which updates failed and the next poll confirms them all.
-        # Anything else (no list, an update without an id, a failure no single update
-        # explains) may repeat at once, so polling slows down instead of spinning.
-        stuck = not isinstance(raw, list) or skipped == 0 or unidentified > 0
+        # Worked around: every update of the batch has an id, so the next poll confirms them
+        # all and this batch cannot come back. Otherwise (no list, nothing at all, an update
+        # without an id) the same failure may repeat at once.
+        stuck = highest is None or unidentified > 0
         try:
             self._on_unparsed(skipped, stuck)
         except Exception as error:
             # An error leaving `get_updates` would make the updater poll again at once.
             _log.error("telegram_unparsed_callback_failed", error_type=type(error).__name__)
-        if stuck:
+        if not stuck:
+            self._stuck_polls = 0
+        elif long_poll and not built:
+            # Slow down instead of spinning. Never with updates in hand (a stop during the
+            # wait would lose them: the next call confirms them unhandled) and never on the
+            # updater's short clean-up poll at shutdown, which would be held up for nothing.
             delay_ms = _backoff_ms(self._stuck_polls)
             self._stuck_polls += 1
             await self._sleep(delay_ms / _SECOND_MS)
-        else:
-            self._stuck_polls = 0
         return tuple(built)
 
 
