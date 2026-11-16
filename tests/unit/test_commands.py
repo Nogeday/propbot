@@ -1086,6 +1086,22 @@ def test_replies_are_the_same_for_any_two_pins_outside_the_two_pin_commands(text
     assert replies[0] == replies[1]
 
 
+def test_a_number_of_the_bots_own_is_printed_even_when_it_equals_the_pin(
+    make: type[World],
+) -> None:
+    # Starring out "the PIN" wherever its digits appear would tell which number it is, and
+    # it turns into an oracle as soon as a reply repeats a number the user chose. Here the
+    # daily budget of a large account happens to be the PIN: the reply must not change.
+    venue = VENUE.model_copy(update={"initial_balance": 100_000_000.0})
+    world = make(venue=venue)
+    same_digits = Commands(dataclasses.replace(world.deps, pin="1000000"))
+
+    reply = same_digits.handle("/risk", sent_at_ms=NOW_MS)
+
+    assert "Günlük bütçe: $0/$1000000 kullanıldı" in reply.text
+    assert reply == world.commands.handle("/risk", sent_at_ms=NOW_MS)
+
+
 def test_an_id_that_equals_the_pin_is_not_echoed(world: World) -> None:
     assert world.say(f"/atladim {PIN}") == Reply(
         "id *** için bütçe kaydı yok (iletilmiş bir giriş sinyali değil).", delete_request=True
@@ -1249,6 +1265,23 @@ def test_atladim_does_not_guess_past_an_entry_that_may_have_been_delivered(
         "id 2 · Asian Sweep · LONG · bar 11:43 NY: $250"
     )
     assert world.counted(newer) == (False, ReleaseReason.SKIPPED)
+
+
+def test_atladim_takes_an_entry_that_was_delivered_on_a_retry(world: World) -> None:
+    # The first send timed out (the doubt flag is sticky), the retry went through: the
+    # message is on the user's screen, so it is the entry a bare /atladim means.
+    world.entry(delivered=True)
+    newer = world.entry(delivered=False, offset=13, strategy_id="asian_sweep")
+    message_id = signal_message_id(world, newer)
+    with world.store.transaction() as tx:
+        tx.mark_message_retry(
+            message_id, next_attempt_ms=NOW_MS + 1_000, error="TimedOut", uncertain=True
+        )
+        tx.mark_message_sent(message_id, NOW_MS + 1_200)
+
+    assert world.text("/atladim").startswith("id 2 · Asian Sweep · LONG · bar 11:43 NY: $250")
+    assert world.counted(newer) == (False, ReleaseReason.SKIPPED)
+    assert world.counted(1) == (True, None)
 
 
 def test_atladim_looks_past_an_unclear_entry_that_is_already_released(world: World) -> None:

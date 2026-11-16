@@ -1231,6 +1231,42 @@ def test_a_row_that_breaks_the_sender_itself_is_quarantined(
     drive(scenario)
 
 
+def test_an_entry_that_breaks_before_anything_is_sent_is_released_not_doubted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A failure of our own code while the message is prepared proves that nothing left.
+    real = telegram_module.code_entity_spans
+
+    def explode(text: str) -> list[tuple[int, int]]:
+        if text.startswith("[SİNYAL]"):
+            raise ValueError("cannot prepare this text")
+        return real(text)
+
+    monkeypatch.setattr(telegram_module, "code_entity_spans", explode)
+
+    async def scenario(h: Harness) -> None:
+        await h.first_step()
+        signal_id, message_id = tg.forwarded_entry(h.store, prop_day=TODAY, now_ms=NOW_MS)
+
+        assert await h.drain() == 2  # the entry is set aside, then the alarm goes out
+
+        row = h.row(message_id)
+        assert (row.status, row.last_error, row.delivery_uncertain) == (
+            OutboxStatus.FAILED,
+            "ValueError",
+            False,
+        )
+        assert h.counted(signal_id) == (False, ReleaseReason.UNDELIVERED)
+        assert h.fake.sent_texts() == [
+            f"[ALARM] Telegram sinyal id {signal_id} mesajı için kalıcı hata verdi (ValueError); "
+            "mesaj GÖNDERİLEMEDİ ve atlandı.\n"
+            "TradingView Alert Log'undan ne olduğunu kontrol et. Bu bir giriş sinyaliydi: ATLA "
+            "say; bütçeden düşüldü."
+        ]
+
+    drive(scenario)
+
+
 def test_an_entry_that_telegram_refuses_is_released_and_reported() -> None:
     async def scenario(h: Harness) -> None:
         await h.first_step()
