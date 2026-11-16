@@ -6,6 +6,7 @@ Exit codes: 0 success, 1 invalid config or input (or a service that stopped on a
 
 import argparse
 import datetime as dt
+import socket
 import sys
 from collections.abc import Sequence
 from contextlib import ExitStack
@@ -364,9 +365,11 @@ def _run_serve(args: argparse.Namespace, today: dt.date, out: TextIO) -> int:
     from propbot.signals.service import (
         ServiceError,
         ServiceParts,
+        bot_id_of,
         install_exception_logging,
         is_loopback_host,
         run_service,
+        single_bot_instance,
         single_instance,
     )
 
@@ -380,10 +383,16 @@ def _run_serve(args: argparse.Namespace, today: dt.date, out: TextIO) -> int:
     db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     # Before the banner and before the database is touched: a second copy changes nothing.
+    # One `serve` per database, and one per Telegram bot on this machine (a copy with its
+    # own --db and --port would still take the bot's commands).
     instance = ExitStack()
     try:
         instance.enter_context(single_instance(db_path.with_name(db_path.name + ".lock")))
+        instance.enter_context(
+            single_bot_instance(bot_id_of(settings.telegram_bot_token.get_secret_value()))
+        )
     except ServiceError as exc:
+        instance.close()
         raise ServeError(str(exc)) from None
     with instance:
         for line in _serve_banner(args, venue_name, venue, tv, today):
@@ -406,6 +415,7 @@ def _run_serve(args: argparse.Namespace, today: dt.date, out: TextIO) -> int:
                 venue_name=venue_name,
                 tv=tv,
                 store=store,
+                instance=socket.gethostname(),
             )
             try:
                 return run_service(parts, host=args.host, port=args.port)

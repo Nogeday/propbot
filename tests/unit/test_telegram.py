@@ -74,8 +74,26 @@ TV = load_tv_alerts_config(FIXTURES / "tv_alerts" / "valid" / "full.yaml")
 CONFLICT_ALARM = (
     "[ALARM] Aynı bot token'ıyla başka bir süreç güncelleme çekiyor. İki kopya çalışıyorsa "
     "birini durdur; değilse token sızmış olabilir: BotFather → /revoke, .env'i güncelle, "
-    "PIN'i değiştir."
+    "PIN'i değiştir.\n"
+    "Bu sırada gönderdiğin bir komut öbür sürece gitmiş olabilir: /durum ile kontrol et, "
+    "gerekirse komutu yeniden gönder."
 )
+# What a copy sends when it steps aside for one that was already polling (user decision 53).
+STEPPED_ASIDE_ALARM = (
+    "[ALARM] Bu PropBot kopyası (vps-1) kendini DURDURDU: aynı bot token'ıyla başka bir süreç "
+    "zaten güncelleme çekiyor. Bu kopya sinyal iletmiyor ve komut almıyor.\n"
+    "Hangisi çalışmalıysa öbürünü durdur; deneme kopyası için BotFather'dan ayrı bir bot aç. "
+    "Başka kopyan yoksa token sızmış olabilir: BotFather → /revoke, .env'i güncelle, PIN'i "
+    "değiştir.\n"
+    "Son bir dakikada gönderdiğin bir komut bu kopyaya gelmiş olabilir: çalışan kopyada /durum "
+    "ile kontrol et, gerekirse komutu yeniden gönder."
+)
+FATAL_CONFLICT = (
+    "Aynı Telegram bot token'ıyla başka bir süreç zaten güncelleme çekiyor; bu kopya "
+    "durduruluyor. Öbür kopyayı durdur ya da bu kopya için BotFather'dan ayrı bir bot aç "
+    "(docs/runbook.md §11)."
+)
+CONFLICT_409 = tg.error_response(409, "Conflict: terminated by other getUpdates request")
 DELETE_FAILED = "PIN içeren mesajı silemedim — elle sil ve PROPBOT_PIN'i değiştir."
 FATAL_TOKEN = (
     "Telegram bot token'ı reddedildi. TELEGRAM_BOT_TOKEN değerini BotFather'daki güncel "
@@ -106,8 +124,17 @@ class FakeClock:
 class Harness:
     """A service on an in-memory store and the offline transport. Build it inside the loop."""
 
-    def __init__(self, *, polling: bool = False, commands: Commands | None = None) -> None:
-        self.store = Store(":memory:")
+    def __init__(
+        self,
+        *,
+        polling: bool = False,
+        commands: Commands | None = None,
+        store: Store | None = None,
+    ) -> None:
+        # A store handed in belongs to the test (it outlives this harness, as a database
+        # file outlives a process).
+        self._owns_store = store is None
+        self.store = Store(":memory:") if store is None else store
         self.clock = FakeClock()
         self.fake = FakeRequest()
         self.commands = commands or Commands(
@@ -133,6 +160,7 @@ class Harness:
             request=self.fake,
             get_updates_request=self.fake,
             polling=polling,
+            instance="vps-1",
         )
 
     @property
@@ -144,7 +172,8 @@ class Harness:
             await self.app.stop()
         await self.app.shutdown()
         await self.app.bot.shutdown()
-        self.store.close()
+        if self._owns_store:
+            self.store.close()
 
     # -- driving -----------------------------------------------------------------------------
 
@@ -1849,9 +1878,9 @@ def test_an_unreadable_pause_flag_counts_as_set() -> None:
 # --- fatal: the token ---------------------------------------------------------------------
 
 
-def _assert_token_free(error: BaseException) -> None:
+def _assert_token_free(error: BaseException, text: str = FATAL_TOKEN) -> None:
     assert type(error) is TelegramFatalError
-    assert str(error) == FATAL_TOKEN
+    assert str(error) == text
     assert error.__cause__ is None
     assert error.__context__ is None
     rendered = "".join(traceback.format_exception(error)) + repr(error) + repr(error.args)
@@ -2582,21 +2611,172 @@ def test_run_keeps_retrying_while_telegram_is_down_at_start_up(
     drive(scenario, polling=True)
 
 
-def test_a_conflict_seen_by_real_polling_reaches_the_user() -> None:
+async def polling_for(h: Harness, stop: asyncio.Event) -> asyncio.Task[None]:
+    """Start `run` and wait until the first long poll is open (it then waits for an update)."""
+    task = asyncio.create_task(h.service.run(stop))
+    await until(lambda: len(h.fake.calls_to("getUpdates")) >= 1)
+    return task
+
+
+def test_a_conflict_long_after_the_start_reaches_the_user_and_polling_goes_on() -> None:
+    # This process has been polling for more than a minute: the OTHER one is the newcomer.
     async def scenario(h: Harness) -> None:
-        h.fake.script(
-            "getUpdates", tg.error_response(409, "Conflict: terminated by other getUpdates")
-        )
         stop = asyncio.Event()
-        task = asyncio.create_task(h.service.run(stop))
+        task = await polling_for(h, stop)
         try:
+            h.clock.now_ms += telegram_module.STARTUP_CONFLICT_WINDOW_MS + 1
+            h.fake.script("getUpdates", CONFLICT_409)
+            h.fake.push_update(tg.private_update("/mod", sent_at_ms=h.clock.now_ms))
             await until(lambda: CONFLICT_ALARM in h.fake.sent_texts())
+            assert not task.done()
+            # Still the bot's poller: a command typed afterwards is answered.
+            h.fake.push_update(tg.private_update("/mod", sent_at_ms=h.clock.now_ms))
+            await until(lambda: len(h.fake.sent_texts()) >= 3, timeout=10)
         finally:
             stop.set()
             await asyncio.wait_for(task, 5)
-        assert h.outbox() == [(OutboxKind.ALARM, OutboxStatus.SENT, CONFLICT_ALARM)]
+        assert (OutboxKind.ALARM, OutboxStatus.SENT, CONFLICT_ALARM) in h.outbox()
+        assert STEPPED_ASIDE_ALARM not in h.fake.sent_texts()
 
     drive(scenario, polling=True)
+
+
+def test_a_conflict_right_after_the_start_ends_this_copy_and_tells_the_user() -> None:
+    # User decision 53: another process was polling first. Two pollers share the commands
+    # at random, so the one that has only just started stops, and says so.
+    async def scenario(h: Harness) -> TelegramFatalError:
+        h.fake.script("getUpdates", CONFLICT_409)
+        with capture_logs() as logs, pytest.raises(TelegramFatalError) as caught:
+            await asyncio.wait_for(h.service.run(asyncio.Event()), 5)
+        assert str(caught.value) == FATAL_CONFLICT
+        assert h.outbox() == [(OutboxKind.ALARM, OutboxStatus.SENT, STEPPED_ASIDE_ALARM)]
+        assert h.fake.sent_texts() == [STEPPED_ASIDE_ALARM]
+        # Polling stopped at the first Conflict: no second long poll was opened. (The
+        # library's own stop sends one last request with timeout 0, which only confirms
+        # what THIS process had already handled: nothing here.)
+        assert [call["timeout"] for call in h.fake.calls_to("getUpdates")] == [10, 0]
+        assert {call["offset"] for call in h.fake.calls_to("getUpdates")} == {0}
+        assert not h.app.running
+        events = [entry["event"] for entry in logs]
+        assert "telegram_conflict_at_start" in events
+        assert "telegram_polling_stopped" not in events  # not mistaken for a dead poller
+        assert BOT_TOKEN not in repr(logs)
+        return caught.value
+
+    # The library's Conflict text ("... make sure that only one bot instance is running")
+    # is not carried along either: the error has neither a cause nor a context.
+    _assert_token_free(drive(scenario, polling=True), FATAL_CONFLICT)
+
+
+@pytest.mark.parametrize(
+    ("elapsed_ms", "leaves"),
+    [
+        (0, True),
+        (telegram_module.STARTUP_CONFLICT_WINDOW_MS, True),
+        (telegram_module.STARTUP_CONFLICT_WINDOW_MS + 1, False),
+        (-5 * MINUTE_MS, True),  # the clock went backwards: in doubt this copy stops
+    ],
+)
+def test_the_start_up_window_is_one_minute_from_the_start_of_polling(
+    elapsed_ms: int, leaves: bool
+) -> None:
+    async def scenario(h: Harness) -> None:
+        stop = asyncio.Event()
+        task = await polling_for(h, stop)
+        h.clock.now_ms += elapsed_ms
+        h.fake.script("getUpdates", CONFLICT_409)
+        h.fake.push_update(tg.private_update("/mod", sent_at_ms=h.clock.now_ms))
+        if leaves:
+            with pytest.raises(TelegramFatalError, match="başka bir süreç zaten güncelleme"):
+                await asyncio.wait_for(task, 5)
+            assert STEPPED_ASIDE_ALARM in h.fake.sent_texts()
+            assert CONFLICT_ALARM not in h.fake.sent_texts()
+        else:
+            await until(lambda: CONFLICT_ALARM in h.fake.sent_texts())
+            assert not task.done()
+            stop.set()
+            await asyncio.wait_for(task, 5)
+
+    drive(scenario, polling=True)
+
+
+def test_a_copy_that_steps_aside_takes_no_further_command() -> None:
+    async def scenario(h: Harness) -> None:
+        h.fake.script("getUpdates", CONFLICT_409)
+        # Waiting on Telegram's side for whoever polls next: it must not be this copy.
+        h.fake.push_update(tg.private_update(f"/kill {PIN}", sent_at_ms=h.clock.now_ms))
+        with pytest.raises(TelegramFatalError):
+            await asyncio.wait_for(h.service.run(asyncio.Event()), 5)
+        assert h.flag(StateKey.KILLED) is None
+        assert h.fake.calls_to("deleteMessage") == []
+        assert h.fake.sent_texts() == [STEPPED_ASIDE_ALARM]
+
+    drive(scenario, polling=True)
+
+
+def test_a_copy_that_steps_aside_still_delivers_what_was_waiting() -> None:
+    # The outbox is a FIFO: a stop update whose first attempt failed is tried again before
+    # the alarm goes out, although its retry was not due yet.
+    async def scenario(h: Harness) -> None:
+        waiting = h.enqueue("[STOP GÜNCELLE] bekleyen mesaj", kind=OutboxKind.SIGNAL)
+        h.fake.script("sendMessage", NetworkError("down"))
+        h.fake.script("getUpdates", CONFLICT_409)
+        with pytest.raises(TelegramFatalError):
+            await asyncio.wait_for(h.service.run(asyncio.Event()), 5)
+        assert h.fake.sent_texts() == [
+            "[STOP GÜNCELLE] bekleyen mesaj",  # failed
+            "[STOP GÜNCELLE] bekleyen mesaj",
+            STEPPED_ASIDE_ALARM,
+        ]
+        assert h.row(waiting).status is OutboxStatus.SENT
+
+    drive(scenario, polling=True)
+
+
+def test_an_alarm_that_cannot_leave_stays_in_the_outbox_for_the_next_start() -> None:
+    async def scenario(h: Harness) -> None:
+        h.fake.script("getUpdates", CONFLICT_409)
+        h.fake.script("sendMessage", NetworkError("down"), NetworkError("still down"))
+        with pytest.raises(TelegramFatalError, match="başka bir süreç zaten güncelleme"):
+            await asyncio.wait_for(h.service.run(asyncio.Event()), 5)
+        # One attempt, then the copy ends: it does not hang on to a network that is down.
+        assert h.fake.sent_texts() == [STEPPED_ASIDE_ALARM]
+        assert h.outbox() == [(OutboxKind.ALARM, OutboxStatus.PENDING, STEPPED_ASIDE_ALARM)]
+
+    drive(scenario, polling=True)
+
+
+def test_a_restart_loop_tells_the_user_once_an_hour() -> None:
+    # Under a supervisor the copy comes back every few seconds and leaves again. The alarm
+    # is throttled by the store, which outlives the process.
+    sent: list[list[str]] = []
+
+    async def one_start(h: Harness) -> None:
+        h.clock.now_ms = NOW_MS + len(sent) * 10_000
+        h.fake.script("getUpdates", CONFLICT_409)
+        with pytest.raises(TelegramFatalError, match="başka bir süreç zaten güncelleme"):
+            await asyncio.wait_for(h.service.run(asyncio.Event()), 5)
+        sent.append(h.fake.sent_texts())
+
+    with Store(":memory:") as store:
+        for _ in range(3):
+            drive(one_start, polling=True, store=store)
+        # An hour after the first alarm the next start may say it again.
+        sent.extend([[]] * (360 - len(sent)))  # 360 starts, 10 s apart = 60 min
+        drive(one_start, polling=True, store=store)
+
+    assert sent[:3] == [[STEPPED_ASIDE_ALARM], [], []]
+    assert sent[-1] == [STEPPED_ASIDE_ALARM]
+
+
+def test_the_stepped_aside_alarm_names_the_copy_only_when_it_has_a_name() -> None:
+    assert telegram_module.startup_conflict_alarm_text("vps-1") == STEPPED_ASIDE_ALARM
+    assert telegram_module.startup_conflict_alarm_text("").startswith(
+        "[ALARM] Bu PropBot kopyası kendini DURDURDU: "
+    )
+    # Tapping a command in this alarm must not act on the wrong copy: /durum only reads.
+    spans = code_entity_spans(STEPPED_ASIDE_ALARM)
+    assert [STEPPED_ASIDE_ALARM[start : start + length] for start, length in spans] == []
 
 
 def test_polling_that_dies_of_a_rejected_token_ends_run_with_the_fatal_error() -> None:

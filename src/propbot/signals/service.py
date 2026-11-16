@@ -14,6 +14,7 @@ Nothing here can place, change or cancel an order: the mode is `signal` (ADR-000
 """
 
 import asyncio
+import errno
 import fcntl
 import ipaddress
 import os
@@ -71,6 +72,8 @@ class ServiceParts:
     telegram_request: BaseRequest | None = None
     telegram_updates_request: BaseRequest | None = None
     polling: bool = True
+    # Names this copy in the alarm it sends when it steps aside for another one.
+    instance: str = ""
 
 
 class Service:
@@ -113,6 +116,7 @@ class Service:
             request=parts.telegram_request,
             get_updates_request=parts.telegram_updates_request,
             polling=parts.polling,
+            instance=parts.instance,
         )
         self.app = create_app(
             ReceiverDeps(
@@ -299,6 +303,50 @@ def single_instance(lock_path: Path) -> Iterator[None]:
         yield
     finally:
         os.close(descriptor)
+
+
+def bot_id_of(bot_token: str) -> str:
+    """The bot's numeric id: the part of the token before the colon. Public, not a secret."""
+    return bot_token.partition(":")[0]
+
+
+@contextmanager
+def single_bot_instance(bot_id: str) -> Iterator[None]:
+    """Hold a machine-wide lock for one Telegram bot: one `serve` per bot on this host.
+
+    Two processes polling with the same token share the bot's updates at random: a /kill
+    may reach the copy that is not the one forwarding signals. The database lock does not
+    see this (a trial copy has its own `--db`), so the bot itself is locked.
+
+    The lock is a socket bound to a name in Linux's abstract namespace: no file, nothing
+    to clean up, released by the kernel when the process ends however it ends, and not
+    affected by the unit's `PrivateTmp` or `ProtectSystem`. It reaches as far as the
+    network namespace: a copy in a container or on another machine is caught by the
+    Conflict rule of the Telegram service instead.
+    """
+    if not bot_id.isascii() or not bot_id.isdigit():
+        # Never built from anything but the validated token; a broken id must not lock
+        # under a name of its own.
+        raise ServiceError("Telegram bot kimliği okunamadı (token '<rakamlar>:<...>' olmalı)")
+    lock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        try:
+            lock.bind(f"\0propbot-telegram-bot-{bot_id}")
+        except OSError as error:
+            if error.errno == errno.EADDRINUSE:
+                raise ServiceError(
+                    "bu Telegram botuyla çalışan başka bir `propbot serve` var (aynı "
+                    "TELEGRAM_BOT_TOKEN). İki kopya botun komutlarını rastgele paylaşır: "
+                    "önce öbürünü durdur ya da bu kopya için BotFather'dan ayrı bir bot aç "
+                    "(docs/runbook.md §4)"
+                ) from None
+            raise ServiceError(
+                "Telegram bot kilidi alınamadı "
+                f"({error.strerror or type(error).__name__}); bu koruma Linux'a özgüdür"
+            ) from None
+        yield
+    finally:
+        lock.close()
 
 
 def bind_listener(host: str, port: int) -> socket.socket:

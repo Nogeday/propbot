@@ -11,6 +11,8 @@ import dataclasses
 import datetime as dt
 import json
 import socket
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -32,8 +34,10 @@ from propbot.signals.service import (
     ServiceError,
     ServiceParts,
     bind_listener,
+    bot_id_of,
     is_loopback_host,
     run_service,
+    single_bot_instance,
     single_instance,
     uvicorn_config,
 )
@@ -614,6 +618,96 @@ def test_one_database_runs_one_service(tmp_path: Path) -> None:
     # Released with the first instance; a lock file left behind does not block a start.
     with single_instance(lock_path):
         assert lock_path.exists()
+
+
+# --- one service per Telegram bot on this machine (user decision 53) -------------------------
+
+# A made-up bot id, unlikely to belong to anything that runs on the machine of the tests.
+LOCK_BOT_ID = "7999000111"
+HOLD_THE_BOT = (
+    "import sys, time\n"
+    "from propbot.signals.service import single_bot_instance\n"
+    "with single_bot_instance(sys.argv[1]):\n"
+    "    print('locked', flush=True)\n"
+    "    time.sleep(60)\n"
+)
+
+
+def test_the_bot_id_is_the_public_part_of_the_token() -> None:
+    assert bot_id_of("7999000111:AAF-fake_bot_key_0123456789abcdefghi") == "7999000111"
+
+
+def test_one_bot_runs_one_service_on_this_machine() -> None:
+    with single_bot_instance(LOCK_BOT_ID):
+        with (
+            pytest.raises(ServiceError, match="bu Telegram botuyla çalışan başka bir") as caught,
+            single_bot_instance(LOCK_BOT_ID),
+        ):
+            raise AssertionError("a second instance got the bot")
+        assert LOCK_BOT_ID not in str(caught.value)
+        # Another bot is another lock: a trial copy with a bot of its own may run.
+        with single_bot_instance("7999000112"):
+            pass
+
+    # Released with the first instance: nothing is left behind to clean up.
+    with single_bot_instance(LOCK_BOT_ID):
+        pass
+
+
+def test_the_bot_lock_holds_between_processes_and_ends_with_its_process() -> None:
+    # The copy that runs is another process (the systemd service, say); and it may die
+    # without any clean-up at all.
+    holder = subprocess.Popen(
+        [sys.executable, "-c", HOLD_THE_BOT, LOCK_BOT_ID], stdout=subprocess.PIPE, text=True
+    )
+    try:
+        assert holder.stdout is not None
+        assert holder.stdout.readline().strip() == "locked"
+        with (
+            pytest.raises(ServiceError, match="bu Telegram botuyla çalışan başka bir"),
+            single_bot_instance(LOCK_BOT_ID),
+        ):
+            raise AssertionError("the bot was taken while another process held it")
+        holder.kill()  # SIGKILL: no handler, no `finally`
+        holder.wait(timeout=10)
+        with single_bot_instance(LOCK_BOT_ID):
+            pass
+    finally:
+        holder.kill()
+        holder.wait(timeout=10)
+        if holder.stdout is not None:
+            holder.stdout.close()
+
+
+@pytest.mark.parametrize("bot_id", ["", "12a", "12 3", "-5", "１２３", "7999000111:AAF"])
+def test_a_bot_id_that_is_not_a_number_locks_nothing(bot_id: str) -> None:
+    with (
+        pytest.raises(ServiceError, match="Telegram bot kimliği okunamadı") as caught,
+        single_bot_instance(bot_id),
+    ):
+        raise AssertionError("a lock was taken under a malformed name")
+    assert "AAF" not in str(caught.value)
+
+
+def test_the_bot_lock_leaves_no_file_behind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An abstract socket name: not in the working directory, not under /tmp (which the
+    # systemd unit replaces with a private one that a hand-started copy could not see).
+    monkeypatch.chdir(tmp_path)
+
+    with single_bot_instance(LOCK_BOT_ID):
+        assert list(tmp_path.iterdir()) == []
+        names = Path("/proc/net/unix").read_text(encoding="utf-8")
+        assert f"@propbot-telegram-bot-{LOCK_BOT_ID}" in names
+
+
+def test_the_service_hands_its_instance_name_to_the_telegram_service(tmp_path: Path) -> None:
+    with Store(tmp_path / "propbot.db") as store:
+        parts = dataclasses.replace(service_parts(store, tg.FakeRequest()), instance="vps-1")
+        service = Service(parts)
+
+    assert service.telegram._instance == "vps-1"
 
 
 def test_uvicorn_leaves_the_peer_address_and_the_logging_alone() -> None:

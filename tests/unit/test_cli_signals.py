@@ -8,6 +8,7 @@ import sys
 import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 import structlog
@@ -15,7 +16,7 @@ import structlog
 from propbot.cli import main, run_config_check
 from propbot.logging_setup import reset_logging
 from propbot.signals.report import CSV_HEADER
-from propbot.signals.service import ServiceError, single_instance
+from propbot.signals.service import ServiceError, single_bot_instance, single_instance
 from propbot.store.db import NewSignal, Outcome, Store
 from support.paths import CONFIG_DIR, CONFIG_FIXTURES, FIXTURES
 
@@ -427,6 +428,7 @@ BOT_TOKEN = "7000000001:AAF-fake_bot_key_0123456789abcdefghi"
 WEBHOOK_TOKEN = "wh_0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ_abc"
 PIN = "975310"
 THREE_SECRETS = (BOT_TOKEN, WEBHOOK_TOKEN, PIN)
+BOT_ID = "7000000001"  # the public part of BOT_TOKEN: what the machine-wide bot lock is named after
 SERVE_ENVIRONMENT = {
     "TELEGRAM_BOT_TOKEN": BOT_TOKEN,
     "TELEGRAM_ALLOWED_CHAT_ID": "4242",
@@ -561,6 +563,80 @@ def test_serve_holds_the_database_lock_for_as_long_as_the_service_runs(
     # Released when the service ended.
     with single_instance(lock_path):
         pass
+
+
+def test_a_second_serve_with_the_same_bot_is_refused_whatever_its_database(
+    serve: Callable[[ServiceStandIn], int], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # User decision 53: a trial copy with its own --db and --port would still take the
+    # bot's commands; a /kill could land on it instead of the copy that forwards signals.
+    started: list[object] = []
+    lock_path = tmp_path / "data" / "propbot.db.lock"
+
+    with single_bot_instance(BOT_ID):  # the copy that is running, on another database
+        code = serve(lambda parts, **_kwargs: started.append(parts) or 0)
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert captured.err.startswith(
+        "HATA: bu Telegram botuyla çalışan başka bir `propbot serve` var"
+    )
+    assert "docs/runbook.md §4" in captured.err
+    assert captured.out == ""  # no banner
+    assert started == []
+    assert not (tmp_path / "data" / "propbot.db").exists()
+    for secret in (*THREE_SECRETS, BOT_ID):
+        assert secret not in captured.err
+    # The database lock taken a moment earlier was given back.
+    with single_instance(lock_path):
+        pass
+
+
+def test_serve_holds_the_bot_lock_for_as_long_as_the_service_runs(
+    serve: Callable[[ServiceStandIn], int],
+) -> None:
+    refused: list[str] = []
+
+    def service(_parts: object, *, host: str, port: int) -> int:
+        # What a second copy with the same token would try while this one is serving.
+        try:
+            with single_bot_instance(BOT_ID):
+                refused.append("a second instance got the bot")
+        except ServiceError as error:
+            refused.append(str(error))
+        return 0
+
+    assert serve(service) == 0
+
+    assert len(refused) == 1
+    assert refused[0].startswith("bu Telegram botuyla çalışan başka bir `propbot serve` var")
+    # Released when the service ended.
+    with single_bot_instance(BOT_ID):
+        pass
+
+
+def test_a_copy_refused_for_its_database_does_not_keep_the_bot(
+    serve: Callable[[ServiceStandIn], int], tmp_path: Path
+) -> None:
+    (tmp_path / "data").mkdir()
+
+    with single_instance(tmp_path / "data" / "propbot.db.lock"):
+        assert serve(lambda _parts, **_kwargs: 0) == 1
+
+    with single_bot_instance(BOT_ID):
+        pass
+
+
+def test_serve_names_the_copy_after_its_host(
+    serve: Callable[[ServiceStandIn], int], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The name goes into the alarm of a copy that steps aside for another one.
+    monkeypatch.setattr("socket.gethostname", lambda: "vps-frankfurt")
+    seen: list[Any] = []
+
+    assert serve(lambda parts, **_kwargs: seen.append(parts) or 0) == 0
+
+    assert [parts.instance for parts in seen] == ["vps-frankfurt"]
 
 
 def test_serve_gives_the_service_its_settings_and_a_loopback_address(

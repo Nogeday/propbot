@@ -84,6 +84,12 @@ _MAX_BACKOFF_MS: Final = 30 * _SECOND_MS
 _MAX_BACKOFF_EXPONENT: Final = 5
 _LOG_THROTTLE_MS: Final = 10 * _SECOND_MS
 _CONFLICT_ALARM: Final = ("telegram_conflict", 60 * _MINUTE_MS)
+# A Conflict this soon after this process began to poll means it is the newcomer: the other
+# process was there first. The newcomer stops (user decision 53).
+STARTUP_CONFLICT_WINDOW_MS: Final = 60 * _SECOND_MS
+_STARTUP_CONFLICT_ALARM: Final = ("telegram_conflict_exit", 60 * _MINUTE_MS)
+# Sender steps a stopping newcomer still takes, so that its alarm leaves before it ends.
+_FAREWELL_STEPS: Final = 5
 _SKIPPED_ALARM: Final = ("telegram_update_skipped", 60 * _MINUTE_MS)
 _STUCK_ALARM: Final = ("telegram_updates_stuck", 60 * _MINUTE_MS)
 # The Bot API returns at most this many updates per call.
@@ -129,10 +135,17 @@ _FATAL_POLLING: Final = (
     "Telegram güncelleme döngüsü beklenmedik biçimde durdu; servis durduruluyor "
     "(yeniden başlatılmalı)."
 )
+_FATAL_CONFLICT: Final = (
+    "Aynı Telegram bot token'ıyla başka bir süreç zaten güncelleme çekiyor; bu kopya "
+    "durduruluyor. Öbür kopyayı durdur ya da bu kopya için BotFather'dan ayrı bir bot aç "
+    "(docs/runbook.md §11)."
+)
 _CONFLICT_ALARM_TEXT: Final = (
     "[ALARM] Aynı bot token'ıyla başka bir süreç güncelleme çekiyor. İki kopya çalışıyorsa "
     "birini durdur; değilse token sızmış olabilir: BotFather → /revoke, .env'i güncelle, "
-    "PIN'i değiştir."
+    "PIN'i değiştir.\n"
+    "Bu sırada gönderdiğin bir komut öbür sürece gitmiş olabilir: /durum ile kontrol et, "
+    "gerekirse komutu yeniden gönder."
 )
 _DELETE_FAILED_TEXT: Final = "PIN içeren mesajı silemedim — elle sil ve PROPBOT_PIN'i değiştir."
 _STUCK_ALARM_TEXT: Final = (
@@ -197,6 +210,20 @@ class TelegramFatalError(Exception):
 
     The message is one of this module's constants: never library text, never the token.
     """
+
+
+def startup_conflict_alarm_text(instance: str) -> str:
+    """What a copy that steps aside tells the user; `instance` names it (the host name)."""
+    name = f" ({instance})" if instance else ""
+    return (
+        f"[ALARM] Bu PropBot kopyası{name} kendini DURDURDU: aynı bot token'ıyla başka bir "
+        "süreç zaten güncelleme çekiyor. Bu kopya sinyal iletmiyor ve komut almıyor.\n"
+        "Hangisi çalışmalıysa öbürünü durdur; deneme kopyası için BotFather'dan ayrı bir bot "
+        "aç. Başka kopyan yoksa token sızmış olabilir: BotFather → /revoke, .env'i güncelle, "
+        "PIN'i değiştir.\n"
+        "Son bir dakikada gönderdiğin bir komut bu kopyaya gelmiş olabilir: çalışan kopyada "
+        "/durum ile kontrol et, gerekirse komutu yeniden gönder."
+    )
 
 
 def _skipped_alarm_text(skipped: int) -> str:
@@ -491,6 +518,7 @@ class TelegramService:
         request: BaseRequest | None = None,
         get_updates_request: BaseRequest | None = None,
         polling: bool = True,
+        instance: str = "",
     ) -> None:
         if allowed_chat_id <= 0:
             # Groups and channels have negative ids: signals go to one private chat only.
@@ -503,6 +531,7 @@ class TelegramService:
         self._clock: Final = clock
         self._validity_ms: Final = validity_seconds * _SECOND_MS
         self._polling: Final = polling
+        self._instance: Final = instance
 
         application: Application[Any, Any, Any, Any, Any, Any] | None = None
         with suppress(InvalidToken):
@@ -537,6 +566,8 @@ class TelegramService:
         self._connect_failures = 0
         self._next_connect_ms = 0
         self._polling_task: asyncio.Task[Any] | None = None
+        self._polling_started_ms: int | None = None
+        self._startup_conflict = False  # another process polls and this one has just begun
         self._stopping = False
 
         self._alarm_sent_ms: Final[dict[str, int]] = {}  # polling alarms, by code
@@ -573,7 +604,8 @@ class TelegramService:
     async def run(self, stop: asyncio.Event) -> None:
         """Connect (retrying while the network is down), poll and send until `stop` is set.
 
-        Ends with `TelegramFatalError` when the token is rejected or polling died, and with
+        Ends with `TelegramFatalError` when the token is rejected, polling died or another
+        process was already polling with this token when this one started, and with
         `StoreError` when the database fails; everything else is retried or skipped.
         """
         try:
@@ -583,6 +615,8 @@ class TelegramService:
                     break  # do not start polling for a service that is already stopping
                 await self._ensure_started()
                 self._check_polling()
+                if self._startup_conflict:
+                    await self._step_aside()
                 self._raise_if_fatal()
                 if not did_something:
                     await self._idle(stop)
@@ -889,6 +923,12 @@ class TelegramService:
             )
         if not isinstance(error, Conflict):
             return  # python-telegram-bot retries with its own back-off
+        started_ms = self._polling_started_ms
+        # A clock that went backwards counts as "just started": in doubt this copy stops.
+        if started_ms is not None and now_ms - started_ms <= STARTUP_CONFLICT_WINDOW_MS:
+            self._startup_conflict = True  # `run` stops polling and ends the service
+            self._wake.set()
+            return
         self._polling_alarm(_CONFLICT_ALARM, _CONFLICT_ALARM_TEXT, now_ms)
 
     def _on_unparsed_updates(self, skipped: int, stuck: bool) -> None:
@@ -937,6 +977,36 @@ class TelegramService:
             return
         if enqueued:
             self.wake_sender()
+
+    async def _step_aside(self) -> None:
+        """End this copy: another process was already polling with the same bot token.
+
+        Two pollers share the bot's updates at random, so a /kill could reach the wrong
+        one. The copy that has only just started is the one that leaves; the other keeps
+        the bot (it raises `_CONFLICT_ALARM` on its side). Polling stops first, so nothing
+        more is taken from the other process; then the user is told which copy stopped.
+        The store throttles that alarm across the restarts a supervisor may attempt.
+        """
+        _log.critical("telegram_conflict_at_start", window_ms=STARTUP_CONFLICT_WINDOW_MS)
+        updater = self.application.updater
+        if updater is not None and updater.running:
+            try:
+                await self._stop_updater()
+            except Exception as error:
+                # The type only, as in `_shutdown`: the text may quote the token.
+                _log.warning(
+                    "telegram_shutdown_step_failed",
+                    step="updater_stop",
+                    error_type=type(error).__name__,
+                )
+        self._polling_task = None
+        await self._enqueue_alarm(
+            _STARTUP_CONFLICT_ALARM, startup_conflict_alarm_text(self._instance), self._clock()
+        )
+        for _ in range(_FAREWELL_STEPS):
+            if not await self._step():
+                break
+        self._fatal_reason = _FATAL_CONFLICT
 
     def _check_polling(self) -> None:
         task = self._polling_task
@@ -995,6 +1065,8 @@ class TelegramService:
             if not application.running:
                 await application.start()
             if self._polling and updater is not None and not updater.running:
+                # Set before the first request: a Conflict may be reported at once.
+                self._polling_started_ms = self._clock()
                 # Commands typed while the bot was down are processed (never dropped);
                 # `Commands` refuses the ones that are unsafe when old.
                 await updater.start_polling(
