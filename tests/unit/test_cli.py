@@ -100,6 +100,17 @@ def test_config_check_on_a_fully_resolved_profile() -> None:
     assert "KİLİTLİ" not in out
 
 
+def test_config_check_shows_the_signal_filter_of_every_venue() -> None:
+    code, out = check(CONFIG_FIXTURES / "valid")
+
+    assert code == 0
+    assert (
+        "Sinyal süzgeci (venue profili: signal):\n"
+        "  [sample_2step] giriş yalnızca şu TradingView sembollerinden (2): CME_MINI:MES1!, "
+        "CME_MINI:ES1! · asgari stop 1.5 puan\n"
+    ) in out
+
+
 def test_config_check_flags_stale_rules_but_stays_valid() -> None:
     code, out = check(CONFIG_FIXTURES / "valid", today=dt.date(2026, 12, 2))
 

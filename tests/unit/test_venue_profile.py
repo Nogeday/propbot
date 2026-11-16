@@ -20,7 +20,10 @@ from propbot.risk import (
     rules_freshness,
     unresolved_fields,
 )
+from propbot.risk import venue as venue_module
 from propbot.risk.loader import read_yaml_mapping
+from propbot.risk.venue import MAX_TV_SYMBOLS
+from propbot.signals import schema as alert_schema
 from support.paths import CONFIG_DIR, CONFIG_FIXTURES
 
 REAL = CONFIG_DIR / "venues" / "ftmo_2step_100k.yaml"
@@ -54,6 +57,13 @@ MUST_FAIL: dict[str, tuple[str, str]] = {
     "currency_not_iso": ("account_currency", "biçim uymuyor"),
     "contract_negative": ("contract.tick_size", "0.0 değerinden büyük olmalı"),
     "unknown_key": ("leverage", "bilinmeyen anahtar"),
+    "signal_section_missing": ("signal", "zorunlu alan eksik"),
+    "tv_symbols_empty": ("signal.tv_symbols", "en az bir sembol içermeli"),
+    "tv_symbols_duplicate": ("signal.tv_symbols", "yinelenen sembol: CME_MINI:MES1!"),
+    "tv_symbol_with_space": ("signal.tv_symbols.1", "okunan: 'CME_MINI: ES1!'"),
+    "tv_symbols_not_a_list": ("signal.tv_symbols", "liste olmalı"),
+    "min_stop_points_zero": ("signal.min_stop_points", "0.0 değerinden büyük olmalı"),
+    "min_stop_points_null": ("signal.min_stop_points", "boş (null) bırakılamaz"),
 }
 
 
@@ -130,6 +140,106 @@ def test_invalid_venue_file_is_rejected(stem: str, location: str, fragment: str)
 
     issues = excinfo.value.issues
     assert any(i.location == location and fragment in i.message for i in issues), issues
+
+
+# --- the bot's own entry filters: signal.tv_symbols and signal.min_stop_points ---------------
+
+
+def test_real_profile_carries_a_usable_signal_filter() -> None:
+    venue = load_venue_profile(REAL)
+
+    assert venue.signal.tv_symbols
+    assert len(set(venue.signal.tv_symbols)) == len(venue.signal.tv_symbols)
+    # Every listed symbol must be one the webhook receiver lets in.
+    assert all(alert_schema._SYMBOL.fullmatch(symbol) for symbol in venue.signal.tv_symbols)
+    # User decision 33 (2026-11-16); changing it needs a written reason (docs/adr/0006).
+    assert venue.signal.min_stop_points == 1.5
+
+
+def test_tv_symbols_have_the_shape_the_alert_schema_accepts() -> None:
+    # Two layers, one rule: a listed symbol the receiver refuses could never match.
+    assert venue_module._TV_SYMBOL.pattern == alert_schema._SYMBOL.pattern
+
+
+def test_tv_symbols_keep_their_order_and_spelling() -> None:
+    data = _valid_data()
+    data["signal"]["tv_symbols"] = ["US500.cash", "OANDA:SPX500USD", "CME_MINI:MES1!"]
+
+    venue = VenueProfile.model_validate(data)
+
+    assert venue.signal.tv_symbols == ("US500.cash", "OANDA:SPX500USD", "CME_MINI:MES1!")
+
+
+@pytest.mark.parametrize(
+    "symbol", ["", "CME_MINI:MES 1!", "CME_MINI/MES1!", "MES1!\n", "A" * 65, "ÇME:MES1!", "a,b"]
+)
+def test_a_malformed_tv_symbol_is_rejected(symbol: str) -> None:
+    data = _valid_data()
+    data["signal"]["tv_symbols"] = ["CME_MINI:MES1!", symbol]
+
+    with pytest.raises(ValidationError, match="TradingView sembolü olmalı"):
+        VenueProfile.model_validate(data)
+
+
+@pytest.mark.parametrize("symbol", [None, 500, ["CME_MINI:MES1!"]])
+def test_a_tv_symbol_that_is_not_text_is_rejected(symbol: object) -> None:
+    data = _valid_data()
+    data["signal"]["tv_symbols"] = [symbol]
+
+    with pytest.raises(ValidationError):
+        VenueProfile.model_validate(data)
+
+
+def test_the_tv_symbol_list_is_bounded() -> None:
+    data = _valid_data()
+    data["signal"]["tv_symbols"] = [f"FEED:SYM{index}" for index in range(MAX_TV_SYMBOLS)]
+    assert len(VenueProfile.model_validate(data).signal.tv_symbols) == MAX_TV_SYMBOLS
+
+    data["signal"]["tv_symbols"].append("FEED:ONE_MORE")
+    with pytest.raises(ValidationError, match=f"en çok {MAX_TV_SYMBOLS} sembol"):
+        VenueProfile.model_validate(data)
+
+
+def test_symbols_that_differ_only_in_case_are_two_symbols() -> None:
+    # The match with an alert is case-sensitive, so the list is too.
+    data = _valid_data()
+    data["signal"]["tv_symbols"] = ["OANDA:SPX500USD", "oanda:spx500usd"]
+
+    assert len(VenueProfile.model_validate(data).signal.tv_symbols) == 2
+
+
+@pytest.mark.parametrize("value", [0.25, 1.5, 2, 40.0])
+def test_min_stop_points_accepts_any_positive_number(value: float) -> None:
+    data = _valid_data()
+    data["signal"]["min_stop_points"] = value
+
+    assert VenueProfile.model_validate(data).signal.min_stop_points == value
+
+
+@pytest.mark.parametrize("value", [0, -1.5, "1.5", True, float("nan"), float("inf")])
+def test_min_stop_points_rejects_everything_else(value: object) -> None:
+    data = _valid_data()
+    data["signal"]["min_stop_points"] = value
+
+    with pytest.raises(ValidationError):
+        VenueProfile.model_validate(data)
+
+
+@pytest.mark.parametrize("key", ["tv_symbols", "min_stop_points"])
+def test_both_signal_keys_are_required(key: str) -> None:
+    data = _valid_data()
+    del data["signal"][key]
+
+    with pytest.raises(ValidationError):
+        VenueProfile.model_validate(data)
+
+
+def test_the_signal_section_takes_no_unknown_key() -> None:
+    data = _valid_data()
+    data["signal"]["max_stop_points"] = 50
+
+    with pytest.raises(ValidationError):
+        VenueProfile.model_validate(data)
 
 
 @pytest.mark.parametrize("value", [member.value for member in MaxLossType])

@@ -367,6 +367,35 @@ def entry_risk_too_wide_notice(
     )
 
 
+def entry_symbol_skip_notice(row: SignalRow, *, venue: VenueProfile) -> str:
+    """The alert comes from a chart whose prices are not on the venue symbol's scale."""
+    return "\n".join(
+        [
+            _entry_header("[SİNYAL — ATLA]", row),
+            f"Sembol kabul listesinde değil ({row.symbol}): stop/TP mesafeleri "
+            f"{venue.symbol} ile aynı puan ölçeğinde olmayabilir. Bu girişi ALMA.",
+            "Ölçeği aynıysa sembolü venue profilindeki tv_symbols listesine birebir bu "
+            "yazımla ekle ve servisi yeniden başlat.",
+            _id_line(row),
+        ]
+    )
+
+
+def entry_stop_too_tight_notice(
+    row: SignalRow, *, stop_points: float, min_stop_points: float
+) -> str:
+    """The stop is closer than the venue profile's minimum: the lot would be oversized."""
+    return "\n".join(
+        [
+            _entry_header("[SİNYAL — ATLA]", row),
+            f"Stop çok dar ({fmt_price(stop_points)} puan; alt sınır "
+            f"{fmt_price(min_stop_points)} puan): bu mesafede lot aşırı büyür, spread ve "
+            "kayma tek başına stop'a götürebilir. Bu girişi ALMA.",
+            _id_line(row),
+        ]
+    )
+
+
 def entry_budget_skip_notice(
     row: SignalRow,
     *,
@@ -489,6 +518,19 @@ def rules_stale_alarm(venue: VenueProfile, freshness: RulesFreshness) -> str:
         "hesaplanıyor.\n"
         "Kuralları firmanın resmi sayfasından yeniden doğrula ve venue profilindeki "
         "rules_verified_at tarihini güncelle. Bu uyarı en fazla günde bir gelir."
+    )
+
+
+def symbol_not_listed_alarm(row: SignalRow) -> str:
+    """A stop update, exit or cancel from an unlisted symbol, with no entry of this bot."""
+    action = _ACTION_NAMES.get(row.action, row.action)
+    return (
+        f"[ALARM] {_strategy_name(row.strategy_id)} · {row.symbol}: {action} alert'i geldi "
+        f"(id {row.id}), ama sembol kabul listesinde değil ve bu botun ilettiği bir girişi "
+        "yok. İLETİLMEDİ.\n"
+        "Strateji yanlış grafikte çalışıyor olabilir: TradingView'daki alarmın sembolünü "
+        "kontrol et. O grafiğe bakarak aldığın bir pozisyon varsa stop/çıkışı "
+        "TradingView'dan izle."
     )
 
 

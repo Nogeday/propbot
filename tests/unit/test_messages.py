@@ -12,6 +12,7 @@ from hypothesis import strategies as st
 from propbot.core.clock import ms_from_datetime
 from propbot.notify import messages
 from propbot.notify.messages import TradeLink
+from propbot.notify.telegram import code_entity_spans
 from propbot.risk import RiskConfig, VenueProfile
 from propbot.risk.loader import read_yaml_mapping
 from propbot.risk.sizing import SizeSkip, SizeSuggestion, suggest_size
@@ -330,6 +331,34 @@ def test_risk_too_wide_notice_shows_the_risk_of_the_minimum_lot() -> None:
     )
 
 
+def test_symbol_skip_notice_names_the_symbol_and_the_list_to_edit() -> None:
+    text = messages.entry_symbol_skip_notice(row(symbol="CME_MINI:NQ1!"), venue=VENUE)
+
+    assert text == (
+        "[SİNYAL — ATLA] NY ORB FVG · FVG · LONG · CME_MINI:NQ1!\n"
+        "Sembol kabul listesinde değil (CME_MINI:NQ1!): stop/TP mesafeleri US500.cash ile "
+        "aynı puan ölçeğinde olmayabilir. Bu girişi ALMA.\n"
+        "Ölçeği aynıysa sembolü venue profilindeki tv_symbols listesine birebir bu yazımla "
+        "ekle ve servisi yeniden başlat.\n"
+        "id 123 · bar 09:44 NY / 17:44 TR"
+    )
+    # Telegram would link "signal.tv" in "signal.tv_symbols": the key is named without its section.
+    assert [text[start : start + length] for start, length in code_entity_spans(text)] == [
+        "US500.cash"
+    ]
+
+
+def test_stop_too_tight_notice_shows_the_stop_and_the_minimum() -> None:
+    text = messages.entry_stop_too_tight_notice(row(), stop_points=0.25, min_stop_points=1.5)
+
+    assert text == (
+        "[SİNYAL — ATLA] NY ORB FVG · FVG · LONG · CME_MINI:MES1!\n"
+        "Stop çok dar (0.25 puan; alt sınır 1.50 puan): bu mesafede lot aşırı büyür, spread "
+        "ve kayma tek başına stop'a götürebilir. Bu girişi ALMA.\n"
+        "id 123 · bar 09:44 NY / 17:44 TR"
+    )
+
+
 def test_risk_too_wide_notice_survives_an_unknown_contract() -> None:
     size = SizeSuggestion(250.0, None, None, SizeSkip.RISK_TOO_WIDE)
 
@@ -626,6 +655,9 @@ def test_every_builder_tolerates_a_row_without_optional_fields() -> None:
         messages.cancel_signal(bare, venue=VENUE, link=link, release_hint=True),
         messages.side_mismatch_alarm(bare, bare),
         messages.processing_error_alarm(bare),
+        messages.entry_symbol_skip_notice(bare, venue=VENUE),
+        messages.entry_stop_too_tight_notice(bare, stop_points=0.25, min_stop_points=1.5),
+        messages.symbol_not_listed_alarm(bare),
     ]
 
     assert all(text and "None" not in text for text in texts)

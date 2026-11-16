@@ -4,7 +4,7 @@ import asyncio
 import dataclasses
 import datetime as dt
 import re
-from collections.abc import Callable, Coroutine, Iterator, Mapping
+from collections.abc import Callable, Coroutine, Iterator, Mapping, Sequence
 from decimal import Decimal
 from typing import Any, cast
 from zoneinfo import ZoneInfo
@@ -44,7 +44,7 @@ from propbot.store.db import (
 )
 from support import alerts
 from support.alerts import BAR_TIME_MS, LONG, SHORT
-from support.paths import CONFIG_FIXTURES
+from support.paths import CONFIG_DIR, CONFIG_FIXTURES
 
 RISK_FILE = CONFIG_FIXTURES / "valid" / "risk.yaml"
 VENUE_FILE = CONFIG_FIXTURES / "valid" / "venues" / "sample_2step.yaml"
@@ -74,6 +74,8 @@ def config(
     contract: Mapping[str, float | None] = INDEX_CFD,
     *,
     rules_verified_at: str | None = "2026-07-20",
+    tv_symbols: Sequence[str] | None = None,
+    min_stop_points: float | None = None,
     **risk_overrides: object,
 ) -> ProcessorConfig:
     """Fixture risk + venue (validated), renamed to the venue of the contract's examples."""
@@ -88,6 +90,10 @@ def config(
             "contract": dict(contract),
         }
     )
+    if tv_symbols is not None:
+        venue["signal"]["tv_symbols"] = list(tv_symbols)
+    if min_stop_points is not None:
+        venue["signal"]["min_stop_points"] = min_stop_points
     return ProcessorConfig(RiskConfig.model_validate(risk), VenueProfile.model_validate(venue))
 
 
@@ -545,10 +551,175 @@ def test_unknown_contract_budget_boundary() -> None:
     assert decide(ENTRY, at(budget_used=750.01), UNKNOWN).outcome is Outcome.SKIP_BUDGET
 
 
+# --- entry: rule 3, the symbol list (user decision 46) --------------------------------------
+
+OTHER_SYMBOL = "CME_MINI:NQ1!"
+UNLISTED_ENTRY = stored(alerts.ny_orb_fvg_entry(symbol=OTHER_SYMBOL))
+REAL_TV_SYMBOLS: list[str] = read_yaml_mapping(CONFIG_DIR / "venues" / "ftmo_2step_100k.yaml")[
+    "signal"
+]["tv_symbols"]
+
+
+def test_entry_from_an_unlisted_symbol_is_skipped_with_a_notice() -> None:
+    decision = decide(UNLISTED_ENTRY, at(budget_used=250.0), CONFIG)
+
+    assert decision.outcome is Outcome.SKIP_SYMBOL
+    assert decision.budget_risk is None
+    assert decision.alarms == ()
+    assert decision.messages[0].expires_at_ms is None
+    assert text_of(decision) == (
+        "[SİNYAL — ATLA] NY ORB FVG · FVG · LONG · CME_MINI:NQ1!\n"
+        "Sembol kabul listesinde değil (CME_MINI:NQ1!): stop/TP mesafeleri US500.cash ile "
+        "aynı puan ölçeğinde olmayabilir. Bu girişi ALMA.\n"
+        "Ölçeği aynıysa sembolü venue profilindeki tv_symbols listesine birebir bu yazımla "
+        "ekle ve servisi yeniden başlat.\n"
+        "id 1 · bar 11:30 NY / 18:30 TR"
+    )
+
+
+@pytest.mark.parametrize(
+    "symbol",
+    ["cme_mini:mes1!", "CME_MINI:MES1", "MES1!", "CME:MES1!", "CME_MINI:MES1!x", "US500.cash"],
+)
+def test_the_symbol_must_match_a_listed_one_exactly(symbol: str) -> None:
+    # No prefix guessing and no case folding: a near miss is another feed until proven equal.
+    signal = stored(alerts.ny_orb_fvg_entry(symbol=symbol))
+
+    assert decide(signal, at(), CONFIG).outcome is Outcome.SKIP_SYMBOL
+
+
+def test_every_listed_symbol_is_accepted_and_no_other() -> None:
+    cfg = config(tv_symbols=["OANDA:SPX500USD", "US500.cash"])
+
+    for symbol in ("OANDA:SPX500USD", "US500.cash"):
+        signal = stored(alerts.ny_orb_fvg_entry(symbol=symbol))
+        assert decide(signal, at(), cfg).outcome is Outcome.FORWARDED
+    # The fixture's own symbol is no longer on the list.
+    assert decide(ENTRY, at(), cfg).outcome is Outcome.SKIP_SYMBOL
+
+
+@pytest.mark.parametrize("symbol", REAL_TV_SYMBOLS)
+def test_every_symbol_of_the_real_profile_passes_the_alert_schema_and_is_accepted(
+    symbol: str,
+) -> None:
+    # The list is only useful if the receiver lets an alert with that symbol in at all.
+    signal = stored(alerts.ny_orb_fvg_entry(symbol=symbol))
+
+    assert decide(signal, at(), config(tv_symbols=REAL_TV_SYMBOLS)).outcome is Outcome.FORWARDED
+
+
+def test_the_real_profile_lists_the_symbols_of_user_decision_46() -> None:
+    assert REAL_TV_SYMBOLS == [
+        "CME_MINI:MES1!",
+        "CME_MINI:ES1!",
+        "US500.cash",
+        "OANDA:SPX500USD",
+        "FOREXCOM:SPXUSD",
+        "PEPPERSTONE:US500",
+        "CAPITALCOM:US500",
+    ]
+
+
+def test_heartbeat_from_an_unlisted_symbol_still_counts() -> None:
+    # The heartbeat proves the alert line, whatever chart it runs on.
+    signal = stored(alerts.heartbeat_payload(symbol=OTHER_SYMBOL))
+
+    assert_silent(decide(signal, at(signal.received_at_ms + 500), CONFIG), Outcome.HEARTBEAT)
+
+
+# --- entry: rule 5, minimum stop distance (user decision 33) --------------------------------
+
+# The reference entry closes at 5123.25: a stop at 5121.75 is 1.50 points away, 5122.00 is 1.25.
+AT_MIN_STOP_ENTRY = stored(alerts.ny_orb_fvg_entry(stop=5121.75))
+TIGHT_ENTRY = stored(alerts.ny_orb_fvg_entry(stop=5122.0))
+
+
+def test_entry_with_a_stop_closer_than_the_minimum_is_skipped_with_a_notice() -> None:
+    decision = decide(TIGHT_ENTRY, at(budget_used=250.0), CONFIG)
+
+    assert decision.outcome is Outcome.SKIP_STOP_TOO_TIGHT
+    assert decision.budget_risk is None
+    assert decision.alarms == ()
+    assert decision.messages[0].expires_at_ms is None
+    assert text_of(decision) == (
+        "[SİNYAL — ATLA] NY ORB FVG · FVG · LONG · CME_MINI:MES1!\n"
+        "Stop çok dar (1.25 puan; alt sınır 1.50 puan): bu mesafede lot aşırı büyür, spread "
+        "ve kayma tek başına stop'a götürebilir. Bu girişi ALMA.\n"
+        "id 1 · bar 11:30 NY / 18:30 TR"
+    )
+
+
+def test_a_stop_of_exactly_the_minimum_is_forwarded() -> None:
+    decision = decide(AT_MIN_STOP_ENTRY, at(), CONFIG)
+
+    assert decision.outcome is Outcome.FORWARDED
+    assert "stop −1.50 puan" in text_of(decision)
+
+
+@pytest.mark.parametrize(
+    ("side", "stop", "expected"),
+    [
+        (LONG, 5121.75, Outcome.FORWARDED),
+        (LONG, 5122.0, Outcome.SKIP_STOP_TOO_TIGHT),
+        (LONG, 5123.0, Outcome.SKIP_STOP_TOO_TIGHT),
+        (SHORT, 5124.75, Outcome.FORWARDED),
+        (SHORT, 5124.5, Outcome.SKIP_STOP_TOO_TIGHT),
+        (SHORT, 5123.5, Outcome.SKIP_STOP_TOO_TIGHT),
+    ],
+)
+def test_the_minimum_stop_is_a_distance_on_either_side(
+    side: str, stop: float, expected: Outcome
+) -> None:
+    signal = stored(alerts.ny_orb_fvg_entry(side, stop=stop))
+
+    assert decide(signal, at(), CONFIG).outcome is expected
+
+
+def test_the_minimum_stop_follows_the_venue_profile() -> None:
+    assert decide(TIGHT_ENTRY, at(), config(min_stop_points=1.25)).outcome is Outcome.FORWARDED
+    assert (
+        decide(AT_MIN_STOP_ENTRY, at(), config(min_stop_points=1.75)).outcome
+        is Outcome.SKIP_STOP_TOO_TIGHT
+    )
+    assert decide(ENTRY, at(), config(min_stop_points=12.5)).outcome is Outcome.FORWARDED
+    assert decide(ENTRY, at(), config(min_stop_points=12.51)).outcome is Outcome.SKIP_STOP_TOO_TIGHT
+
+
+def test_the_minimum_stop_is_compared_in_exact_decimals() -> None:
+    # 5120.4 - 5120.1 is 0.2999999999992724 in binary floating point: a float comparison
+    # would call a stop of exactly 0.3 points "closer than 0.3".
+    signal = dataclasses.replace(ENTRY, est_entry=5120.4, stop=5120.1)
+    assert 5120.4 - 5120.1 < 0.3
+
+    assert decide(signal, at(), config(min_stop_points=0.3)).outcome is Outcome.FORWARDED
+
+
+def test_the_minimum_stop_holds_while_the_contract_is_unknown() -> None:
+    # Today's real profile: no lot can be suggested, the user sizes the trade by hand. A
+    # 1.25 point stop is exactly where that hand-made size would be far too large.
+    assert decide(TIGHT_ENTRY, at(), UNKNOWN).outcome is Outcome.SKIP_STOP_TOO_TIGHT
+    assert decide(AT_MIN_STOP_ENTRY, at(), UNKNOWN).outcome is Outcome.FORWARDED
+
+
+def test_the_minimum_stop_does_not_hold_back_stop_updates() -> None:
+    # A trail that comes within a point of the entry is a tighter stop on an OPEN trade:
+    # the rule is about new entries only.
+    update = stored(trail(minute=18, offset=-0.5), signal_id=2)
+    context = follow_up(update)
+
+    assert decide(update, context, CONFIG).outcome is Outcome.FORWARDED
+
+
 # --- entry: precedence --------------------------------------------------------------------
 
 EARLY_ENTRY = stored(alerts.ny_orb_fvg_entry(), received_at_ms=ENTRY_CLOSE_MS - 3_000)
 LATE_MS = VALID_UNTIL_MS + 1
+EARLY_UNLISTED_ENTRY = stored(
+    alerts.ny_orb_fvg_entry(symbol=OTHER_SYMBOL), received_at_ms=ENTRY_CLOSE_MS - 3_000
+)
+UNLISTED_TIGHT_ENTRY = stored(alerts.ny_orb_fvg_entry(symbol=OTHER_SYMBOL, stop=5122.0))
+# No lot fits: even the smallest one risks more than the budget at ANY stop above 0.25 points.
+NOTHING_FITS = config(INDEX_CFD | {"min_lot": 1000.0})
 
 
 @pytest.mark.parametrize(
@@ -565,6 +736,15 @@ LATE_MS = VALID_UNTIL_MS + 1
         (ENTRY, at(LATE_MS), TOO_WIDE, Outcome.STALE),
         (ENTRY, at(LATE_MS, budget_used=1000.0), CONFIG, Outcome.STALE),
         (ENTRY, at(budget_used=1000.0), TOO_WIDE, Outcome.SKIP_RISK_TOO_WIDE),
+        (EARLY_UNLISTED_ENTRY, at(), CONFIG, Outcome.SKIP_CLOCK),
+        (UNLISTED_ENTRY, at(killed=True), CONFIG, Outcome.SUPPRESSED_KILLED),
+        (UNLISTED_ENTRY, at(paused=True), CONFIG, Outcome.SUPPRESSED_PAUSED),
+        (UNLISTED_ENTRY, at(LATE_MS), CONFIG, Outcome.SKIP_SYMBOL),
+        (UNLISTED_TIGHT_ENTRY, at(budget_used=1000.0), TOO_WIDE, Outcome.SKIP_SYMBOL),
+        (TIGHT_ENTRY, at(LATE_MS), CONFIG, Outcome.STALE),
+        (TIGHT_ENTRY, at(paused=True), CONFIG, Outcome.SUPPRESSED_PAUSED),
+        (TIGHT_ENTRY, at(), NOTHING_FITS, Outcome.SKIP_STOP_TOO_TIGHT),
+        (TIGHT_ENTRY, at(budget_used=1000.0), CONFIG, Outcome.SKIP_STOP_TOO_TIGHT),
     ],
     ids=[
         "early+killed",
@@ -578,6 +758,15 @@ LATE_MS = VALID_UNTIL_MS + 1
         "late+too_wide",
         "late+budget",
         "too_wide+budget",
+        "early+unlisted",
+        "unlisted+killed",
+        "unlisted+paused",
+        "unlisted+late",
+        "unlisted+tight+too_wide+budget",
+        "tight+late",
+        "tight+paused",
+        "tight+too_wide",
+        "tight+budget",
     ],
 )
 def test_entry_rules_apply_in_order(
@@ -697,6 +886,71 @@ def test_follow_up_without_any_entry_is_forwarded_with_the_orphan_note(signal: S
     assert text_of(decision).splitlines()[-2].startswith("(bu bot giriş sinyalini görmedi)")
     assert text_of(decision).splitlines()[-1].startswith(f"id {signal.id} · bar ")
     assert "/atladim" not in text_of(decision)
+
+
+def unlisted(signal: SignalRow) -> SignalRow:
+    return dataclasses.replace(signal, symbol=OTHER_SYMBOL)
+
+
+@pytest.mark.parametrize("signal", FOLLOW_UPS, ids=FOLLOW_UP_IDS)
+def test_follow_up_from_an_unlisted_symbol_without_any_entry_is_dropped_with_an_alarm(
+    signal: SignalRow,
+) -> None:
+    # Nothing of this bot to act on, and the prices are on another scale: an orphan stop
+    # update would hand the user a level that means nothing on the venue symbol.
+    signal = unlisted(signal)
+
+    decision = decide(signal, at(signal.received_at_ms + 500), CONFIG)
+
+    assert decision.outcome is Outcome.SKIP_SYMBOL
+    assert decision.messages == ()
+    assert decision.budget_risk is None
+    (alarm,) = decision.alarms
+    assert (alarm.code, alarm.throttle_ms) == ("symbol_not_listed", 10 * MINUTE_MS)
+    assert alarm.text == messages.symbol_not_listed_alarm(signal)
+
+
+def test_the_unlisted_symbol_alarm_names_the_alert_and_what_to_check() -> None:
+    signal = unlisted(EXIT)
+
+    assert messages.symbol_not_listed_alarm(signal) == (
+        "[ALARM] NY ORB FVG · CME_MINI:NQ1!: çıkış alert'i geldi (id 3), ama sembol kabul "
+        "listesinde değil ve bu botun ilettiği bir girişi yok. İLETİLMEDİ.\n"
+        "Strateji yanlış grafikte çalışıyor olabilir: TradingView'daki alarmın sembolünü "
+        "kontrol et. O grafiğe bakarak aldığın bir pozisyon varsa stop/çıkışı "
+        "TradingView'dan izle."
+    )
+
+
+@pytest.mark.parametrize("signal", FOLLOW_UPS, ids=FOLLOW_UP_IDS)
+def test_the_symbol_list_never_holds_back_the_follow_up_of_a_forwarded_entry(
+    signal: SignalRow,
+) -> None:
+    # The list was edited while a trade was open: its stop updates and its exit still
+    # reduce risk and must arrive.
+    signal = unlisted(signal)
+    reference = dataclasses.replace(FORWARDED_ENTRY, symbol=OTHER_SYMBOL, side=signal.side)
+
+    decision = decide(signal, follow_up(signal, reference=reference), CONFIG)
+
+    assert decision.outcome is Outcome.FORWARDED
+    assert decision.alarms == ()
+    assert f"id {signal.id} (giriş id 1) · " in text_of(decision).splitlines()[-1]
+
+
+@pytest.mark.parametrize("signal", FOLLOW_UPS, ids=FOLLOW_UP_IDS)
+def test_follow_up_of_an_entry_skipped_for_its_symbol_is_dropped_silently(
+    signal: SignalRow,
+) -> None:
+    # The entry already told the user about the symbol; its follow-ups add nothing.
+    signal = unlisted(signal)
+    reference = dataclasses.replace(
+        FORWARDED_ENTRY, symbol=OTHER_SYMBOL, outcome=Outcome.SKIP_SYMBOL
+    )
+
+    decision = decide(signal, follow_up(signal, reference=reference, reference_budget=None), CONFIG)
+
+    assert_silent(decision, Outcome.NO_ACTIVE_TRADE)
 
 
 @pytest.mark.parametrize("signal", FOLLOW_UPS, ids=FOLLOW_UP_IDS)
@@ -1550,6 +1804,51 @@ def test_orphan_stop_updates_are_compared_with_each_other(store: Store) -> None:
     assert "stop = kendi giriş fiyatın −3.50 puan" in texts(store, wider.id)[0]
     assert "Yalnızca mevcut stop'undan DAHA SIKIysa uygula." in texts(store, other_side.id)[0]
     assert "Yalnızca mevcut stop'undan DAHA SIKIysa uygula." in texts(store, tighter.id)[0]
+
+
+def test_an_unlisted_symbol_is_refused_from_entry_to_exit(store: Store) -> None:
+    entry = handle(store, alerts.ny_orb_fvg_entry(symbol=OTHER_SYMBOL))
+    update = handle(store, trail(minute=18, offset=-3.5) | {"symbol": OTHER_SYMBOL})
+    closing = handle(store, alerts.ny_orb_fvg_exit(symbol=OTHER_SYMBOL))
+
+    assert entry.outcome is Outcome.SKIP_SYMBOL
+    assert budget(store, entry.id) is None
+    # The entry's notice is the only message: its follow-ups have a known, skipped entry.
+    assert (update.outcome, closing.outcome) == (Outcome.NO_ACTIVE_TRADE,) * 2
+    (notice,) = outbox(store)
+    assert (notice.kind, notice.signal_id) == (OutboxKind.SIGNAL, entry.id)
+    assert notice.text.startswith("[SİNYAL — ATLA] NY ORB FVG · FVG · LONG · CME_MINI:NQ1!\n")
+    assert (notice.expires_at_ms, notice.expired_text) == (None, None)
+
+
+def test_a_tight_stop_is_refused_and_counts_nothing(store: Store) -> None:
+    entry = handle(store, alerts.ny_orb_fvg_entry(stop=5122.0))
+    update = handle(store, trail(minute=18, offset=-0.5))
+
+    assert entry.outcome is Outcome.SKIP_STOP_TOO_TIGHT
+    assert budget(store, entry.id) is None
+    assert update.outcome is Outcome.NO_ACTIVE_TRADE
+    (notice,) = outbox(store)
+    assert (notice.kind, notice.signal_id) == (OutboxKind.SIGNAL, entry.id)
+    assert "Stop çok dar (1.25 puan; alt sınır 1.50 puan)" in notice.text
+    # The next entry has the whole daily budget.
+    following = handle(store, entry_at(5))
+    assert following.outcome is Outcome.FORWARDED
+    assert "günlük bütçe $250/$1000" in texts(store, following.id)[0]
+
+
+def test_unlisted_symbol_alarm_is_throttled_to_ten_minutes(store: Store) -> None:
+    outcomes = [
+        handle(store, trail(minute=minute, offset=-3.5) | {"symbol": OTHER_SYMBOL}).outcome
+        for minute in (18, 20, 27, 28)
+    ]
+
+    assert outcomes == [Outcome.SKIP_SYMBOL] * 4
+    rows = outbox(store)
+    # Alarms at minute 18 and, ten minutes later, at minute 28; none for 20 and 27.
+    assert [(row.kind, row.signal_id) for row in rows] == [(OutboxKind.ALARM, None)] * 2
+    assert "stop güncelleme alert'i geldi (id 1)" in rows[0].text
+    assert "stop güncelleme alert'i geldi (id 4)" in rows[1].text
 
 
 def test_side_mismatch_alarm_is_throttled_to_ten_minutes(store: Store) -> None:

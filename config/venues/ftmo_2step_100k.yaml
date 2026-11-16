@@ -25,3 +25,13 @@ contract:                                         # never hard-code; read from M
   tick_value_per_lot: null
   min_lot: null
   lot_step: null
+signal:                                           # the bot's own entry filters (not firm rules); docs/adr/0006
+  tv_symbols:                                     # TradingView symbols priced on the same point scale as `symbol`;
+    - "CME_MINI:MES1!"                            #   an entry alert from any other symbol is answered with "ATLA".
+    - "CME_MINI:ES1!"                             #   Exact, case-sensitive match with the alert's `symbol` field
+    - "US500.cash"                                #   (Pine `syminfo.tickerid`, normally EXCHANGE:TICKER).
+    - "OANDA:SPX500USD"                           #   User decision 46 (2026-11-16); the scale of each feed is the
+    - "FOREXCOM:SPXUSD"                           #   user's statement, compare a quote with US500.cash before use.
+    - "PEPPERSTONE:US500"
+    - "CAPITALCOM:US500"
+  min_stop_points: 1.5                            # user decision 33: an entry whose stop is closer than this is skipped

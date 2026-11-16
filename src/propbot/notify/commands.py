@@ -122,6 +122,8 @@ _OUTCOME_LABELS: Final[Mapping[Outcome, str]] = {
     Outcome.NO_ACTIVE_TRADE: "açık işlem yok",
     Outcome.HEARTBEAT: "heartbeat",
     Outcome.SKIP_CLOCK: "saat uyuşmazlığı",
+    Outcome.SKIP_SYMBOL: "sembol listede değil",
+    Outcome.SKIP_STOP_TOO_TIGHT: "stop çok dar",
     Outcome.SUPERSEDED: "eskimiş güncelleme",
     Outcome.ERROR: "işleme hatası",
 }

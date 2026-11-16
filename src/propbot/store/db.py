@@ -15,7 +15,9 @@ Units: every `*_ms` column is INTEGER UTC epoch milliseconds; prices and money a
 `prop_day` is TEXT `YYYY-MM-DD`; booleans are INTEGER 0/1. Nothing secret is stored here: the
 webhook token is stripped before `payload_json` is built, and callers redact `last_error`.
 
-Schema version 1 (all tables STRICT; no migrations yet, another version refuses to open):
+Schema version 2 (all tables STRICT; no migrations yet, another version refuses to open;
+version 1 lacked the `skip_symbol` and `skip_stop_too_tight` outcomes in the CHECK of
+`signals.outcome`):
 
     table           column           type     notes
     --------------  ---------------  -------  ---------------------------------------------------
@@ -83,7 +85,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Final, Self
 
-SCHEMA_VERSION: Final = 1
+SCHEMA_VERSION: Final = 2
 
 MEMORY_PATH: Final = ":memory:"
 BUSY_TIMEOUT_MS: Final = 5000
@@ -125,6 +127,10 @@ class Outcome(StrEnum):
     SUPERSEDED = "superseded"
     # Processing raised: the signal is set aside so it cannot block the queue (alarm sent).
     ERROR = "error"
+    # The alert's symbol is not on the venue profile's list: its prices are on another scale.
+    SKIP_SYMBOL = "skip_symbol"
+    # An entry whose stop is closer than the venue profile's `min_stop_points`.
+    SKIP_STOP_TOO_TIGHT = "skip_stop_too_tight"
 
 
 class OutboxKind(StrEnum):
@@ -1060,7 +1066,9 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             if found != str(SCHEMA_VERSION):
                 raise StoreError(
                     f"veritabanı şema sürümü uyuşmuyor: beklenen {SCHEMA_VERSION}, "
-                    f"okunan {found!r} (geçiş/migration desteği henüz yok)"
+                    f"okunan {found!r} (geçiş/migration desteği henüz yok). Eski dosyayı "
+                    "yeniden adlandırıp sakla; servis yeni bir veritabanı oluşturur "
+                    "(docs/runbook.md §11)"
                 )
             if tables != _TABLES:
                 difference = ", ".join(sorted(tables ^ _TABLES))

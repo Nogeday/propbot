@@ -311,6 +311,37 @@ def test_a_late_entry_is_reported_as_stale_and_not_counted(
             assert tx.budget_used(dt.date(2026, 7, 21)) == 0.0
 
 
+def test_another_chart_and_a_tight_stop_are_answered_with_skip_and_count_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # User decisions 46 and 33, through the real path: webhook -> queue -> Telegram.
+    with running(tmp_path, monkeypatch) as bot:
+        other_chart = json.dumps(alerts.ny_orb_fvg_entry(symbol="CME_MINI:NQ1!")).encode()
+        tight_stop = json.dumps(alerts.ny_orb_fvg_entry(stop=5122.0)).encode()
+
+        assert bot.post(other_chart) == {"status": "queued"}
+        wrong_symbol = bot.wait_for_text("Sembol kabul listesinde değil")
+        assert bot.post(tight_stop) == {"status": "queued"}
+        too_tight = bot.wait_for_text("Stop çok dar")
+        bot.say("/durum")
+        status = bot.wait_for_text("sembol listede değil 1")
+
+        assert wrong_symbol.startswith("[SİNYAL — ATLA] NY ORB FVG · FVG · LONG · CME_MINI:NQ1!\n")
+        assert too_tight.startswith(f"[SİNYAL — ATLA] NY ORB FVG · FVG · LONG · {alerts.SYMBOL}\n")
+        assert "(1.25 puan; alt sınır 1.50 puan)" in too_tight
+        assert "stop çok dar 1" in status
+        with bot.store.transaction() as tx:
+            outcomes = [tx.get_signal(signal_id) for signal_id in (1, 2)]
+            used = tx.budget_used(dt.date(2026, 7, 21))
+        assert [row.outcome for row in outcomes if row is not None] == [
+            Outcome.SKIP_SYMBOL,
+            Outcome.SKIP_STOP_TOO_TIGHT,
+        ]
+        assert used == 0.0
+    assert not any(text.startswith("[SİNYAL]") for text in bot.texts())
+    assert bot.failures == []
+
+
 # --- commands through the real polling path -------------------------------------------------
 
 

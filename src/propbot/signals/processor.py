@@ -12,15 +12,20 @@ Entries, first match wins:
     0. arrived more than 2 s before its bar close   SKIP_CLOCK (clock doubt = no new entry)
     1. KILLED                                       SUPPRESSED_KILLED (silent)
     2. PAUSED                                       SUPPRESSED_PAUSED (silent)
-    3. older than the validity limit                STALE
-    4. minimum lot risks more than the budget       SKIP_RISK_TOO_WIDE
-    5. daily budget cannot take it                  SKIP_BUDGET
-    6. otherwise                                    FORWARDED, risk counted in the ledger
+    3. symbol not on the venue's `tv_symbols` list  SKIP_SYMBOL (prices on another scale)
+    4. older than the validity limit                STALE
+    5. stop closer than `min_stop_points`           SKIP_STOP_TOO_TIGHT
+    6. minimum lot risks more than the budget       SKIP_RISK_TOO_WIDE
+    7. daily budget cannot take it                  SKIP_BUDGET
+    8. otherwise                                    FORWARDED, risk counted in the ledger
 
 Stop updates, exits and cancels reduce risk and are never held back by pause or kill. They
 are matched to the latest entry of the same strategy and symbol; a stop update is judged in
 the trader's frame (offset = stop - entry price), because the trader holds the position on
 another instrument at another fill price. A stop is never widened (CLAUDE.md invariant 2).
+The symbol list does not hold back the follow-ups of an entry that was forwarded (the list
+may have changed since); a follow-up from an unlisted symbol with no entry at all is not
+passed on (SKIP_SYMBOL, with an alarm): its prices would be read on the wrong scale.
 """
 
 import asyncio
@@ -66,6 +71,7 @@ BUDGET_EPSILON: Final = 1e-9
 
 RULES_STALE_ALARM: Final = ("rules_stale", _DAY_MS)
 SIDE_MISMATCH_ALARM: Final = ("side_mismatch", 10 * _MINUTE_MS)
+SYMBOL_NOT_LISTED_ALARM: Final = ("symbol_not_listed", 10 * _MINUTE_MS)
 
 _FLAG_CLEAR: Final = "0"
 # "After the reference" has no upper bound: an out-of-order alert is compared with the newest
@@ -151,6 +157,11 @@ def _side(row: SignalRow) -> Side:
         raise SignalDataError("signal has no usable side") from None
 
 
+def _symbol_listed(signal: SignalRow, venue: VenueProfile) -> bool:
+    """Whether the alert's chart is priced on the venue symbol's scale (exact match)."""
+    return signal.symbol in venue.signal.tv_symbols
+
+
 def _late_seconds(signal: SignalRow, now_ms: int, validity_ms: int) -> float | None:
     """Age of a follow-up beyond its bar close, or None while it is within the validity limit.
 
@@ -175,6 +186,9 @@ def _decide_entry(signal: SignalRow, context: DecisionContext, config: Processor
         return Decision(Outcome.SUPPRESSED_KILLED)
     if context.paused:
         return Decision(Outcome.SUPPRESSED_PAUSED)
+    if not _symbol_listed(signal, venue):
+        text = messages.entry_symbol_skip_notice(signal, venue=venue)
+        return Decision(Outcome.SKIP_SYMBOL, (OutboxDraft(text),))
 
     # Entries never fire on session-shortened bars: the computed bar close is the truth.
     valid_until_ms = signal.bar_close_ms + validity_ms
@@ -186,7 +200,16 @@ def _decide_entry(signal: SignalRow, context: DecisionContext, config: Processor
         )
         return Decision(Outcome.STALE, (OutboxDraft(text),))
 
-    stop_points = float(abs(_stop_offset(signal)))
+    stop_distance = abs(_stop_offset(signal))
+    stop_points = float(stop_distance)
+    min_stop_points = venue.signal.min_stop_points
+    # Exact decimals: a stop of exactly the minimum passes, one tick less does not. A stop
+    # at the entry price is not a tight stop but a broken alert: `suggest_size` refuses it.
+    if 0 < stop_distance < _exact(min_stop_points, "min_stop_points"):
+        text = messages.entry_stop_too_tight_notice(
+            signal, stop_points=stop_points, min_stop_points=min_stop_points
+        )
+        return Decision(Outcome.SKIP_STOP_TOO_TIGHT, (OutboxDraft(text),))
     size = suggest_size(stop_points=stop_points, risk=risk, venue=venue)
     if size.skip is SizeSkip.RISK_TOO_WIDE:
         text = messages.entry_risk_too_wide_notice(
@@ -305,6 +328,11 @@ def _decide_follow_up(
     venue = config.venue
     reference = context.reference
     budget = context.reference_budget
+    if reference is None and not _symbol_listed(signal, venue):
+        # No entry of this bot to act on, and prices on another scale: say so, pass nothing.
+        code, throttle_ms = SYMBOL_NOT_LISTED_ALARM
+        alarm = AlarmDraft(code, messages.symbol_not_listed_alarm(signal), throttle_ms)
+        return Decision(Outcome.SKIP_SYMBOL, alarms=(alarm,))
     if reference is not None:
         if reference.outcome is not Outcome.FORWARDED:
             return Decision(Outcome.NO_ACTIVE_TRADE)

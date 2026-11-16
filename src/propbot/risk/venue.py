@@ -23,8 +23,14 @@ RULES_MAX_AGE_DAYS: Final = 30
 # Slack between the date the user writes (local) and the UTC date the bot compares against.
 RULES_FUTURE_TOLERANCE_DAYS: Final = 1
 
+# A venue profile lists at most this many TradingView symbols: a list, not a catalogue.
+MAX_TV_SYMBOLS: Final = 32
+
 _HHMM = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
 _ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+# A symbol as a TradingView alert carries it ("CME_MINI:MES1!", "US500.cash"). The same
+# shape as the alert schema accepts (`propbot.signals.schema`; a test compares the two).
+_TV_SYMBOL = re.compile(r"[A-Za-z0-9_.:!-]{1,64}")
 
 
 class Platform(StrEnum):
@@ -93,7 +99,36 @@ def _parse_plain_date(value: object) -> object:
     )
 
 
+def _check_tv_symbol(value: str) -> str:
+    if _TV_SYMBOL.fullmatch(value) is None:
+        raise PydanticCustomError(
+            "tv_symbol_format",
+            "TradingView sembolü olmalı (harf, rakam ve _ . : ! - ; en çok 64 karakter,"
+            " boşluksuz); okunan: {value}",
+            {"value": repr(value)},
+        )
+    return value
+
+
+def _check_tv_symbols(symbols: tuple[str, ...]) -> tuple[str, ...]:
+    if not symbols:
+        raise PydanticCustomError("list_empty", "en az bir sembol içermeli")
+    if len(symbols) > MAX_TV_SYMBOLS:
+        raise PydanticCustomError(
+            "list_too_long",
+            "en çok {limit} sembol içerebilir; okunan: {count}",
+            {"limit": MAX_TV_SYMBOLS, "count": len(symbols)},
+        )
+    repeated = sorted({symbol for symbol in symbols if symbols.count(symbol) > 1})
+    if repeated:
+        raise PydanticCustomError(
+            "list_duplicate", "yinelenen sembol: {values}", {"values": ", ".join(repeated)}
+        )
+    return symbols
+
+
 NonEmptyStr = Annotated[str, Field(min_length=1)]
+TvSymbol = Annotated[str, AfterValidator(_check_tv_symbol)]
 ZoneName = Annotated[str, AfterValidator(_check_zone)]
 ResetTime = Annotated[str, BeforeValidator(_require_text_time), AfterValidator(_check_hhmm)]
 PlainDate = Annotated[dt.date, BeforeValidator(_parse_plain_date)]
@@ -136,6 +171,23 @@ class ContractSpec(StrictModel):
     lot_step: PositiveFloat | None
 
 
+class SignalFilter(StrictModel):
+    """The bot's own entry filters for this symbol (user decisions 33 and 46), not firm rules.
+
+    `tv_symbols` are the TradingView symbols whose prices are on the same point scale as
+    `symbol`: an alert's stop and target distances are applied to the venue symbol as they
+    are, so an alert from any other chart is not an entry. The comparison is exact and
+    case-sensitive. `min_stop_points` is the smallest stop distance (price units of
+    `symbol`) an entry may have; a tighter stop asks for a huge lot that spread and
+    slippage alone would stop out.
+    """
+
+    tv_symbols: Annotated[
+        tuple[TvSymbol, ...], Field(strict=False), AfterValidator(_check_tv_symbols)
+    ]
+    min_stop_points: PositiveFloat
+
+
 class VenueProfile(StrictModel):
     """Every key is required; nullable keys must still be present so a deleted line is noticed."""
 
@@ -158,6 +210,7 @@ class VenueProfile(StrictModel):
     firm_request_threshold_per_day: PositiveInt
     server_tz: ZoneName | None
     contract: ContractSpec
+    signal: SignalFilter
 
     @model_validator(mode="after")
     def _daily_limit_below_max_loss(self) -> Self:

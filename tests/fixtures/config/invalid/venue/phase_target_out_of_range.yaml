@@ -22,3 +22,6 @@ contract:
   tick_value_per_lot: 0.01
   min_lot: 0.01
   lot_step: 0.01
+signal:
+  tv_symbols: ["CME_MINI:MES1!", "CME_MINI:ES1!"]
+  min_stop_points: 1.5

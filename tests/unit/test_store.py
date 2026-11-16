@@ -172,6 +172,8 @@ def raw_execute(path: Path, sql: str, *, ignore_checks: bool = False) -> list[tu
                 "skip_clock",
                 "superseded",
                 "error",
+                "skip_symbol",
+                "skip_stop_too_tight",
             ],
         ),
         (OutboxKind, ["signal", "alarm", "notice"]),
@@ -199,8 +201,10 @@ def test_enum_values_are_the_stored_text(enum_type: type[StrEnum], values: list[
     assert [member.value for member in enum_type] == values
 
 
-def test_schema_version_is_one() -> None:
-    assert SCHEMA_VERSION == 1
+def test_schema_version_is_two() -> None:
+    # Version 2 added two outcomes to the CHECK of `signals.outcome`; a version 1 file
+    # would refuse them at write time, so it is refused when it is opened instead.
+    assert SCHEMA_VERSION == 2
 
 
 def test_state_keys_cannot_collide_with_alarm_throttle_keys() -> None:
@@ -255,7 +259,7 @@ def test_new_file_gets_wal_strict_tables_and_the_schema_version(
 ) -> None:
     assert db_path.is_file()
     assert raw_execute(db_path, "PRAGMA journal_mode") == [("wal",)]
-    assert raw_execute(db_path, "SELECT key, value FROM meta") == [("schema_version", "1")]
+    assert raw_execute(db_path, "SELECT key, value FROM meta") == [("schema_version", "2")]
 
     tables = raw_execute(
         db_path, "SELECT name, strict FROM pragma_table_list WHERE schema = 'main' AND wr = 0"
@@ -382,12 +386,12 @@ def test_foreign_sqlite_database_is_refused_and_left_untouched(db_path: Path) ->
     assert raw_execute(db_path, "PRAGMA journal_mode") == [("delete",)]
 
 
-@pytest.mark.parametrize("stored", ["2", "0", "01", "1.0", " 1", ""])
+@pytest.mark.parametrize("stored", ["1", "3", "0", "02", "2.0", " 2", ""])
 def test_other_schema_version_is_refused(db_path: Path, stored: str) -> None:
     Store(db_path).close()
     raw_execute(db_path, f"UPDATE meta SET value = '{stored}' WHERE key = 'schema_version'")
 
-    with pytest.raises(StoreError, match="şema sürümü uyuşmuyor: beklenen 1"):
+    with pytest.raises(StoreError, match="şema sürümü uyuşmuyor: beklenen 2"):
         Store(db_path)
 
 
@@ -505,7 +509,7 @@ def test_unclosed_store_warns_and_still_closes_its_connection(db_path: Path) -> 
 
 def test_refused_open_leaks_no_connection(db_path: Path) -> None:
     Store(db_path).close()
-    raw_execute(db_path, "UPDATE meta SET value = '2'")
+    raw_execute(db_path, "UPDATE meta SET value = '1'")
 
     with pytest.raises(StoreError):
         Store(db_path)

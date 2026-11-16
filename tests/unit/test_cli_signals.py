@@ -577,6 +577,9 @@ def test_serve_gives_the_service_its_settings_and_a_loopback_address(
     assert (seen["host"], seen["port"]) == ("127.0.0.1", 8000)
     banner = capsys.readouterr().out
     assert banner.startswith("PropBot sinyal botu · mod: signal (emir GÖNDERİLMEZ")
+    # The charts that may send an entry are on screen before the first alert arrives.
+    assert "  sinyal süzgeci: giriş yalnızca şu TradingView sembollerinden (" in banner
+    assert " · asgari stop 1.5 puan\n" in banner
     for secret in THREE_SECRETS:
         assert secret not in repr(seen["parts"])
         assert secret not in banner

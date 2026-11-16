@@ -262,6 +262,10 @@ def run_config_check(config_dir: Path, today: dt.date, out: TextIO) -> int:
         if rules_freshness(venue, today).state is RulesState.FUTURE:
             future_dates += 1
 
+    print("Sinyal süzgeci (venue profili: signal):", file=out)
+    for name, venue in config.venues.items():
+        print(f"  [{name}] {_signal_filter_line(venue)}", file=out)
+
     unresolved_any = False
     for name, venue in config.venues.items():
         unresolved = unresolved_fields(venue)
@@ -444,6 +448,7 @@ def _serve_banner(
         f"{_freshness_line(venue, today)}",
         f"  alıcı: http://{_host_text(args.host)}:{args.port}/tv/webhook (TLS vekili ya da tünel "
         "arkasında)",
+        f"  sinyal süzgeci: {_signal_filter_line(venue)}",
         f"  TradingView kaynak IP'leri: {len(tv.webhook.source_ips)} adet · izlenen pencereler "
         f"(New York): {_windows_text(tv)}",
         f"  veritabanı: {args.db}",
@@ -454,6 +459,15 @@ def _serve_banner(
             "yazacak (docs/runbook.md §3.3)"
         )
     return lines
+
+
+def _signal_filter_line(venue: VenueProfile) -> str:
+    """Which charts may send an entry for this venue, and the smallest stop it may carry."""
+    symbols = venue.signal.tv_symbols
+    return (
+        f"giriş yalnızca şu TradingView sembollerinden ({len(symbols)}): {', '.join(symbols)} · "
+        f"asgari stop {venue.signal.min_stop_points:g} puan"
+    )
 
 
 def _host_text(host: str) -> str:
