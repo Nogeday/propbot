@@ -7,6 +7,7 @@ scripts share one, and that the webhook token input is hidden from the chart.
 """
 
 import re
+from collections import Counter
 
 import pytest
 
@@ -31,6 +32,9 @@ SENT_IDS: dict[str, set[str]] = {
 _LITERAL_ID = re.compile(r'"strategy_id":"([a-z0-9_]+)"')
 # `f_alert("master_ny_orb_fvg", ...)`: the Master script passes the id as the first argument.
 _ARGUMENT_ID = re.compile(r'\bf_alert\("([a-z0-9_]+)",\s*"(?:entry|stop_update|exit|cancel)"')
+_MASTER_CALL = re.compile(
+    r'\bf_alert\("(?P<id>[a-z0-9_]+)",\s*"(?P<action>entry|stop_update|exit|cancel)"'
+)
 _TOKEN_INPUT = re.compile(r"^alertToken\s*=\s*input\.string\(.*$", re.MULTILINE)
 
 
@@ -57,6 +61,45 @@ def test_every_pine_file_is_listed() -> None:
 @pytest.mark.parametrize("name", sorted(SENT_IDS))
 def test_each_script_sends_exactly_its_own_strategy_ids(name: str) -> None:
     assert sent_ids(name) == SENT_IDS[name]
+
+
+def test_every_master_alert_goes_out_under_the_id_of_its_own_leg() -> None:
+    # In the Master script the id is an argument of each call (the stand-alone scripts
+    # write it once): one call under the other leg's id would tie an S2 exit to the S1
+    # trade, and a removed call would leave a trade without its exit. Per leg and action:
+    # two entries (long, short); S1 also two trail updates; one session-end exit plus one
+    # in the forced flatten.
+    calls = Counter(
+        (match["id"], match["action"])
+        for match in _MASTER_CALL.finditer(code_lines("master_prop_firm_portfolio.pine"))
+    )
+
+    assert calls == {
+        ("master_ny_orb_fvg", "entry"): 2,
+        ("master_ny_orb_fvg", "stop_update"): 2,
+        ("master_ny_orb_fvg", "exit"): 2,
+        ("master_asian_sweep", "entry"): 2,
+        ("master_asian_sweep", "exit"): 2,
+    }
+
+
+def test_master_calls_that_read_one_legs_state_carry_that_legs_id() -> None:
+    legs = {"s1_": "master_ny_orb_fvg", "s2_": "master_asian_sweep"}
+    checked = 0
+    for line in code_lines("master_prop_firm_portfolio.pine").splitlines():
+        match = _MASTER_CALL.search(line)
+        if match is None:
+            continue
+        for prefix, strategy_id in legs.items():
+            if prefix in line:
+                assert match["id"] == strategy_id, line.strip()
+                checked += 1
+    # Entries pass estEntry / estStop (no s1_/s2_ in sight) and the forced flatten passes
+    # g_side: those are covered by the count above and by the `if s1_isOpen` lines below.
+    assert checked >= 5
+    code = code_lines("master_prop_firm_portfolio.pine")
+    assert re.search(r'if s1_isOpen\s*\n\s*f_alert\("master_ny_orb_fvg", "exit"', code)
+    assert re.search(r'if s2_isOpen\s*\n\s*f_alert\("master_asian_sweep", "exit"', code)
 
 
 def test_no_two_scripts_send_the_same_strategy_id() -> None:
