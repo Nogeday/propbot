@@ -92,6 +92,9 @@ _MAX_BACKOFF_MS: Final = 30 * _SECOND_MS
 _MAX_BACKOFF_EXPONENT: Final = 5
 _LOG_THROTTLE_MS: Final = 10 * _SECOND_MS
 _CONFLICT_ALARM: Final = ("telegram_conflict", 60 * _MINUTE_MS)
+# A copy that was restarted and met the other poller again says so, but not at every start:
+# a process that keeps crashing would send it every few seconds.
+STANDBY_AGAIN_ALARM: Final = ("telegram_standby_again", 5 * _MINUTE_MS)
 # Two processes polling with one token (user decision 53, ADR-0004). A copy has ARRIVED
 # when Telegram answers a getUpdates of it for the first time, or again after it was silent
 # for longer than this window. Conflicts inside the window mean someone else was there
@@ -242,6 +245,18 @@ def standby_alarm_text(instance: str) -> str:
         "BotFather → /revoke, .env'i güncelle, PIN'i değiştir.\n"
         "Az önce gönderdiğin bir komut yanıtsız kaldıysa ya da yanıtında BEKLEMEDE yazıyorsa "
         "yeniden gönder."
+    )
+
+
+def standby_again_alarm_text(instance: str) -> str:
+    """What a copy says that was restarted and has met the other poller again."""
+    return (
+        f"[ALARM] {_copy_name(instance)} yeniden başlatıldı, ama aynı bot token'ıyla başka bir "
+        "süreç hâlâ güncelleme çekiyor: yine BEKLEMEDE. Komut almıyor ve GİRİŞ sinyali "
+        "iletmiyor; stop/çıkış/iptal mesajlarını iletmeye devam ediyor.\n"
+        "Önce öbür süreci durdur, sonra bu kopyayı yeniden başlat. Bu uyarı 5 dakikada en çok "
+        "bir kez gelir: ondan sonraki bir denemede ETKİN bildirimi gelmediyse kopya yine "
+        "beklemededir."
     )
 
 
@@ -1211,16 +1226,23 @@ class TelegramService:
                 )
         self._polling_task = None
         now_ms = self._clock()
-        told_before = bool(self._inherited_standby)
+        restarted_into_it = bool(self._inherited_standby)
         text = standby_alarm_text(self._instance)
+        again_text = standby_again_alarm_text(self._instance)
 
         def record() -> None:
+            code, throttle_ms = STANDBY_AGAIN_ALARM
             with self._store.transaction() as tx:
                 tx.set_state(StateKey.STANDBY, STANDBY_ON, now_ms)
-                if not told_before:
-                    # Once per standby, however often the process restarts while it lasts:
-                    # the user's last word from this copy is BEKLEMEDE until it says ETKİN.
+                if not restarted_into_it:
                     tx.enqueue_message(kind=OutboxKind.ALARM, text=text, now_ms=now_ms)
+                else:
+                    # The user restarted this copy to end the standby and is waiting for
+                    # "ETKİN": tell them it did not work. Throttled by the store, which
+                    # outlives the process (a crash loop would otherwise repeat it).
+                    tx.enqueue_alarm(
+                        code=code, text=again_text, now_ms=now_ms, throttle_ms=throttle_ms
+                    )
 
         await asyncio.to_thread(record)
         self._standby = True

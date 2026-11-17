@@ -92,6 +92,13 @@ STANDBY_ALARM = (
     "Az önce gönderdiğin bir komut yanıtsız kaldıysa ya da yanıtında BEKLEMEDE yazıyorsa "
     "yeniden gönder."
 )
+STANDBY_AGAIN = (
+    "[ALARM] Bu PropBot kopyası (vps-1) yeniden başlatıldı, ama aynı bot token'ıyla başka bir "
+    "süreç hâlâ güncelleme çekiyor: yine BEKLEMEDE. Komut almıyor ve GİRİŞ sinyali iletmiyor; "
+    "stop/çıkış/iptal mesajlarını iletmeye devam ediyor.\n"
+    "Önce öbür süreci durdur, sonra bu kopyayı yeniden başlat. Bu uyarı 5 dakikada en çok bir "
+    "kez gelir: ondan sonraki bir denemede ETKİN bildirimi gelmediyse kopya yine beklemededir."
+)
 ACTIVE_AGAIN = (
     "[BİLGİ] Bu PropBot kopyası (vps-1) yeniden ETKİN: bir dakikadır başka dinleyici yok. "
     "Giriş sinyalleri yeniden iletiliyor ve komutlar bu kopyaya geliyor.\n"
@@ -2108,6 +2115,46 @@ def with_bot[T](scenario: Callable[[ResilientBot, FakeRequest, Unparsed], Awaita
     return asyncio.run(main())
 
 
+def test_the_bot_reports_each_answer_and_whether_it_was_a_conflict() -> None:
+    # What the service's presence rules rest on: a result (empty or not) and a batch the
+    # library cannot build are answers; a 409 is an answer of its own kind; a network
+    # failure is no answer at all.
+    async def main() -> list[bool]:
+        fake, seen = FakeRequest(), Unparsed()
+        answers: list[bool] = []
+        bot = ResilientBot(
+            BOT_TOKEN,
+            on_unparsed=seen,
+            on_answer=answers.append,
+            request=fake,
+            get_updates_request=fake,
+            sleep=seen.sleep,
+        )
+        await bot.initialize()
+        try:
+            fake.script(
+                "getUpdates",
+                tg.ok([]),
+                tg.ok([tg.private_update("/mod", sent_at_ms=NOW_MS)]),
+                tg.ok([unbuildable_update()]),  # the poll that cannot be built ...
+                tg.ok([unbuildable_update()]),  # ... and its salvage request
+                NetworkError("no route"),
+                tg.error_response(409, "Conflict: terminated by other getUpdates request"),
+            )
+            await bot.get_updates(timeout=10)
+            await bot.get_updates(timeout=10)
+            await bot.get_updates(timeout=10)
+            with pytest.raises(NetworkError):
+                await bot.get_updates(timeout=10)
+            with pytest.raises(Conflict):
+                await bot.get_updates(timeout=10)
+        finally:
+            await bot.shutdown()
+        return answers
+
+    assert asyncio.run(main()) == [False, False, False, True]
+
+
 def test_the_update_used_as_unbuildable_really_breaks_the_library() -> None:
     with pytest.raises(TypeError, match="type"):
         Update.de_json(unbuildable_update(), None)
@@ -2895,10 +2942,13 @@ def test_an_empty_long_poll_is_an_answer_and_keeps_the_copy_that_was_first() -> 
     drive(scenario, polling=True)
 
 
-def test_empty_long_polls_alone_lift_an_inherited_standby() -> None:
+@pytest.mark.parametrize("mark", ["1", "2", "yes"])
+def test_empty_long_polls_alone_lift_an_inherited_standby(mark: str) -> None:
+    # Whatever the earlier process left: on standby, restarted once already ("2": a second
+    # restart during the minute), or text nobody can read. None of them may stay for ever.
     async def scenario(h: Harness) -> None:
         with h.store.transaction() as tx:
-            tx.set_state(StateKey.STANDBY, "1", h.clock.now_ms)
+            tx.set_state(StateKey.STANDBY, mark, h.clock.now_ms)
 
         async def nothing(_call: tg.Call) -> tg.Response:
             h.clock.now_ms += 10_000
@@ -3186,17 +3236,50 @@ def test_a_command_held_after_a_conflict_is_answered_as_from_standby_when_the_co
     drive(scenario, polling=True, arrival_hold_ms=3_000, contest_hold_ms=10_000)
 
 
+@pytest.mark.parametrize(
+    ("since_conflict_ms", "as_from_standby"),
+    [(0, True), (5_000, True), (9_999, True), (10_000, False), (10 * MINUTE_MS, False)],
+)
+def test_a_stopping_copy_answers_as_from_standby_only_while_a_conflict_is_unexplained(
+    since_conflict_ms: int, as_from_standby: bool
+) -> None:
+    # One Conflict keeps a command back for ten seconds. Stopped within them, the copy does
+    # not know whether it holds the bot; afterwards the Conflict was a stray one, and a
+    # command still waiting at shutdown is carried out as usual, for the rest of the process.
+    async def scenario(h: Harness) -> None:
+        arrive(h)
+        h.clock.now_ms += 1_000
+        conflict(h)
+        h.clock.now_ms += since_conflict_ms
+        h.service._stopping = True
+        assert await h.service._settled() is as_from_standby
+
+    drive(scenario, arrival_hold_ms=3_000, contest_hold_ms=10_000)
+
+
+def test_a_stopping_copy_that_saw_no_conflict_answers_as_usual() -> None:
+    async def scenario(h: Harness) -> None:
+        arrive(h)
+        h.service._stopping = True
+        assert await h.service._settled() is False
+
+    drive(scenario, arrival_hold_ms=3_000, contest_hold_ms=10_000)
+
+
 # --- standby: entries, and the way back ------------------------------------------------------
 
 
-def test_a_pending_entry_signal_is_dropped_while_the_store_says_standby() -> None:
+@pytest.mark.parametrize("mark", ["1", "2", "yes"])
+def test_a_pending_entry_signal_is_dropped_while_the_store_says_standby(mark: str) -> None:
     # Not the user's choice (unlike a pause): the drop is said, and with its real reason.
+    # Also while the copy is leaving standby ("2") and for a mark nobody can read: an entry
+    # may wait behind another message across a restart.
     async def scenario(h: Harness) -> None:
         await h.first_step()
         signal_id, entry_id = h.entry()
         follow_up = h.enqueue("[STOP GÜNCELLE] açık işlem", kind=OutboxKind.SIGNAL)
         with h.store.transaction() as tx:
-            tx.set_state(StateKey.STANDBY, "1", h.clock.now_ms)
+            tx.set_state(StateKey.STANDBY, mark, h.clock.now_ms)
         await h.drain()
         assert h.row(entry_id).status is OutboxStatus.EXPIRED
         assert h.counted(signal_id) == (False, ReleaseReason.UNDELIVERED)
@@ -3391,13 +3474,15 @@ def test_a_copy_that_telegram_stopped_answering_does_not_call_itself_active() ->
     drive(scenario, polling=True)
 
 
-def test_a_restart_into_the_same_conflict_stays_on_standby_without_a_second_alarm() -> None:
-    # A crash loop, or a restart while the other copy still runs: the user's last word from
-    # this copy is still BEKLEMEDE, and nothing has changed.
+def test_a_restart_into_the_same_conflict_says_so_at_most_every_five_minutes() -> None:
+    # The user restarted the copy to end the standby and waits for "ETKİN": when the other
+    # process is still there they are told that it did not work. A process that keeps
+    # crashing comes back every few seconds: the store throttles the alarm across restarts.
     sent: list[list[str]] = []
+    starts_at_ms = [0, 10_000, 20_000, 200_000, 310_000, 320_000, 611_000]
 
     async def one_start(h: Harness) -> None:
-        h.clock.now_ms = NOW_MS + len(sent) * 10_000
+        h.clock.now_ms = NOW_MS + starts_at_ms[len(sent)]
         h.fake.script("getUpdates", CONFLICT_409, CONFLICT_409)
         stop = asyncio.Event()
         task = asyncio.create_task(h.service.run(stop))
@@ -3411,10 +3496,47 @@ def test_a_restart_into_the_same_conflict_stays_on_standby_without_a_second_alar
         sent.append(h.fake.sent_texts())
 
     with Store(":memory:") as store:
-        for _ in range(3):
+        for _ in starts_at_ms:
             drive(one_start, polling=True, store=store)
 
-    assert sent == [[STANDBY_ALARM], [], []]
+    assert sent == [
+        [STANDBY_ALARM],  # the first time: the standby itself
+        [STANDBY_AGAIN],  # 10 s later, restarted: still there
+        [],  # 20 s
+        [],  # 200 s: less than five minutes after the last "again"
+        [STANDBY_AGAIN],  # 310 s: five minutes after the one at 10 s
+        [],
+        [STANDBY_AGAIN],  # 611 s
+    ]
+    assert telegram_module.STANDBY_AGAIN_ALARM == ("telegram_standby_again", 300_000)
+    assert telegram_module.standby_again_alarm_text("vps-1") == STANDBY_AGAIN
+    assert code_entity_spans(STANDBY_AGAIN) == []
+
+
+def test_a_copy_that_was_active_again_announces_a_new_standby_in_full() -> None:
+    # Not a restart into the old standby: the copy had said ETKİN in between.
+    async def scenario(h: Harness) -> None:
+        with h.store.transaction() as tx:
+            tx.set_state(StateKey.STANDBY, "1", h.clock.now_ms)
+        stop = asyncio.Event()
+        task = await polling_for(h, stop)
+        try:
+            await answered(h)
+            h.clock.now_ms += 60_000
+            await answered(h)
+            h.clock.now_ms += 1
+            await until(lambda: ACTIVE_AGAIN in h.fake.sent_texts())
+            h.clock.now_ms += 10 * MINUTE_MS  # silent, then back: a new arrival
+            h.fake.script("getUpdates", CONFLICT_409, CONFLICT_409)
+            h.fake.push_update(tg.private_update("/mod", sent_at_ms=h.clock.now_ms))
+            await until(lambda: STANDBY_ALARM in h.fake.sent_texts(), timeout=10)
+            assert h.flag(StateKey.STANDBY) == "1"
+        finally:
+            stop.set()
+            await asyncio.wait_for(task, 5)
+        assert STANDBY_AGAIN not in h.fake.sent_texts()
+
+    drive(scenario, polling=True)
 
 
 def test_an_arrival_that_stays_unchallenged_says_nothing_when_there_was_no_standby() -> None:

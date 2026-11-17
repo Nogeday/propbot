@@ -380,7 +380,7 @@ def test_the_notice_of_a_copy_that_is_leaving_standby_says_wait_not_restart() ->
         "doğruluyor. ETKİN bildirimi gelene kadar giriş sinyalleri iletilmez (stop/çıkış/iptal "
         "mesajları gelir). Bu girişi ALMA.\n"
         "Kopyayı yeniden başlatma, bekle: ETKİN bildirimi yaklaşık bir dakika sonra gelir. Onun "
-        "yerine yeni bir BEKLEMEDE alarmı gelirse öbür süreç hâlâ dinliyordur.\n"
+        'yerine "yine BEKLEMEDE" alarmı gelirse öbür süreç hâlâ dinliyordur.\n'
         "id 123 · bar 09:44 NY / 17:44 TR"
     )
     assert "komut almıyor" not in text  # it does take commands in this phase

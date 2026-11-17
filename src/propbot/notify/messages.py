@@ -383,7 +383,7 @@ def entry_standby_skip_notice(row: SignalRow, *, leaving: bool = False) -> str:
             "doğruluyor. ETKİN bildirimi gelene kadar giriş sinyalleri iletilmez "
             "(stop/çıkış/iptal mesajları gelir). Bu girişi ALMA.",
             "Kopyayı yeniden başlatma, bekle: ETKİN bildirimi yaklaşık bir dakika sonra gelir. "
-            "Onun yerine yeni bir BEKLEMEDE alarmı gelirse öbür süreç hâlâ dinliyordur.",
+            'Onun yerine "yine BEKLEMEDE" alarmı gelirse öbür süreç hâlâ dinliyordur.',
         ]
     else:
         body = [
