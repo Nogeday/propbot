@@ -521,6 +521,17 @@ turunun düzeltmeleri · `453a37f` + `6f38dad` üçüncü turunkiler (aşağıda
   SPEC §8.1, runbook §10. CLAUDE.md değişmez kural 3'e not eklendi ("`signal` modunda kural dosyası eskimişse girişler
   kesilmez…"); `approve` / `auto` kilitleri (değişmez kural 1) değişmedi.
 
+### Kullanıcı onayları (2026-11-17)
+Teslim raporunda onaya sunulan üç seçim onaylandı ("olduğu gibi kalsın"):
+- **Master bacak kimlikleri** `master_ny_orb_fvg` ve `master_asian_sweep` olarak kalır (bağımsız script'in kimliği +
+  `master_` öneki; örnekteki `master_ny_open` kullanılmadı).
+- **Yarım tick'ten dar stop:** Pine'ın tick'e yuvarlayıp girişle aynı fiyata yazdığı stop'u alıcı şeması reddetmeye devam
+  eder ("Geçersiz alert gövdesi reddedildi (alanlar: stop)", kaydedilmez); "stop çok dar" sayımına girmez.
+- **Master + bağımsız script yan yana:** aynı kurulum için iki giriş mesajı gelir ve günlük bütçede ikisi de sayılır;
+  alınmayan `/atladim <id>` ile bildirilir.
+
+Aynı gün `main-bz6vo7`, `main` dalına fast-forward ile aktarıldı (zorla push yok).
+
 ### Dal geçmişi
 - `WIP: uncommitted changes, moved to the cloud` commit'i (`b6fcbc8`) bağımlılık commit'ine (`cd00945`) katıldı; dal
   `--force-with-lease` ile yeniden yazıldı (açık bulgu 31). Eski Faz 1 commit kimlikleri artık dalda yok.
@@ -761,9 +772,9 @@ denetiminden, 55–58 2026-11-16 kararlarının uygulamasından.
     servisin girişlerini bu yolla kesebilir (alarmla; token sızıntısı zaten BotFather → /revoke gerektirir). (h) Yol
     vermeyen dinleyiciyle geçen o iki dakikada komutlar iki süreç arasında rastgele paylaşılır (karar 53 öncesindeki
     durum); alarm bunu söyler.
-57. **Master + bağımsız script yan yana: bütçe iki kez sayılır.** Aynı kurulumu iki script de görürse iki giriş mesajı
-    gelir ve günlük bütçede ikisi de sayılır (bot hangisinin alındığını bilemez); kullanıcı almadığını `/atladim <id>`
-    ile bildirir. İki mesajın aynı işlem fikri olduğu mesajda yazmaz.
+57. **Master + bağımsız script yan yana: bütçe iki kez sayılır — kabul edildi (kullanıcı kararı, 2026-11-17).** Aynı
+    kurulumu iki script de görürse iki giriş mesajı gelir ve günlük bütçede ikisi de sayılır (bot hangisinin alındığını
+    bilemez); kullanıcı almadığını `/atladim <id>` ile bildirir. İki mesajın aynı işlem fikri olduğu mesajda yazmaz.
 58. **Dar stop eşiği tek değer:** `min_stop_points` venue profili başınadır; strateji ya da zaman dilimi başına ayrı eşik
     yok. Kabul koşusunda `signals report` "atla: stop çok dar" sayısına bakılıp eşik gözden geçirilmeli.
 

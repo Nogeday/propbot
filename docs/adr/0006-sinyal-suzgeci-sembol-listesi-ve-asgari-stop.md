@@ -73,7 +73,7 @@ signal:
   sıkılaştırmak her zaman iletilir). Stop'u girişle **aynı fiyata** yazılmış bir girişi alıcı şeması daha önce
   reddeder (422, "Geçersiz alert gövdesi reddedildi (alanlar: stop)" alarmı; kaydedilmez): Pine fiyatları tick'e yuvarlayarak
   yazdığı için yarım tick'ten dar bir stop da buraya düşer ve "stop çok dar" sayımına girmez. Bu şema kuralı
-  değiştirilmedi (ayrı bir karar ister).
+  değiştirilmedi; kullanıcı 2026-11-17'de böyle kalmasını onayladı.
 - İki yeni sonuç `signals.outcome` denetimine girdiği için **veritabanı şema sürümü** arttı (bekleme sonucuyla
   birlikte bugün 3; ADR-0004); eski sürümle oluşturulmuş dosya açılmaz
   (ADR-0004: göç yok). Kabul koşusu başlamadığı için göç yazılmadı.
