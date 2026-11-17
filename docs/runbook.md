@@ -144,11 +144,16 @@ curl -s http://127.0.0.1:8000/healthz              # {"status":"ok"}
     içinde iki kez "başka biri de dinliyor" (409 Conflict) yanıtı alırsa **beklemeye** geçer ve "[ALARM] Bu PropBot
     kopyası (makine adı) BEKLEMEDE" mesajını gönderir. Beklemedeki kopya çalışmaya devam eder ama komut almaz ve
     **giriş sinyali iletmez**; açık işlemlerin stop/çıkış/iptal mesajlarını iletir. Zaten çalışan kopya botu tutar ve
-    "Aynı bot token'ıyla başka bir süreç güncelleme çekiyor" alarmını verir.
+    "Aynı bot token'ıyla başka bir süreç güncelleme çekiyor" alarmını verir. İstisna: öbür dinleyici yol vermiyorsa
+    (PropBot olmayan bir program aynı token'ı kullanıyor, ya da bot başka yerde webhook'a bağlanmış) zaten çalışan
+    kopya da iki dakika boyunca "başka biri dinliyor" yanıtından başka yanıt alamayınca beklemeye geçer: komutlarının
+    kendisine ulaşacağından emin olamayan kopya giriş iletmez. O durumda öbür programı durdur ya da token'ı yenile.
   - **Beklemeden çıkış:** hangi kopya çalışmalıysa öbürünü durdur, sonra beklemedeki kopyayı yeniden başlat
-    (`sudo systemctl restart propbot`). Kopya bir dakika tek başına kalırsa "[BİLGİ] … yeniden ETKİN" bildirimini
-    gönderir; o bildirim gelene kadar giriş sinyalleri "[SİNYAL — ATLA] … Bu kopya BEKLEMEDE" olarak gelir. Bekleme
-    kendiliğinden bitmez (kopya, öbürünü rahatsız etmemek için yeniden dinlemeyi denemez).
+    (`sudo systemctl restart propbot`). Kopya yaklaşık bir dakika tek başına kalınca (sessiz bir botta 70 saniye kadar)
+    "[BİLGİ] … yeniden ETKİN" bildirimini gönderir; o bildirim gelene kadar giriş sinyalleri "[SİNYAL — ATLA] … Bu kopya
+    beklemeden çıkıyor" olarak gelir. **O bir dakikada kopyayı yeniden başlatma:** her yeniden başlatma süreyi baştan
+    başlatır ve arada gelen alert'ler kaybolur. ETKİN yerine yeni bir BEKLEMEDE alarmı gelirse öbür kopya hâlâ dinliyordur.
+    Bekleme kendiliğinden bitmez (kopya, öbürünü rahatsız etmemek için yeniden dinlemeyi denemez).
   - Yeni kopyanın başladığı ilk saniyelerde gönderdiğin bir komut ona gitmiş olabilir. Bot bunu şöyle karşılar: varıştan
     sonraki ilk 3 saniyede gelen komutları bekletir; kopya beklemeye geçerse `/kill` ve `/duraklat` o kopyada yine
     uygulanır ve yanıtın sonunda "[BEKLEMEDE] … öbür sürece ULAŞMADI. Yeniden gönder." yazar, öbür komutlar "Bu kopya
@@ -383,7 +388,10 @@ Uçtan uca test TradingView'dan yapılır: heartbeat alarmını kur, saat başı
 - **30 günde bir:** FTMO kurallarını resmi sayfadan yeniden doğrula (`rules_verified_at`).
 - **Yedek:** `sqlite3 data/propbot.db ".backup 'data/yedek-$(date +%F).db'"` (bot çalışırken güvenlidir).
 - **Güncelleme** (izlenen pencere dışında): `git pull && uv sync --frozen --no-dev && uv run propbot config check &&
-  sudo systemctl restart propbot`.
+  sudo systemctl restart propbot`. Ardından `systemctl status propbot` ve Telegram'da `/saglik` ile çalıştığını doğrula:
+  `config check` veritabanını denetlemez. **2026-11-16 sürümü veritabanı şemasını değiştirdi:** daha eski bir sürümle
+  oluşturulmuş `data/propbot.db` ile servis başlamaz, 5 saniyede bir yeniden dener ve Telegram'a hiçbir şey yazamaz
+  (11. bölüm, "şema sürümü uyuşmuyor" satırı).
 
 ## 11. Sorun giderme
 
@@ -399,7 +407,7 @@ Uçtan uca test TradingView'dan yapılır: heartbeat alarmını kur, saat başı
 | Telegram'da "dakikada 30 istekten fazlasını gönderiyor" (429) | bir alarm döngüde ya da aynı alarm birkaç kez kurulmuş | TradingView Alerts paneli |
 | "[SİNYAL — ATLA] Sunucu saati TradingView ile uyuşmuyor" | sunucu saati geride | `chronyc tracking`; `sudo systemctl restart chrony` |
 | "[SİNYAL — ATLA] Sembol kabul listesinde değil (…)" | alarm, listede olmayan bir grafikte kurulu; ya da TradingView sembolü listedekinden farklı yazıyor (önek, büyük/küçük harf) | parantezdeki yazım. Ölçeği `US500.cash` ile aynıysa `signal.tv_symbols`'a o yazımla ekle, `config check`, yeniden başlat (3.3); değilse alarmı doğru grafiğe kur |
-| "[ALARM] … alert'i geldi, ama sembol kabul listesinde değil" | listede olmayan bir grafikten stop/çıkış/iptal geldi ve botun ilettiği bir girişi yok | TradingView Alerts panelinde o alarmın sembolü; o grafiğe bakarak elle aldığın pozisyon varsa stop/çıkışı TradingView'dan izle |
+| "[ALARM] … alert'i geldi (id …), ama sembol kabul listesinde değil" | listede olmayan bir grafikten stop/çıkış/iptal geldi ve botun ilettiği bir girişi yok | TradingView Alerts panelinde o alarmın sembolü; o grafiğe bakarak elle aldığın pozisyon varsa stop/çıkışı TradingView'dan izle |
 | "[SİNYAL — ATLA] Stop çok dar" | stop mesafesi `signal.min_stop_points`'ten (1,5 puan) küçük | beklenen davranış; sık oluyorsa stratejinin stop girdileri (buffer) çok küçük |
 | "[İLETİM BELİRSİZ]" | Telegram yanıtı gecikti; mesaj ulaşmış olabilir | sinyali gördüysen bir şey yapma; görmediysen `/atladim <id>` |
 | "Sinyal işlenemedi" alarmı | o sinyalde yazılım hatası; kuyruk devam eder | `journalctl -u propbot \| grep signal_processing_failed`; Claude Code'a bildir |
@@ -415,12 +423,14 @@ Uçtan uca test TradingView'dan yapılır: heartbeat alarmını kur, saat başı
 | `HATA: bu veritabanıyla çalışan başka bir propbot serve var` | servis çalışırken elle bir kopya daha başlatıldı | `systemctl status propbot`; kopya hiçbir şeye dokunmadan çıkar |
 | `HATA: kilit dosyası açılamıyor` | `data/` klasörü yok ya da servis kullanıcısına ait değil | `mkdir -p data && chmod 700 data`; klasörün sahibi birimdeki `User=` olmalı |
 | `HATA: bu Telegram botuyla çalışan başka bir propbot serve var` | bu makinede aynı `TELEGRAM_BOT_TOKEN` ile bir kopya zaten çalışıyor (çoğunlukla systemd servisi) | `systemctl status propbot`, `pgrep -af "propbot serve"`; kopya hiçbir şeye dokunmadan çıkar. Deneme için ayrı bot (4. bölüm) |
-| "[ALARM] Bu PropBot kopyası (…) BEKLEMEDE" · günlükte `telegram_standby` | bu kopya Telegram'a ulaştığında aynı token'la başka bir süreç (başka makine, konteyner) zaten dinliyordu. Kopya çalışıyor, ama komut almıyor ve giriş sinyali iletmiyor | hangi kopya çalışmalıysa öbürünü durdur, sonra bu kopyayı yeniden başlat (`sudo systemctl restart propbot`); bir dakika içinde "yeniden ETKİN" bildirimi gelmeli. Başka kopyan yoksa token'ı yenile (BotFather → /revoke) |
-| "[SİNYAL — ATLA] … Bu kopya BEKLEMEDE" | yukarıdaki bekleme sürüyor (ya da kopya yeniden başladı ve bir dakikalık doğrulama henüz bitmedi) | "yeniden ETKİN" bildirimini bekle; gelmiyorsa öbür kopya hâlâ dinliyor demektir |
+| "[ALARM] Bu PropBot kopyası (…) BEKLEMEDE" · günlükte `telegram_standby` | aynı token'la başka bir süreç (başka makine, konteyner, başka bir program) dinliyor ve bu kopya ona yol verdi: ya yeni gelen buydu, ya da iki dakika boyunca öbür dinleyici yüzünden hiç güncelleme alamadı. Kopya çalışıyor, ama komut almıyor ve giriş sinyali iletmiyor | hangi kopya çalışmalıysa öbürünü durdur, sonra bu kopyayı yeniden başlat (`sudo systemctl restart propbot`); yaklaşık bir dakika sonra "yeniden ETKİN" bildirimi gelmeli. Başka kopyan yoksa token'ı yenile (BotFather → /revoke) |
+| "[SİNYAL — ATLA] … Bu kopya BEKLEMEDE" | yukarıdaki bekleme sürüyor: kopya, beklemeye geçtiğinden beri yeniden başlatılmadı | üst satırdaki adımlar (öbür kopyayı durdur, bu kopyayı yeniden başlat). Beklemek yetmez: bekleme kendiliğinden bitmez |
+| "[SİNYAL — ATLA] … Bu kopya beklemeden çıkıyor" | kopya yeniden başlatıldı, yeniden dinliyor ve başka dinleyici kalmadığını doğruluyor (yaklaşık bir dakika) | **yeniden başlatma, bekle:** "yeniden ETKİN" bildirimi gelince girişler açılır. Onun yerine yeni bir BEKLEMEDE alarmı gelirse öbür kopya hâlâ dinliyor demektir |
+| "[İLETİLEMEDİ — ATLA] … (bu kopya BEKLEMEDE)" ya da "[İLETİM BELİRSİZ] … bu kopya BEKLEMEDE olduğu için yeniden gönderilmedi" | kopya beklemeye geçtiği anda kutuda bir giriş mesajı bekliyordu; gönderilmedi | ilki: bir şey yapma. İkincisi: mesaj sana ulaşmış olabilir; girmediysen, kopya yeniden ETKİN olduktan sonra `/atladim <id>` |
 | Komut yanıtı "Bu kopya BEKLEMEDE … UYGULANMADI" ya da yanıtın sonunda "[BEKLEMEDE] … ULAŞMADI" | komut, beklemeye geçmekte olan kopyaya düştü | komutu yeniden gönder; çalışan kopya yanıtlar |
 | "[ALARM] Aynı bot token'ıyla başka bir süreç güncelleme çekiyor" | bu kopya çalışırken aynı token'la ikinci bir süreç dinlemeye başladı | ikinci kopyayı durdur; `/durum` ile durumu kontrol et, o sırada gönderdiğin komutu yeniden gönder. Başka kopyan yoksa token sızmıştır: BotFather → /revoke, `.env`, PIN |
 | `/kill` "KILL etkin" dedi ama sinyaller gelmeye devam ediyor | komutu başka bir makinedeki ikinci kopya aldı (yanıtın sonunda "[BEKLEMEDE]" notu vardır) ya da ikinci kopya 3 saniyelik bekletmeden sonra ortaya çıktı | yukarıdaki alarmlar; fazla kopyayı durdur, `/kill <PIN>`'i yeniden gönder ve `/durum` ile doğrula |
-| `HATA: veritabanı şema sürümü uyuşmuyor: beklenen 3, okunan '1'` (ya da `'2'`) | `data/propbot.db` bu sürümden önce oluşturulmuş (yeni sonuç türleri eski dosyaya yazılamaz; geçiş desteği yok) | servis durmuşken `mv data/propbot.db data/propbot-v1.db` (varsa `-wal` ve `-shm` dosyalarıyla birlikte); servis yeni dosya oluşturur. Eski kayıtlar eski dosyada kalır; duraklatma/KILL durumu ve günlük bütçe defteri sıfırlanır |
+| `HATA: veritabanı şema sürümü uyuşmuyor: beklenen 3, okunan '1'` (ya da `'2'`) · `systemctl status`: servis 5 sn'de bir yeniden deniyor | `data/propbot.db` bu sürümden önce oluşturulmuş (yeni sonuç türleri eski dosyaya yazılamaz; geçiş desteği yok) | izlenen pencere dışında ve açık işlem yokken: `sudo systemctl stop propbot` → `mv data/propbot.db data/propbot-v1.db`; klasörde `propbot.db-wal` ya da `propbot.db-shm` kaldıysa onları da **aynı adla** taşı (`propbot-v1.db-wal`, `propbot-v1.db-shm`), yoksa son kayıtlar eski dosyadan eksik kalır → `sudo systemctl start propbot` → `/durum`. Yeni dosya boş başlar: **duraklatma ya da KILL etkindiyse komutu yeniden gönder**; o gün iletilmiş girişler bütçede artık sayılmaz; PIN kilidi ve alarm kısıtlamaları da sıfırlanır. Eski dosyayı bu sürümün `signals report` komutu okuyamaz (yalnızca `sqlite3` ile ya da eski sürümle) |
 | `status=226/NAMESPACE` | birimdeki `ReadWritePaths` klasörü yok (depo yolu değişti ama satır değişmedi; `data/` oluşturulmadı) | birimdeki işaretli dört satır; `mkdir -p data` |
 | `/saglik` yanıt vermiyor | Telegram token/sohbet kimliği yanlış; ağ yok | `journalctl -u propbot -n 50` |
 | Mesajda "boyut hesaplanamadı" | venue profilinde `contract.*` boş | 3.3 |

@@ -102,8 +102,16 @@ traceback olarak basılmaz, aynı zincirden geçer: python-telegram-bot'un `Inva
      yazar (işleyici girişleri `skip_standby` olarak bildirir, gönderici bekleyen giriş mesajlarını düşürür),
      "[ALARM] … BEKLEMEDE" mesajını bir kez gönderir ve **çalışmaya devam eder**: stop güncelleme / çıkış / iptal
      iletilir. İşaret sürecin ömründen uzun yaşar; yeniden başlayan kopya yeniden dinler ve 60 saniye boyunca
-     Conflict görmeden yanıt alırsa işareti kaldırıp "[BİLGİ] … yeniden ETKİN" der. 60 saniyeden uzun süredir yanıt
-     alan kopya botu tutar ve eski alarmı verir.
+     Conflict görmeden yanıt alırsa işareti kaldırıp "[BİLGİ] … yeniden ETKİN" der (işaretin iki değeri vardır:
+     "beklemede" ve "yeniden dinliyor, henüz bir dakika yalnız kalmadı"; giriş bildirimi hangisinde olduğunu söyler).
+     60 saniyeden uzun süredir yanıt alan kopya botu tutar ve eski alarmı verir.
+     - *Yol vermeyen dinleyici:* öbür süreç bu sürümden değilse (başka bir program, eski bir kopya, webhook) yol
+       vermez; iki dinleyici de yalnızca Conflict alır, python-telegram-bot'un bekleme aralığı 30 saniyeye çıkar ve
+       komutlar hangisi o anda soruyorsa ona gider. Zaten çalışan kopya **iki dakika boyunca Conflict'ten başka
+       yanıt alamazsa** o da beklemeye geçer. Seçenek "botu tutmaya devam et" idi: komutların kendisine ulaşacağına
+       güvenemeyen bir kopya giriş iletmeye devam ederdi (değişmez kural 3). İkinci turun bulgusu bu durumu
+       rastlantıya bağlı buldu (30 sn'lik aralıkta tek bir başarısız istek 60 sn'lik sessizlik sayılıp kopyayı
+       "yeni gelen" yapıyordu); kural, aynı sonucu belirli bir süreyle verir.
      - *Neden çıkmıyor (ilk uygulama çıkıyordu; denetim bulgusu, 2026-11-16):* `Restart=always` altında çıkan kopya
        5 saniyede bir geri gelir; her seferinde kutusundaki giriş mesajlarını gönderir, öbür kopyanın uzun
        sorgusunu keser, bir komut alabilir ve arada alıcı kapalı kaldığı için çıkış alert'leri kaybolur. Canlı servis
@@ -122,8 +130,8 @@ traceback olarak basılmaz, aynı zincirden geçer: python-telegram-bot'un `Inva
        bekletilir. Kopya beklemeye geçerse `/kill` ve `/duraklat` yine uygulanır (yalnızca risk azaltır; yanıt, komutun
        öbür sürece ulaşmadığını söyler), öbür komutlar "yeniden gönder" yanıtıyla reddedilir.
   Kalan açıklar: (a) Telegram'ın 409'u hangi isteğe verdiği bu ortamdan gözlenemedi; kural, iki dinleyicinin de
-  sırayla 409 aldığı (bilinen) davranışa dayanır — yalnızca eski süreç 409 alıyorsa yeni kopya beklemeye geçmez ve
-  önceki davranış (alarm, iki kopya çalışır) sürer. (b) Öbür süreç 3 saniyeden geç ortaya çıkarsa (hata sonrası uzun
+  sırayla 409 aldığı (bilinen) davranışa dayanır — yalnızca eski süreç 409 alıyorsa yeni kopya beklemeye geçmez,
+  eski kopya iki dakika sonra "yol vermeyen dinleyici" kuralıyla bekler ve bot yeni kopyada kalır. (b) Öbür süreç 3 saniyeden geç ortaya çıkarsa (hata sonrası uzun
   bekleme aralığındaysa) yeni gelen kopya o arada aldığı bir komutu uygulamış olur. (c) Canlı servis, başka makinede
   aynı token'la dinleyen bir kopya varken yeniden başlarsa beklemeye geçen canlı servis olur; girişleri keser, alarmı
   makine adıyla verir ve yeniden başlatılana kadar öyle kalır. (d) İki kopya aynı dakikada varırsa ikisi de beklemeye

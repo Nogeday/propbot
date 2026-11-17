@@ -496,9 +496,15 @@ güncelleme / çıkış / iptal mesajlarını iletmeye devam eder, "[ALARM] Bu P
 mesajını bir kez gönderir ve **çalışmaya devam eder** (çıkmaz: systemd onu birkaç saniyede bir yeniden başlatır,
 her seferinde öbür kopyanın güncellemelerini alır ve arada alıcı kapalı kalırdı). Tek bir Conflict hoş görülür
 (elle gönderilmiş bir `getUpdates`, önceki sürecin Telegram'da kalmış isteği). Bekleme, sürecin ömrü boyunca sürer;
-kopya yeniden başlatılınca yeniden dinler, 60 saniye boyunca tek başına kalırsa "[BİLGİ] … yeniden ETKİN"
-bildirimini gönderir ve girişleri açar. 60 saniyeden uzun süredir yanıt alan kopya botu tutar ve "Aynı bot
-token'ıyla başka bir süreç…" alarmını verir. Varıştan sonraki ilk 3 saniyede (bir Conflict görüldüyse 10 saniye)
+kopya yeniden başlatılınca yeniden dinler (o sırada giriş bildirimi "Bu kopya beklemeden çıkıyor … bekle" der),
+Telegram'ın ilk yanıtından sonra 60 saniye boyunca Conflict görmeden yanıt alırsa "[BİLGİ] … yeniden ETKİN"
+bildirimini gönderir ve girişleri açar (yeniden başlatmadan yaklaşık bir dakika, sessiz bir botta 70 saniye kadar
+sonra). 60 saniyeden uzun süredir yanıt alan kopya botu tutar ve "Aynı bot token'ıyla başka bir süreç…" alarmını
+verir; ancak öbür dinleyici yol vermezse (bu sürümden olmayan bir program, başka yerde kurulmuş bir webhook) ve kopya
+**iki dakika boyunca Conflict'ten başka yanıt alamazsa** o da beklemeye geçer: komutlarını alabileceğinden emin
+olamayan kopya giriş iletmez (değişmez kural 3). Beklemeye geçerken kutuda bekleyen bir giriş mesajı düşürülür ve
+bu söylenir ("[İLETİLEMEDİ — ATLA] … bu kopya BEKLEMEDE", ya da gönderimi kuşkuluysa "[İLETİM BELİRSİZ] … bu kopya
+BEKLEMEDE olduğu için yeniden gönderilmedi"). Varıştan sonraki ilk 3 saniyede (bir Conflict görüldüyse 10 saniye)
 gelen komutlar bekletilir; kopya beklemeye geçerse `/kill` ve `/duraklat` yine uygulanır (yalnızca risk azaltır)
 ve yanıt komutun öbür sürece ulaşmadığını söyler, öbür komutlar "yeniden gönder" yanıtıyla reddedilir. Süreler
 duvar saatiyle değil, makinenin açılış saatiyle (uyku dahil, `CLOCK_BOOTTIME`) ölçülür. Deneme kopyası ayrı bot
