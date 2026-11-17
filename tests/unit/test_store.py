@@ -20,6 +20,8 @@ from propbot.store.db import (
     BUSY_TIMEOUT_MS,
     MAX_ERROR_CHARS,
     SCHEMA_VERSION,
+    STANDBY_LEAVING,
+    STANDBY_ON,
     BudgetRow,
     LatencySample,
     NewSignal,
@@ -201,6 +203,11 @@ def raw_execute(path: Path, sql: str, *, ignore_checks: bool = False) -> list[tu
 def test_enum_values_are_the_stored_text(enum_type: type[StrEnum], values: list[str]) -> None:
     # These strings are persisted: changing one needs a schema migration.
     assert [member.value for member in enum_type] == values
+
+
+def test_the_two_values_of_the_standby_mark() -> None:
+    # Stored text, read by the processor and written by the Telegram service.
+    assert (STANDBY_ON, STANDBY_LEAVING) == ("1", "2")
 
 
 def test_schema_version_is_three() -> None:

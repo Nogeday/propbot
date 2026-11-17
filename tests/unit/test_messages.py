@@ -358,13 +358,32 @@ def test_standby_skip_notice_says_why_and_how_to_end_it() -> None:
 
     assert text == (
         "[SİNYAL — ATLA] NY ORB FVG · FVG · LONG · CME_MINI:MES1!\n"
-        "Bu kopya BEKLEMEDE: aynı bot token'ıyla başka bir süreç komutları alıyor; /kill ve "
-        "/duraklat bu kopyaya ulaşmaz. Giriş sinyalleri iletilmiyor (stop/çıkış/iptal "
-        "mesajları gelir). Bu girişi ALMA.\n"
-        "Öbür süreci durdur, sonra bu kopyayı yeniden başlat; bir dakika içinde ETKİN "
+        "Bu kopya BEKLEMEDE: aynı bot token'ıyla başka bir süreç dinliyor ve bu kopya komut "
+        "almıyor. Giriş sinyalleri iletilmiyor (stop/çıkış/iptal mesajları gelir). Bu girişi "
+        "ALMA.\n"
+        "Öbür süreci durdur, sonra bu kopyayı yeniden başlat; yaklaşık bir dakika sonra ETKİN "
         "bildirimi gelir.\n"
         "id 123 · bar 09:44 NY / 17:44 TR"
     )
+    assert code_entity_spans(text) == []
+
+
+def test_the_notice_of_a_copy_that_is_leaving_standby_says_wait_not_restart() -> None:
+    # The user did what the alarm said (stopped the other copy, restarted this one). For
+    # about a minute entries are still withheld: telling them to restart again would start
+    # that minute over, and each restart is a hole in which alerts are lost.
+    text = messages.entry_standby_skip_notice(row(), leaving=True)
+
+    assert text == (
+        "[SİNYAL — ATLA] NY ORB FVG · FVG · LONG · CME_MINI:MES1!\n"
+        "Bu kopya beklemeden çıkıyor: yeniden başlatıldı ve başka dinleyici kalmadığını "
+        "doğruluyor. ETKİN bildirimi gelene kadar giriş sinyalleri iletilmez (stop/çıkış/iptal "
+        "mesajları gelir). Bu girişi ALMA.\n"
+        "Kopyayı yeniden başlatma, bekle: ETKİN bildirimi yaklaşık bir dakika sonra gelir. Onun "
+        "yerine yeni bir BEKLEMEDE alarmı gelirse öbür süreç hâlâ dinliyordur.\n"
+        "id 123 · bar 09:44 NY / 17:44 TR"
+    )
+    assert "komut almıyor" not in text  # it does take commands in this phase
     assert code_entity_spans(text) == []
 
 
@@ -696,6 +715,7 @@ def test_every_builder_tolerates_a_row_without_optional_fields() -> None:
         messages.entry_stop_too_tight_notice(bare, stop_points=0.25, min_stop_points=1.5),
         messages.symbol_not_listed_alarm(bare),
         messages.entry_standby_skip_notice(bare),
+        messages.entry_standby_skip_notice(bare, leaving=True),
     ]
 
     assert all(text and "None" not in text for text in texts)

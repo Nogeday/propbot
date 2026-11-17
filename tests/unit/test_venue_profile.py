@@ -191,12 +191,14 @@ def test_a_tv_symbol_that_is_not_text_is_rejected(symbol: object) -> None:
 
 
 def test_the_tv_symbol_list_is_bounded() -> None:
+    # The number the documents give (SPEC §8.3, ADR-0006): written out, not imported.
+    assert MAX_TV_SYMBOLS == 32
     data = _valid_data()
-    data["signal"]["tv_symbols"] = [f"FEED:SYM{index}" for index in range(MAX_TV_SYMBOLS)]
-    assert len(VenueProfile.model_validate(data).signal.tv_symbols) == MAX_TV_SYMBOLS
+    data["signal"]["tv_symbols"] = [f"FEED:SYM{index}" for index in range(32)]
+    assert len(VenueProfile.model_validate(data).signal.tv_symbols) == 32
 
     data["signal"]["tv_symbols"].append("FEED:ONE_MORE")
-    with pytest.raises(ValidationError, match=f"en çok {MAX_TV_SYMBOLS} sembol"):
+    with pytest.raises(ValidationError, match="en çok 32 sembol"):
         VenueProfile.model_validate(data)
 
 

@@ -48,6 +48,7 @@ from propbot.risk.sizing import SizeSkip, suggest_size
 from propbot.risk.venue import VenueProfile, rules_freshness
 from propbot.signals.schema import BAR_TIME_MAX_MS, Action, OrderType, Side
 from propbot.store.db import (
+    STANDBY_LEAVING,
     BudgetRow,
     OutboxKind,
     Outcome,
@@ -102,6 +103,8 @@ class DecisionContext:
     paused: bool = False
     # Another process answers the bot's commands: /kill and /duraklat would not reach this one.
     standby: bool = False
+    # ... or did until this copy was restarted: it polls again and waits to have been alone.
+    standby_leaving: bool = False
     budget_used: float = 0.0  # counted risk of the current prop day
     # Stop updates, exits and cancels only.
     reference: SignalRow | None = None  # latest entry of the strategy + symbol, any outcome
@@ -191,7 +194,7 @@ def _decide_entry(signal: SignalRow, context: DecisionContext, config: Processor
         return Decision(Outcome.SUPPRESSED_PAUSED)
     if context.standby:
         # Not the user's choice, so not silent: the kill switch cannot stop this copy.
-        text = messages.entry_standby_skip_notice(signal)
+        text = messages.entry_standby_skip_notice(signal, leaving=context.standby_leaving)
         return Decision(Outcome.SKIP_STANDBY, (OutboxDraft(text),))
     if not _symbol_listed(signal, venue):
         text = messages.entry_symbol_skip_notice(signal, venue=venue)
@@ -417,6 +420,7 @@ def load_context(
             killed=_flag_set(tx, StateKey.KILLED),
             paused=_flag_set(tx, StateKey.PAUSED),
             standby=_flag_set(tx, StateKey.STANDBY),
+            standby_leaving=tx.get_state(StateKey.STANDBY) == STANDBY_LEAVING,
             budget_used=tx.budget_used(current_prop_day(config, now_ms)),
         )
     if signal.action not in (Action.STOP_UPDATE.value, Action.EXIT.value, Action.CANCEL.value):

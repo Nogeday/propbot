@@ -370,19 +370,30 @@ def entry_risk_too_wide_notice(
     )
 
 
-def entry_standby_skip_notice(row: SignalRow) -> str:
-    """An entry while another process answers the bot's commands (this copy is on standby)."""
-    return "\n".join(
-        [
-            _entry_header("[SİNYAL — ATLA]", row),
-            "Bu kopya BEKLEMEDE: aynı bot token'ıyla başka bir süreç komutları alıyor; /kill "
-            "ve /duraklat bu kopyaya ulaşmaz. Giriş sinyalleri iletilmiyor (stop/çıkış/iptal "
-            "mesajları gelir). Bu girişi ALMA.",
-            "Öbür süreci durdur, sonra bu kopyayı yeniden başlat; bir dakika içinde ETKİN "
-            "bildirimi gelir.",
-            _id_line(row),
+def entry_standby_skip_notice(row: SignalRow, *, leaving: bool = False) -> str:
+    """An entry while this copy is on standby, or (`leaving`) on its way out of it.
+
+    On standby another process answers the bot's commands and this copy does not poll.
+    Leaving: the copy was restarted, polls again and takes commands, but forwards no entry
+    until it has been alone at Telegram for a minute (it then says "ETKİN").
+    """
+    if leaving:
+        body = [
+            "Bu kopya beklemeden çıkıyor: yeniden başlatıldı ve başka dinleyici kalmadığını "
+            "doğruluyor. ETKİN bildirimi gelene kadar giriş sinyalleri iletilmez "
+            "(stop/çıkış/iptal mesajları gelir). Bu girişi ALMA.",
+            "Kopyayı yeniden başlatma, bekle: ETKİN bildirimi yaklaşık bir dakika sonra gelir. "
+            "Onun yerine yeni bir BEKLEMEDE alarmı gelirse öbür süreç hâlâ dinliyordur.",
         ]
-    )
+    else:
+        body = [
+            "Bu kopya BEKLEMEDE: aynı bot token'ıyla başka bir süreç dinliyor ve bu kopya "
+            "komut almıyor. Giriş sinyalleri iletilmiyor (stop/çıkış/iptal mesajları gelir). "
+            "Bu girişi ALMA.",
+            "Öbür süreci durdur, sonra bu kopyayı yeniden başlat; yaklaşık bir dakika sonra "
+            "ETKİN bildirimi gelir.",
+        ]
+    return "\n".join([_entry_header("[SİNYAL — ATLA]", row), *body, _id_line(row)])
 
 
 def entry_symbol_skip_notice(row: SignalRow, *, venue: VenueProfile) -> str:

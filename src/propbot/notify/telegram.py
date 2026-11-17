@@ -69,6 +69,8 @@ from propbot.core.clock import Clock, boot_clock_ms, ms_from_datetime
 from propbot.notify.commands import Commands
 from propbot.notify.format import fmt_duration
 from propbot.store.db import (
+    STANDBY_LEAVING,
+    STANDBY_ON,
     OutboxKind,
     OutboxRow,
     ReleaseReason,
@@ -102,6 +104,10 @@ STANDBY_CONFLICTS: Final = 2
 # second after it lost its long poll), and this long after a first Conflict.
 ARRIVAL_HOLD_MS: Final = 3 * _SECOND_MS
 CONTEST_HOLD_MS: Final = 10 * _SECOND_MS
+# A copy that was there first and then gets nothing but Conflicts for this long also goes
+# on standby: the other process does not yield, the bot's commands are shared at random,
+# and a copy that cannot count on receiving /kill must not forward entries.
+PERSISTENT_CONFLICT_MS: Final = 2 * ARRIVAL_WINDOW_MS
 _HOLD_POLL_SECONDS: Final = 0.05
 _SKIPPED_ALARM: Final = ("telegram_update_skipped", 60 * _MINUTE_MS)
 _STUCK_ALARM: Final = ("telegram_updates_stuck", 60 * _MINUTE_MS)
@@ -136,7 +142,6 @@ _REFUSALS: Final = (BadRequest, Forbidden, ChatMigrated, Conflict)
 _HTTP_LIBRARIES: Final = frozenset({"httpx", "httpcore"})
 
 _FLAG_CLEAR: Final = "0"
-_FLAG_SET: Final = "1"
 _SEND_FAILED_ALARM_CODE: Final = "send_failed"
 _SEND_FAILED_ALARM_THROTTLE_MS: Final = 10 * 60 * 1000
 _TRUNCATION_MARK: Final = "\n[… mesaj kısaltıldı]"
@@ -228,13 +233,13 @@ def _copy_name(instance: str) -> str:
 def standby_alarm_text(instance: str) -> str:
     """What a copy that goes on standby tells the user; `instance` names it (the host name)."""
     return (
-        f"[ALARM] {_copy_name(instance)} BEKLEMEDE: aynı bot token'ıyla başka bir süreç zaten "
-        "güncelleme çekiyor. Bu kopya artık komut almıyor ve GİRİŞ sinyali iletmiyor; "
-        "stop/çıkış/iptal mesajlarını iletmeye devam ediyor.\n"
+        f"[ALARM] {_copy_name(instance)} BEKLEMEDE: aynı bot token'ıyla başka bir süreç "
+        "güncelleme çekiyor; bu kopya ona yol verdi. Artık komut almıyor ve GİRİŞ sinyali "
+        "iletmiyor; stop/çıkış/iptal mesajlarını iletmeye devam ediyor.\n"
         "Hangisi çalışmalıysa öbürünü durdur, sonra bu kopyayı yeniden başlat (sudo systemctl "
-        "restart propbot): bir dakika içinde ETKİN bildirimi gelir. Deneme kopyası için "
-        "BotFather'dan ayrı bir bot aç. Başka kopyan yoksa token sızmış olabilir: BotFather → "
-        "/revoke, .env'i güncelle, PIN'i değiştir.\n"
+        "restart propbot): yaklaşık bir dakika sonra ETKİN bildirimi gelir. Deneme kopyası "
+        "için BotFather'dan ayrı bir bot aç. Başka kopyan yoksa token sızmış olabilir: "
+        "BotFather → /revoke, .env'i güncelle, PIN'i değiştir.\n"
         "Az önce gönderdiğin bir komut yanıtsız kaldıysa ya da yanıtında BEKLEMEDE yazıyorsa "
         "yeniden gönder."
     )
@@ -257,7 +262,7 @@ def _skipped_alarm_text(skipped: int) -> str:
     )
 
 
-def _nothing() -> None:
+def _nothing(_conflict: bool) -> None:
     return None
 
 
@@ -286,7 +291,7 @@ class ResilientBot(ExtBot[None]):
         token: str,
         *,
         on_unparsed: Callable[[int, bool], None],
-        on_answer: Callable[[], None] = _nothing,
+        on_answer: Callable[[bool], None] = _nothing,
         request: BaseRequest | None = None,
         get_updates_request: BaseRequest | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -294,8 +299,9 @@ class ResilientBot(ExtBot[None]):
         super().__init__(token, request=request, get_updates_request=get_updates_request)
         # Names with a leading underscore can be set on the library's frozen objects.
         self._on_unparsed = on_unparsed
-        # Called whenever Telegram ANSWERED a getUpdates (a result or a 409 Conflict, not a
-        # network failure): the service tells from it when this copy arrived at Telegram.
+        # Called whenever Telegram ANSWERED a getUpdates, with True for a 409 Conflict and
+        # False for a result (never for a network failure): the service tells from it when
+        # this copy arrived at Telegram and whether it gets anything but Conflicts.
         self._on_answer = on_answer
         self._sleep = sleep
         # Offset for the next poll: one past the highest update of the last salvaged batch.
@@ -311,15 +317,15 @@ class ResilientBot(ExtBot[None]):
         try:
             updates = await super().get_updates(offset, *args, **kwargs)
         except Conflict:
-            self._on_answer()  # before the updater reports the error to its callback
+            self._on_answer(True)  # before the updater reports the error to its callback
             raise
         except TelegramError:
             raise  # network, token: the updater's own retry loop handles these
         except Exception:
             # Not chained and not inspected: the error's text may quote the update.
-            self._on_answer()
+            self._on_answer(False)
         else:
-            self._on_answer()
+            self._on_answer(False)
             # That call confirmed everything salvaged before it. The override is not kept:
             # from here on the updater's own offset is used again, as the library means it.
             self._resume_offset = None
@@ -480,6 +486,15 @@ def _flag(tx: Tx, key: StateKey) -> bool:
 
 _WHY_EXPIRED: Final = "geçerliliği doldu"
 _WHY_DROPPED: Final = "duraklatma/KILL nedeniyle yeniden gönderilmedi"
+_WHY_STANDBY: Final = "bu kopya BEKLEMEDE olduğu için yeniden gönderilmedi"
+
+
+class _Closed(StrEnum):
+    """Why the sender gives up on an entry message."""
+
+    EXPIRED = "expired"
+    BLOCKED = "blocked"  # entries are paused or killed: the user's own choice
+    STANDBY = "standby"  # another process holds the bot: not the user's choice
 
 
 def _uncertain_notice(signal_id: int, why: str) -> str:
@@ -487,6 +502,23 @@ def _uncertain_notice(signal_id: int, why: str) -> str:
         f"[İLETİM BELİRSİZ] id {signal_id}: giriş sinyali sana ulaşmış da olabilir, ulaşmamış "
         f"da ({why}). Gördüysen ve girdiysen bir şey yapma; görmediysen ya da girmediysen: "
         f"/atladim {signal_id}"
+    )
+
+
+def _standby_uncertain_notice(signal_id: int) -> str:
+    # A copy on standby takes no command: /atladim has to wait until it is active again.
+    return (
+        f"[İLETİM BELİRSİZ] id {signal_id}: giriş sinyali sana ulaşmış da olabilir, ulaşmamış "
+        f"da ({_WHY_STANDBY}). Gördüysen ve girdiysen bir şey yapma. Riski bu kopyanın günlük "
+        "bütçesinde sayılmaya devam ediyor; görmediysen ya da girmediysen, kopya yeniden ETKİN "
+        f"olduktan sonra: /atladim {signal_id}"
+    )
+
+
+def _standby_dropped_notice(signal_id: int) -> str:
+    return (
+        f"[İLETİLEMEDİ — ATLA] id {signal_id}: giriş sinyali gönderilmedi (bu kopya BEKLEMEDE). "
+        "Bütçeden düşüldü."
     )
 
 
@@ -622,6 +654,8 @@ class TelegramService:
         self._arrival_conflicts = 0
         self._contested_ms: int | None = None  # first Conflict of the current arrival
         self._last_conflict_ms: int | None = None
+        # First Conflict since Telegram last answered this copy with a result.
+        self._conflict_streak_ms: int | None = None
         self._standby_due = False  # set by the polling callback; `run` acts on it
         self._standby = False  # this process stopped polling: another one holds the bot
         # The store's standby mark as this process found it: None until read; True means an
@@ -731,44 +765,48 @@ class TelegramService:
                     changed = True
                     _log.warning("telegram_pending_entries_uncertain", count=flagged)
             for row in tx.pending_expired_messages(now_ms):
-                self._close_entry_message(tx, row, now_ms, dropped=False)
+                self._close_entry_message(tx, row, now_ms, _Closed.EXPIRED)
                 changed = True
-            entries_blocked = (
-                _flag(tx, StateKey.KILLED)
-                or _flag(tx, StateKey.PAUSED)
-                or _flag(tx, StateKey.STANDBY)
-            )
+            why: _Closed | None = None
+            if _flag(tx, StateKey.KILLED) or _flag(tx, StateKey.PAUSED):
+                why = _Closed.BLOCKED
+            elif _flag(tx, StateKey.STANDBY):
+                why = _Closed.STANDBY
             head = tx.next_pending_message()
-            while head is not None and head.expires_at_ms is not None and entries_blocked:
-                self._close_entry_message(tx, head, now_ms, dropped=True)
+            while head is not None and head.expires_at_ms is not None and why is not None:
+                self._close_entry_message(tx, head, now_ms, why)
                 changed = True
                 head = tx.next_pending_message()
         due = head is not None and (forced or head.next_attempt_ms <= now_ms)
         return _Plan(changed=changed, to_send=head if may_send and due else None)
 
     @staticmethod
-    def _close_entry_message(tx: Tx, row: OutboxRow, now_ms: int, *, dropped: bool) -> None:
-        """Give up on a message with a deadline: it expired, or entries are paused/killed.
+    def _close_entry_message(tx: Tx, row: OutboxRow, now_ms: int, why: _Closed) -> None:
+        """Give up on a message with a deadline: it expired, or entries are not forwarded
+        (paused or killed by the user, or this copy is on standby).
 
-        Proven undelivered: the entry's risk leaves the daily budget, and an expiry tells
-        the user. Possibly delivered: the risk stays counted and the user is asked.
+        Proven undelivered: the entry's risk leaves the daily budget; the user is told,
+        unless the drop was their own choice (pause, kill). Possibly delivered: the risk
+        stays counted and the user is asked.
         """
         tx.mark_message_expired(row.id, now_ms)
         signal_id = row.signal_id
         _log.warning(
-            "telegram_entry_dropped" if dropped else "telegram_message_expired",
+            "telegram_message_expired" if why is _Closed.EXPIRED else "telegram_entry_dropped",
             outbox_id=row.id,
             signal_id=signal_id,
             uncertain=row.delivery_uncertain,
             attempts=row.attempts,
+            why=why.value,
         )
         if row.delivery_uncertain:
             if signal_id is not None:
-                tx.enqueue_message(
-                    kind=OutboxKind.NOTICE,
-                    text=_uncertain_notice(signal_id, _WHY_DROPPED if dropped else _WHY_EXPIRED),
-                    now_ms=now_ms,
-                )
+                if why is _Closed.STANDBY:
+                    text = _standby_uncertain_notice(signal_id)
+                else:
+                    reason = _WHY_EXPIRED if why is _Closed.EXPIRED else _WHY_DROPPED
+                    text = _uncertain_notice(signal_id, reason)
+                tx.enqueue_message(kind=OutboxKind.NOTICE, text=text, now_ms=now_ms)
             return
         if signal_id is not None:
             entry = tx.get_budget_entry(signal_id)
@@ -779,8 +817,11 @@ class TelegramService:
                     reason=ReleaseReason.UNDELIVERED,
                     now_ms=now_ms,
                 )
-        if not dropped and row.expired_text is not None:
+        if why is _Closed.EXPIRED and row.expired_text is not None:
             tx.enqueue_message(kind=OutboxKind.NOTICE, text=row.expired_text, now_ms=now_ms)
+        elif why is _Closed.STANDBY and signal_id is not None:
+            text = _standby_dropped_notice(signal_id)
+            tx.enqueue_message(kind=OutboxKind.NOTICE, text=text, now_ms=now_ms)
 
     async def _deliver(self, row: OutboxRow, now_ms: int) -> _Delivery:
         """Send one outbox row and classify the result. Raises nothing but cancellation."""
@@ -994,9 +1035,22 @@ class TelegramService:
         arrived_ms = self._arrived_ms
         uptime_ms = self._uptime()
         self._last_conflict_ms = uptime_ms
+        if self._conflict_streak_ms is None:
+            self._conflict_streak_ms = uptime_ms
         if arrived_ms is None or uptime_ms - arrived_ms > ARRIVAL_WINDOW_MS:
-            # This copy has been here for a while: the other process is the newcomer.
-            self._polling_alarm(_CONFLICT_ALARM, _CONFLICT_ALARM_TEXT, now_ms)
+            # This copy has been here for a while: the other process is the newcomer, and
+            # one of this version yields within seconds. One that does not (a foreign
+            # program, a webhook) leaves this copy with nothing but Conflicts: then it is
+            # this copy that must stop counting on its commands.
+            persistent = (
+                arrived_ms is not None
+                and uptime_ms - self._conflict_streak_ms > PERSISTENT_CONFLICT_MS
+            )
+            if persistent:
+                self._standby_due = True
+                self._wake.set()
+            else:
+                self._polling_alarm(_CONFLICT_ALARM, _CONFLICT_ALARM_TEXT, now_ms)
             return
         self._arrival_conflicts += 1
         if self._contested_ms is None:
@@ -1056,9 +1110,11 @@ class TelegramService:
 
     # -- presence at Telegram (two processes with one token) ------------------------------------
 
-    def _note_answer(self) -> None:
+    def _note_answer(self, conflict: bool = False) -> None:
         """Called by `ResilientBot` each time Telegram answered a getUpdates; must not raise."""
         now_ms = self._uptime()
+        if not conflict:
+            self._conflict_streak_ms = None  # a result: this copy still gets its updates
         last_ms = self._last_answer_ms
         if last_ms is None or now_ms - last_ms > ARRIVAL_WINDOW_MS:
             # First answer ever, or the first one after a silence in which another process
@@ -1085,12 +1141,21 @@ class TelegramService:
             if self._uptime() >= release_ms:
                 break
             await asyncio.sleep(_HOLD_POLL_SECONDS)
-        return self._standby or self._standby_due
+        if self._standby or self._standby_due:
+            return True
+        # The service is stopping while a Conflict of this arrival is still unexplained: the
+        # message is answered on the way out, but as by a copy that may not hold the bot.
+        contested_ms = self._contested_ms
+        return (
+            self._stopping
+            and contested_ms is not None
+            and self._uptime() < contested_ms + self._contest_hold_ms
+        )
 
     async def _watch_presence(self) -> None:
         """Act on what the polling callback saw: go on standby, or end an inherited one."""
         if self._inherited_standby is None:
-            self._inherited_standby = await asyncio.to_thread(self._read_standby)
+            self._inherited_standby = await asyncio.to_thread(self._inherit_standby, self._clock())
         if self._standby:
             return
         if self._standby_due:
@@ -1111,9 +1176,13 @@ class TelegramService:
         alone_since_ms = arrived_ms if conflict_ms is None else max(arrived_ms, conflict_ms)
         return now_ms - alone_since_ms > ARRIVAL_WINDOW_MS
 
-    def _read_standby(self) -> bool:
+    def _inherit_standby(self, now_ms: int) -> bool:
+        """Read the mark an earlier process left; if set, note that this one polls again."""
         with self._store.transaction() as tx:
-            return _flag(tx, StateKey.STANDBY)
+            inherited = _flag(tx, StateKey.STANDBY)
+            if inherited:
+                tx.set_state(StateKey.STANDBY, STANDBY_LEAVING, now_ms)
+            return inherited
 
     async def _enter_standby(self) -> None:
         """Stop polling for the rest of this process: another one was polling first.
@@ -1147,7 +1216,7 @@ class TelegramService:
 
         def record() -> None:
             with self._store.transaction() as tx:
-                tx.set_state(StateKey.STANDBY, _FLAG_SET, now_ms)
+                tx.set_state(StateKey.STANDBY, STANDBY_ON, now_ms)
                 if not told_before:
                     # Once per standby, however often the process restarts while it lasts:
                     # the user's last word from this copy is BEKLEMEDE until it says ETKİN.

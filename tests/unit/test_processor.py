@@ -567,6 +567,15 @@ def test_entry_on_standby_is_skipped_with_a_notice() -> None:
     )
 
 
+def test_entry_of_a_copy_that_is_leaving_standby_is_skipped_with_the_waiting_notice() -> None:
+    decision = decide(ENTRY, at(standby=True, standby_leaving=True), CONFIG)
+
+    assert decision.outcome is Outcome.SKIP_STANDBY
+    assert decision.budget_risk is None
+    assert text_of(decision) == messages.entry_standby_skip_notice(ENTRY, leaving=True)
+    assert "Kopyayı yeniden başlatma, bekle" in text_of(decision)
+
+
 @pytest.mark.parametrize("signal", ["stop_update", "exit", "cancel"])
 def test_standby_never_holds_back_a_follow_up(signal: str) -> None:
     # Stop updates, exits and cancels only take risk away; the user may hold the position.
@@ -1896,7 +1905,28 @@ def test_entries_stop_and_follow_ups_go_on_while_the_store_says_standby(store: S
 def test_an_unreadable_standby_mark_counts_as_set(store: Store, value: str) -> None:
     set_state(store, StateKey.STANDBY, value)
 
-    assert handle(store, alerts.ny_orb_fvg_entry()).outcome is Outcome.SKIP_STANDBY
+    row = handle(store, alerts.ny_orb_fvg_entry())
+
+    assert row.outcome is Outcome.SKIP_STANDBY
+    # ... and as the stricter of the two phases: "on standby", not "leaving".
+    assert texts(store, row.id) == [messages.entry_standby_skip_notice(row)]
+
+
+def test_the_mark_of_a_copy_that_polls_again_gives_the_waiting_notice(store: Store) -> None:
+    set_state(store, StateKey.STANDBY, "2")
+
+    row = handle(store, alerts.ny_orb_fvg_entry())
+
+    assert row.outcome is Outcome.SKIP_STANDBY
+    assert texts(store, row.id) == [messages.entry_standby_skip_notice(row, leaving=True)]
+
+
+@pytest.mark.parametrize("value", [None, "0"])
+def test_no_mark_or_a_cleared_one_lets_entries_through(store: Store, value: str | None) -> None:
+    if value is not None:
+        set_state(store, StateKey.STANDBY, value)
+
+    assert handle(store, alerts.ny_orb_fvg_entry()).outcome is Outcome.FORWARDED
 
 
 def test_an_unlisted_symbol_is_refused_from_entry_to_exit(store: Store) -> None:

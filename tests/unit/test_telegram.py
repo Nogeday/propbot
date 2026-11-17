@@ -82,13 +82,13 @@ CONFLICT_ALARM = (
 )
 # What a copy sends when it goes on standby for one that was already polling (user decision 53).
 STANDBY_ALARM = (
-    "[ALARM] Bu PropBot kopyası (vps-1) BEKLEMEDE: aynı bot token'ıyla başka bir süreç zaten "
-    "güncelleme çekiyor. Bu kopya artık komut almıyor ve GİRİŞ sinyali iletmiyor; "
-    "stop/çıkış/iptal mesajlarını iletmeye devam ediyor.\n"
+    "[ALARM] Bu PropBot kopyası (vps-1) BEKLEMEDE: aynı bot token'ıyla başka bir süreç "
+    "güncelleme çekiyor; bu kopya ona yol verdi. Artık komut almıyor ve GİRİŞ sinyali "
+    "iletmiyor; stop/çıkış/iptal mesajlarını iletmeye devam ediyor.\n"
     "Hangisi çalışmalıysa öbürünü durdur, sonra bu kopyayı yeniden başlat (sudo systemctl "
-    "restart propbot): bir dakika içinde ETKİN bildirimi gelir. Deneme kopyası için "
-    "BotFather'dan ayrı bir bot aç. Başka kopyan yoksa token sızmış olabilir: BotFather → "
-    "/revoke, .env'i güncelle, PIN'i değiştir.\n"
+    "restart propbot): yaklaşık bir dakika sonra ETKİN bildirimi gelir. Deneme kopyası "
+    "için BotFather'dan ayrı bir bot aç. Başka kopyan yoksa token sızmış olabilir: "
+    "BotFather → /revoke, .env'i güncelle, PIN'i değiştir.\n"
     "Az önce gönderdiğin bir komut yanıtsız kaldıysa ya da yanıtında BEKLEMEDE yazıyorsa "
     "yeniden gönder."
 )
@@ -1595,6 +1595,7 @@ def test_an_entry_proven_undelivered_expires_releases_its_budget_and_tells_the_u
             "signal_id": signal_id,
             "uncertain": False,
             "attempts": 1,
+            "why": "expired",
             "log_level": "warning",
         } in logs
         assert await h.service.send_due() is False
@@ -2644,6 +2645,14 @@ async def answered(h: Harness, command: str = "/mod") -> None:
     await until(lambda: len(h.fake.calls_to("sendMessage")) > replies)
 
 
+async def one_conflict(h: Harness) -> None:
+    """Through the real polling loop: a command is answered, then one poll meets a 409."""
+    polls = len(h.fake.calls_to("getUpdates"))
+    h.fake.script("getUpdates", CONFLICT_409)
+    await answered(h)
+    await until(lambda: len(h.fake.calls_to("getUpdates")) >= polls + 2, timeout=10)
+
+
 async def loop_turn(h: Harness) -> None:
     """Let `run` go round once more (it idles for a second when nothing wakes it)."""
     h.service.wake_sender()
@@ -2657,7 +2666,7 @@ def arrive(h: Harness) -> None:
 
 def conflict(h: Harness) -> None:
     """One 409 as the service sees it: the answer is noted, then the updater's callback."""
-    h.service._note_answer()
+    h.service._note_answer(True)
     h.service._on_polling_error(Conflict("terminated by other getUpdates request"))
 
 
@@ -2784,6 +2793,151 @@ def test_conflicts_of_an_earlier_arrival_do_not_count_for_the_next() -> None:
         assert h.service._standby_due
 
     drive(scenario)
+
+
+def test_nothing_but_conflicts_for_two_minutes_puts_the_copy_that_was_first_on_standby() -> None:
+    # The other process does not yield (a foreign program with the token, a webhook): the
+    # commands are shared at random, so this copy cannot count on receiving /kill either.
+    async def scenario(h: Harness) -> None:
+        arrive(h)
+        for _ in range(10):  # five minutes of results, half a minute apart
+            h.clock.now_ms += 30_000
+            arrive(h)
+        h.clock.now_ms += 1_000  # the last result was a second ago; now every poll is a Conflict
+        first = h.clock.now_ms
+        for after_ms in (0, 7_000, 31_000, 61_000, 91_000, 120_000):
+            h.clock.now_ms = first + after_ms
+            conflict(h)
+            assert not h.service._standby_due, after_ms
+        h.clock.now_ms = first + 120_001  # more than two minutes after the FIRST Conflict
+        conflict(h)
+        assert h.service._standby_due
+        await asyncio.gather(*h.service._background)
+        assert [text for _kind, _status, text in h.outbox()] == [CONFLICT_ALARM]
+
+    drive(scenario)
+
+
+def test_the_real_polling_loop_tells_conflicts_from_results() -> None:
+    # Through `ResilientBot` and the library's retry loop: results for a minute and a half
+    # (the copy has been there), then only Conflicts, 50 s apart on the clock. The fourth
+    # one comes 150 s after the first.
+    async def scenario(h: Harness) -> None:
+        async def result(_call: tg.Call) -> tg.Response:
+            h.clock.now_ms += 30_000
+            return tg.ok([])
+
+        async def conflicting(_call: tg.Call) -> tg.Response:
+            h.clock.now_ms += 50_000
+            return CONFLICT_409
+
+        h.fake.script("getUpdates", *([result] * 3), *([conflicting] * 4))
+        stop = asyncio.Event()
+        task = asyncio.create_task(h.service.run(stop))
+        try:
+            await until(lambda: CONFLICT_ALARM in h.fake.sent_texts(), timeout=15)
+            assert h.flag(StateKey.STANDBY) is None  # an alarm first: it was here first
+            await until(lambda: STANDBY_ALARM in h.fake.sent_texts(), timeout=15)
+            assert h.flag(StateKey.STANDBY) == "1"
+            assert len(h.fake.calls_to("getUpdates")) == 8  # 3 + 4 and the library's last one
+        finally:
+            stop.set()
+            await asyncio.wait_for(task, 5)
+
+    drive(scenario, polling=True)
+
+
+def test_a_result_between_conflicts_starts_the_two_minutes_again() -> None:
+    # Telegram still hands this copy its updates now and then: it keeps the bot (and the
+    # alarm), as long as it does not go two minutes on Conflicts alone.
+    async def scenario(h: Harness) -> None:
+        arrive(h)
+        for _ in range(10):
+            h.clock.now_ms += 30_000
+            arrive(h)
+        for _ in range(6):
+            h.clock.now_ms += 50_000
+            conflict(h)
+            h.clock.now_ms += 50_000
+            conflict(h)
+            h.clock.now_ms += 5_000
+            arrive(h)  # a result
+        assert not h.service._standby_due
+
+    drive(scenario)
+
+
+def test_the_two_minutes_of_conflicts_are_a_literal_number() -> None:
+    assert telegram_module.PERSISTENT_CONFLICT_MS == 120_000
+
+
+def test_an_empty_long_poll_is_an_answer_and_keeps_the_copy_that_was_first() -> None:
+    # A quiet bot: every ten seconds the long poll returns nothing. That is still Telegram
+    # answering, and the only thing that tells a long-running copy from one that returns.
+    async def scenario(h: Harness) -> None:
+        async def nothing(_call: tg.Call) -> tg.Response:
+            h.clock.now_ms += 10_000
+            return tg.ok([])
+
+        h.fake.script("getUpdates", *([nothing] * 9), CONFLICT_409, CONFLICT_409, CONFLICT_409)
+        stop = asyncio.Event()
+        task = asyncio.create_task(h.service.run(stop))
+        try:
+            await until(lambda: CONFLICT_ALARM in h.fake.sent_texts(), timeout=15)
+            await until(lambda: len(h.fake.calls_to("getUpdates")) >= 13, timeout=15)
+            assert not h.service._standby
+            assert h.flag(StateKey.STANDBY) is None
+        finally:
+            stop.set()
+            await asyncio.wait_for(task, 5)
+        assert STANDBY_ALARM not in h.fake.sent_texts()
+
+    drive(scenario, polling=True)
+
+
+def test_empty_long_polls_alone_lift_an_inherited_standby() -> None:
+    async def scenario(h: Harness) -> None:
+        with h.store.transaction() as tx:
+            tx.set_state(StateKey.STANDBY, "1", h.clock.now_ms)
+
+        async def nothing(_call: tg.Call) -> tg.Response:
+            h.clock.now_ms += 10_000
+            return tg.ok([])
+
+        h.fake.script("getUpdates", *([nothing] * 8))
+        stop = asyncio.Event()
+        task = asyncio.create_task(h.service.run(stop))
+        try:
+            await until(lambda: ACTIVE_AGAIN in h.fake.sent_texts(), timeout=10)
+            assert h.flag(StateKey.STANDBY) is None
+        finally:
+            stop.set()
+            await asyncio.wait_for(task, 5)
+
+    drive(scenario, polling=True)
+
+
+def test_a_batch_the_library_cannot_build_is_an_answer_too() -> None:
+    # The first thing Telegram says is a batch with an update the library rejects. The copy
+    # has arrived all the same: a command salvaged from that batch is held like any other
+    # command fetched right after an arrival (it may have been meant for another process).
+    async def scenario(h: Harness) -> None:
+        batch = [unbuildable_update(), tg.private_update("/duraklat", sent_at_ms=h.clock.now_ms)]
+        h.fake.script("getUpdates", tg.ok(batch), tg.ok(batch))
+        stop = asyncio.Event()
+        task = asyncio.create_task(h.service.run(stop))
+        try:
+            await until(lambda: len(h.fake.calls_to("getUpdates")) >= 3)
+            h.clock.now_ms += 2_999
+            await asyncio.sleep(0.3)
+            assert h.flag(StateKey.PAUSED) is None  # held: three seconds have not passed
+            h.clock.now_ms += 1
+            await until(lambda: h.flag(StateKey.PAUSED) == "1")
+        finally:
+            stop.set()
+            await asyncio.wait_for(task, 5)
+
+    drive(scenario, polling=True, arrival_hold_ms=3_000, contest_hold_ms=10_000)
 
 
 def test_a_conflict_reported_without_any_answer_is_the_incumbents_alarm() -> None:
@@ -2990,13 +3144,44 @@ def test_after_one_conflict_a_command_waits_ten_seconds_for_the_second() -> None
 
 def test_a_held_command_does_not_keep_the_service_from_stopping() -> None:
     async def scenario(h: Harness) -> None:
-        h.fake.push_update(tg.private_update("/mod", sent_at_ms=h.clock.now_ms))
+        h.fake.push_update(tg.private_update("/duraklat", sent_at_ms=h.clock.now_ms))
         stop = asyncio.Event()
         task = asyncio.create_task(h.service.run(stop))
         await until(lambda: len(h.fake.calls_to("getUpdates")) >= 2)
         stop.set()
         await asyncio.wait_for(task, 5)
-        assert len(h.fake.sent_texts()) == 1  # answered on the way out, not lost
+        # Answered on the way out, not lost; and carried out as usual: no Conflict was seen.
+        (reply,) = h.fake.sent_texts()
+        assert reply.startswith("Duraklatıldı")
+        assert STANDBY_NOTE not in reply
+        assert h.flag(StateKey.PAUSED) == "1"
+
+    drive(scenario, polling=True, arrival_hold_ms=3_000, contest_hold_ms=10_000)
+
+
+def test_a_command_held_after_a_conflict_is_answered_as_from_standby_when_the_copy_stops() -> None:
+    # One Conflict was seen and the second has not come yet: the copy does not know whether
+    # it holds the bot. Stopped in that state, it must not answer "KILL etkin" as if it did.
+    async def scenario(h: Harness) -> None:
+        h.fake.script("getUpdates", CONFLICT_409)
+        stop = asyncio.Event()
+        task = asyncio.create_task(h.service.run(stop))
+        await until(lambda: len(h.fake.calls_to("getUpdates")) >= 2, timeout=10)
+        h.fake.push_update(tg.private_update(f"/kill {PIN}", sent_at_ms=h.clock.now_ms))
+        await until(lambda: len(h.fake.calls_to("getUpdates")) >= 3)
+        h.fake.push_update(tg.private_update("/devam", sent_at_ms=h.clock.now_ms))
+        await until(lambda: len(h.fake.calls_to("getUpdates")) >= 4)
+        with h.store.transaction() as tx:
+            tx.set_state(StateKey.PAUSED, "1", h.clock.now_ms)
+        assert h.fake.sent_texts() == []  # both held
+        stop.set()
+        await asyncio.wait_for(task, 5)
+        kill_reply, resume_reply = h.fake.sent_texts()
+        assert kill_reply.startswith("KILL etkin: giriş sinyalleri kesildi.")
+        assert kill_reply.endswith(STANDBY_NOTE)
+        assert resume_reply == STANDBY_REFUSAL
+        assert h.flag(StateKey.KILLED) == "1"
+        assert h.flag(StateKey.PAUSED) == "1"  # /devam lifted nothing
 
     drive(scenario, polling=True, arrival_hold_ms=3_000, contest_hold_ms=10_000)
 
@@ -3005,6 +3190,7 @@ def test_a_held_command_does_not_keep_the_service_from_stopping() -> None:
 
 
 def test_a_pending_entry_signal_is_dropped_while_the_store_says_standby() -> None:
+    # Not the user's choice (unlike a pause): the drop is said, and with its real reason.
     async def scenario(h: Harness) -> None:
         await h.first_step()
         signal_id, entry_id = h.entry()
@@ -3015,7 +3201,54 @@ def test_a_pending_entry_signal_is_dropped_while_the_store_says_standby() -> Non
         assert h.row(entry_id).status is OutboxStatus.EXPIRED
         assert h.counted(signal_id) == (False, ReleaseReason.UNDELIVERED)
         assert h.row(follow_up).status is OutboxStatus.SENT
-        assert h.fake.sent_texts() == ["[STOP GÜNCELLE] açık işlem"]
+        assert h.fake.sent_texts() == [
+            "[STOP GÜNCELLE] açık işlem",
+            f"[İLETİLEMEDİ — ATLA] id {signal_id}: giriş sinyali gönderilmedi (bu kopya "
+            "BEKLEMEDE). Bütçeden düşüldü.",
+        ]
+
+    drive(scenario)
+
+
+def test_an_entry_that_may_have_arrived_is_asked_about_with_the_standby_reason() -> None:
+    # The copy returned from an outage with a send that had timed out, then met the other
+    # poller. Neither a pause nor a kill is set, and /atladim cannot reach a copy on standby.
+    async def scenario(h: Harness) -> None:
+        signal_id, entry_id = h.entry()
+        with h.store.transaction() as tx:
+            tx.set_state(StateKey.STANDBY, "1", h.clock.now_ms)
+        await h.drain()  # the first step flags what an earlier process left pending
+        assert h.row(entry_id).status is OutboxStatus.EXPIRED
+        assert h.counted(signal_id) == (True, None)
+        (notice,) = h.fake.sent_texts()
+        assert notice == (
+            f"[İLETİM BELİRSİZ] id {signal_id}: giriş sinyali sana ulaşmış da olabilir, "
+            "ulaşmamış da (bu kopya BEKLEMEDE olduğu için yeniden gönderilmedi). Gördüysen ve "
+            "girdiysen bir şey yapma. Riski bu kopyanın günlük bütçesinde sayılmaya devam "
+            "ediyor; görmediysen ya da girmediysen, kopya yeniden ETKİN olduktan sonra: "
+            f"/atladim {signal_id}"
+        )
+        assert "duraklatma" not in notice
+        spans = code_entity_spans(notice)
+        assert [notice[start : start + length] for start, length in spans] == [
+            f"/atladim {signal_id}"
+        ]
+
+    drive(scenario)
+
+
+@pytest.mark.parametrize("own_choice", [StateKey.PAUSED, StateKey.KILLED])
+def test_a_pause_or_kill_explains_a_dropped_entry_even_on_standby(own_choice: StateKey) -> None:
+    async def scenario(h: Harness) -> None:
+        await h.first_step()
+        signal_id, entry_id = h.entry()
+        with h.store.transaction() as tx:
+            tx.set_state(StateKey.STANDBY, "1", h.clock.now_ms)
+            tx.set_state(own_choice, "1", h.clock.now_ms)
+        await h.drain()
+        assert h.row(entry_id).status is OutboxStatus.EXPIRED
+        assert h.counted(signal_id) == (False, ReleaseReason.UNDELIVERED)
+        assert h.fake.sent_texts() == []  # the user's own choice: silent, as before
 
     drive(scenario)
 
@@ -3032,7 +3265,7 @@ def test_after_a_restart_the_copy_says_active_once_it_was_alone_for_a_minute() -
             h.clock.now_ms += 60_000
             await answered(h)
             await loop_turn(h)
-            assert h.flag(StateKey.STANDBY) == "1"
+            assert h.flag(StateKey.STANDBY) == "2"  # polling again, not yet alone for a minute
             assert ACTIVE_AGAIN not in h.fake.sent_texts()
             h.clock.now_ms += 1
             await until(lambda: ACTIVE_AGAIN in h.fake.sent_texts())
@@ -3063,11 +3296,66 @@ def test_a_stray_conflict_restarts_the_minute_before_active() -> None:
             h.clock.now_ms += 45_000  # 75 s after the arrival, 45 s after the Conflict
             await answered(h)
             await loop_turn(h)
-            assert h.flag(StateKey.STANDBY) == "1"
+            assert h.flag(StateKey.STANDBY) == "2"
             h.clock.now_ms += 15_001  # a minute and a millisecond after the Conflict
             await answered(h)
             await until(lambda: ACTIVE_AGAIN in h.fake.sent_texts())
             assert h.flag(StateKey.STANDBY) is None
+        finally:
+            stop.set()
+            await asyncio.wait_for(task, 5)
+
+    drive(scenario, polling=True)
+
+
+def test_a_late_conflict_also_restarts_the_minute_before_active() -> None:
+    # Conflicts at 30 s and at 70 s after the arrival (the second one is "the other process
+    # arriving" for the alarm): "a minute without another listener" starts at the last one.
+    async def scenario(h: Harness) -> None:
+        with h.store.transaction() as tx:
+            tx.set_state(StateKey.STANDBY, "1", h.clock.now_ms)
+        stop = asyncio.Event()
+        task = await polling_for(h, stop)
+        try:
+            await answered(h)
+            for step_ms in (30_000, 40_000):
+                h.clock.now_ms += step_ms
+                await one_conflict(h)
+            h.clock.now_ms += 21_000  # 91 s after the arrival, 21 s after the last Conflict
+            await answered(h)
+            await loop_turn(h)
+            assert h.flag(StateKey.STANDBY) == "2"
+            assert ACTIVE_AGAIN not in h.fake.sent_texts()
+            h.clock.now_ms += 39_001  # a minute and a millisecond after the last Conflict
+            await answered(h)
+            await until(lambda: ACTIVE_AGAIN in h.fake.sent_texts())
+        finally:
+            stop.set()
+            await asyncio.wait_for(task, 5)
+
+    drive(scenario, polling=True)
+
+
+def test_a_conflict_and_then_silence_do_not_add_up_to_a_minute_alone() -> None:
+    async def scenario(h: Harness) -> None:
+        with h.store.transaction() as tx:
+            tx.set_state(StateKey.STANDBY, "1", h.clock.now_ms)
+        stop = asyncio.Event()
+        task = await polling_for(h, stop)
+        try:
+            await answered(h)
+            await one_conflict(h)
+            h.clock.now_ms += 10 * MINUTE_MS  # nothing from Telegram in all that time
+            await answered(h)  # the first answer back is a new arrival, not the end of a minute
+            await loop_turn(h)
+            assert h.flag(StateKey.STANDBY) == "2"
+            assert ACTIVE_AGAIN not in h.fake.sent_texts()
+            h.clock.now_ms += 60_000
+            await answered(h)
+            await loop_turn(h)
+            assert ACTIVE_AGAIN not in h.fake.sent_texts()
+            h.clock.now_ms += 1
+            await until(lambda: ACTIVE_AGAIN in h.fake.sent_texts())
         finally:
             stop.set()
             await asyncio.wait_for(task, 5)
@@ -3087,13 +3375,13 @@ def test_a_copy_that_telegram_stopped_answering_does_not_call_itself_active() ->
             await answered(h)
             h.clock.now_ms += 10 * MINUTE_MS  # the long poll hangs: no answer in all that time
             await loop_turn(h)
-            assert h.flag(StateKey.STANDBY) == "1"
+            assert h.flag(StateKey.STANDBY) == "2"
             assert ACTIVE_AGAIN not in h.fake.sent_texts()
             await answered(h)  # back: a new arrival
             h.clock.now_ms += 60_000
             await answered(h)
             await loop_turn(h)
-            assert h.flag(StateKey.STANDBY) == "1"
+            assert h.flag(StateKey.STANDBY) == "2"
             h.clock.now_ms += 1
             await until(lambda: ACTIVE_AGAIN in h.fake.sent_texts())
         finally:

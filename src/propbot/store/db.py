@@ -88,6 +88,10 @@ from typing import Final, Self
 SCHEMA_VERSION: Final = 3
 
 MEMORY_PATH: Final = ":memory:"
+# Values of the `standby` state key. Any other text that is not "0" counts as STANDBY_ON:
+# an unreadable mark fails closed.
+STANDBY_ON: Final = "1"  # this copy does not poll: another process holds the bot
+STANDBY_LEAVING: Final = "2"  # restarted and polling again, not yet alone for a minute
 BUSY_TIMEOUT_MS: Final = 5000
 ALARM_STATE_PREFIX: Final = "alarm:"
 MAX_ERROR_CHARS: Final = 500
