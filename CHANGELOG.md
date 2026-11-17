@@ -434,8 +434,8 @@ tek mod `signal`, emir yolu yok). Kararlar: `docs/adr/0004` (güncelleme), `0005
 
 Commit'ler: `21da0db` /devam · `3d2b72f` sembol listesi ve asgari stop · `fb202c9` Master kimlikleri · `b5aa6cd` token
 girdisi · `43c87d9` bot kilidi ve Conflict (ilk biçim) · `fe0c388` dokümanlar · `d264050` bekleme tasarımı (birinci
-denetim turu) · `040f6ed` Pine çağrı sayımı testi · `6b569f2` dokümanlar · ardından ikinci denetim turunun
-düzeltmeleri (aşağıda "Karşıt denetim").
+denetim turu) · `040f6ed` Pine çağrı sayımı testi · `6b569f2` dokümanlar · `96d5000` + `efc9381` ikinci denetim
+turunun düzeltmeleri · `453a37f` + `6f38dad` üçüncü turunkiler (aşağıda "Karşıt denetim").
 
 ### Karar 46 ve 33 — giriş süzgeci (`signal` bölümü, ADR-0006)
 - `config/venues/*.yaml`'a zorunlu `signal` bölümü: `tv_symbols` (1–32 sembol, yinelemesiz, alıcı şemasının kabul ettiği
@@ -592,8 +592,10 @@ doğrulandı.
   ikisi de bekler (açık bulgu 56d); (5) yol vermeyen yabancı bir dinleyici → çalışan kopya önce "başka bir süreç"
   alarmını verir, süre dolunca (benzetimde 25 sn'ye kısaltıldı) beklemeye geçer ve bir daha dinlemez. Benzetim,
   Telegram'ın 409 davranışı hakkındaki varsayıma dayanır (56a).
-- Gerçek `propbot serve` ile: aynı bot kimliğiyle ikinci kopya (başka veritabanı ve port) afişten önce reddedildi; başka
-  bot kimliğiyle kopya başladı.
+- Gerçek `propbot serve` ile (sahte sırlar; Telegram'a erişim yok): aynı bot kimliğiyle ikinci kopya (başka veritabanı
+  ve port) afişten önce reddedildi; başka bot kimliğiyle kopya başladı. Son sürümde üç gerçek webhook isteği:
+  `master_ny_orb_fvg` kimliği ve listedeki sembol → `forwarded`; `CME_MINI:NQ1!` → `skip_symbol`; 1 puanlık stop →
+  `skip_stop_too_tight`; şema sürümü 3; günlükte sır yok; SIGTERM ile temiz kapanış.
 
 ## Açık bulgular
 
@@ -733,8 +735,8 @@ denetiminden, 55–58 2026-11-16 kararlarının uygulamasından.
 52. **Düzenlenen mesajlar alınmıyor:** bot yalnızca `message` güncellemelerini ister; eski bir mesaja sonradan düzenlemeyle
     yazılan PIN silinmez (komut olarak da işlenmez). PIN'i düzenlemeyle yazma.
 53. ~~**Aynı bot token'ıyla ikinci kopya kodla engellenmiyor (karar gerekir).**~~ **Çözüldü (2026-11-16/17):** makine
-    genelinde bot kilidi (`43c87d9`) + varışında Conflict gören kopya beklemeye geçer (`d264050` ve ikinci turun
-    düzeltmeleri; ADR-0004). Kalanlar: bulgu 56.
+    genelinde bot kilidi (`43c87d9`) + varışında Conflict gören kopya beklemeye geçer (`d264050`, `96d5000`,
+    `453a37f`; ADR-0004). Kalanlar: bulgu 56.
 54. **`systemctl stop` sonrası çıkış kodu:** uvicorn düzgün kapanıştan sonra sinyali yeniden yükseltir; süreç 143 ile biter,
     `run_service`'in dönüş değeri ve `Store.close()` çalışmaz (WAL ve çekirdek kilidi bunu taşır; veri kaybı yok).
     `Restart=always` olduğu için `systemctl stop` dışında davranışı etkilemez; gözlem doğrulayıcıdan, sistemde denenmedi.
