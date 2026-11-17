@@ -100,8 +100,11 @@ traceback olarak basılmaz, aynı zincirden geçer: python-telegram-bot'un `Inva
      `getUpdates` isteği ilk kez (ya da 60 saniyeden uzun sessizlikten sonra yeniden) yanıtlandığında "varmış" sayılır;
      varıştan sonraki 60 saniyede iki Conflict alan kopya yeni gelendir. Polling'i durdurur, depoya `standby` işareti
      yazar (işleyici girişleri `skip_standby` olarak bildirir, gönderici bekleyen giriş mesajlarını düşürür),
-     "[ALARM] … BEKLEMEDE" mesajını bir kez gönderir ve **çalışmaya devam eder**: stop güncelleme / çıkış / iptal
-     iletilir. İşaret sürecin ömründen uzun yaşar; yeniden başlayan kopya yeniden dinler ve 60 saniye boyunca
+     "[ALARM] … BEKLEMEDE" mesajını gönderir ve **çalışmaya devam eder**: stop güncelleme / çıkış / iptal
+     iletilir. Yeniden başlatılan kopya yine beklemeye düşerse bunu söyler ("… yeniden başlatıldı, ama … yine
+     BEKLEMEDE"): kullanıcı ETKİN bildirimini beklemektedir. Bu ikinci alarm depoda 5 dakikada bire kısıtlanır;
+     kısıtlama olmasa çöküp yeniden başlayan bir süreç onu birkaç saniyede bir yinelerdi (ilk biçimde hiç
+     gönderilmiyordu: üçüncü denetim turunun bulgusu). İşaret sürecin ömründen uzun yaşar; yeniden başlayan kopya yeniden dinler ve 60 saniye boyunca
      Conflict görmeden yanıt alırsa işareti kaldırıp "[BİLGİ] … yeniden ETKİN" der (işaretin iki değeri vardır:
      "beklemede" ve "yeniden dinliyor, henüz bir dakika yalnız kalmadı"; giriş bildirimi hangisinde olduğunu söyler).
      60 saniyeden uzun süredir yanıt alan kopya botu tutar ve eski alarmı verir.

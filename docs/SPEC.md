@@ -493,7 +493,8 @@ Telegram bir `getUpdates` isteğini ilk kez (ya da 60 saniyeden uzun bir sessizl
 "varmış" sayılır. Varışından sonraki 60 saniye içinde **iki** Conflict alan kopya yeni gelendir ve **beklemeye**
 geçer: polling'i durdurur (komut almaz), giriş sinyali iletmez ("[SİNYAL — ATLA] … Bu kopya BEKLEMEDE"), stop
 güncelleme / çıkış / iptal mesajlarını iletmeye devam eder, "[ALARM] Bu PropBot kopyası (makine adı) BEKLEMEDE"
-mesajını bir kez gönderir ve **çalışmaya devam eder** (çıkmaz: systemd onu birkaç saniyede bir yeniden başlatır,
+mesajını gönderir (yeniden başlatılıp yine beklemeye düşerse 5 dakikada en çok bir "… yeniden başlatıldı, ama … yine
+BEKLEMEDE" alarmı) ve **çalışmaya devam eder** (çıkmaz: systemd onu birkaç saniyede bir yeniden başlatır,
 her seferinde öbür kopyanın güncellemelerini alır ve arada alıcı kapalı kalırdı). Tek bir Conflict hoş görülür
 (elle gönderilmiş bir `getUpdates`, önceki sürecin Telegram'da kalmış isteği). Bekleme, sürecin ömrü boyunca sürer;
 kopya yeniden başlatılınca yeniden dinler (o sırada giriş bildirimi "Bu kopya beklemeden çıkıyor … bekle" der),

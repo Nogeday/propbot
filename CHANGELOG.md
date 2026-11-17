@@ -491,8 +491,9 @@ düzeltmeleri (aşağıda "Karşıt denetim").
 - **Varışta Conflict → bekleme** (`notify/telegram.py`, ADR-0004): kilidin görmediği kopya (başka makine, konteyner)
   için. Kopya, Telegram bir `getUpdates` isteğini ilk kez ya da 60 sn'den uzun sessizlikten sonra yanıtladığında
   "varmış" sayılır; sonraki 60 sn'de **iki** Conflict alırsa yeni gelendir: polling'i durdurur, depoya `standby`
-  işaretini yazar, "[ALARM] Bu PropBot kopyası (makine adı) BEKLEMEDE…" mesajını bir kez gönderir ve **çalışmaya devam
-  eder**. Beklemede giriş sinyali iletilmez (`skip_standby`: "[SİNYAL — ATLA] … Bu kopya BEKLEMEDE"; bekleyen giriş
+  işaretini yazar, "[ALARM] Bu PropBot kopyası (makine adı) BEKLEMEDE…" mesajını gönderir ve **çalışmaya devam
+  eder** (yeniden başlatılıp yine beklemeye düşerse 5 dakikada en çok bir "… yeniden başlatıldı, ama … yine BEKLEMEDE"
+  alarmı). Beklemede giriş sinyali iletilmez (`skip_standby`: "[SİNYAL — ATLA] … Bu kopya BEKLEMEDE"; bekleyen giriş
   mesajları düşürülür), stop güncelleme / çıkış / iptal iletilir. Yeniden başlatılan kopya 60 sn Conflict'siz yanıt
   alırsa "[BİLGİ] … yeniden ETKİN" der ve işareti kaldırır. Daha uzun süredir yanıt alan kopya botu tutar; onun "Aynı
   bot token'ıyla başka bir süreç…" alarmına "bu sırada gönderdiğin bir komut öbür sürece gitmiş olabilir: /durum ile
@@ -524,7 +525,7 @@ düzeltmeleri (aşağıda "Karşıt denetim").
 - `WIP: uncommitted changes, moved to the cloud` commit'i (`b6fcbc8`) bağımlılık commit'ine (`cd00945`) katıldı; dal
   `--force-with-lease` ile yeniden yazıldı (açık bulgu 31). Eski Faz 1 commit kimlikleri artık dalda yok.
 
-### Karşıt denetim (2026-11-16 ve 17; iki tur, her bulgu bağımsız bir ajanca yeniden üretildi)
+### Karşıt denetim (2026-11-16 ve 17; üç tur, her bulgu bağımsız bir ajanca yeniden üretildi)
 **Birinci tur** (`fe0c388` üzerinde, üç mercek). "Süzgeç" merceği ve çürütme adımı tamamlandı; "ikinci kopya"
 merceğinin bulgularını, çürütme ajanı kullanım sınırına takıldığı için ben yeniden değerlendirdim; "doküman/Pine"
 merceği o turda çalışamadı ve ikinci turda koşturuldu.
@@ -555,8 +556,17 @@ ve on `f_alert` çağrısının kimlik argümanında ayrılıyor; heartbeat gös
 | E7 | CHANGELOG ve ADR-0006 giriş karar sırasını bekleme adımı olmadan veriyordu; iki alarm metni alıntısı koddaki metinle aynı değildi; bulgu 53 yanlış commit'e bağlanmıştı; bu bölüm "sonuç aşağıda" deyip sonucu yazmıyordu | Düzeltildi |
 | E8 | `tv_symbols` üst sınırı (32) testte sabitten türetiliyordu (1 mutant) | Sayı testte açık yazıldı |
 
+**Üçüncü tur** (`efc9381` üzerinde, yalnızca ikinci turun düzeltmeleri; bir denetçi + bir çürütücü). Üç bulgu, üçü de
+doğrulandı.
+
+| # | Bulgu | Önem | Sonuç |
+|---|---|---|---|
+| F1 | "Beklemeden çıkıyor" bildirimi ve runbook, öbür süreç hâlâ dinliyorsa "yeni bir BEKLEMEDE alarmı" geleceğini söylüyordu; kod o alarmı hiç göndermiyordu (yeniden başlatılan kopya sessizce yine bekliyordu) | orta | Davranış metne uyduruldu: "… yeniden başlatıldı, ama … yine BEKLEMEDE" alarmı, depoda 5 dakikada bire kısıtlı (çökme döngüsü yinelemesin); testli |
+| F2 | Durdurulurken bekletilen komutun "bekleme notu" koşulundaki süre sınırı (10 sn) testle sabit değildi (2 mutant) | düşük | Milisaniyesine sınır testi |
+| F3 | İşaretin "2" ya da okunamayan bir değerle devralınması ve göndericinin o değerlerde girişleri düşürmesi testle sabit değildi (2 mutant); `ResilientBot`'un yanıt bildirimi doğrudan test edilmiyordu (1 mutant) | düşük | Üç değerle parametreli testler; yanıt bildirimi testi |
+
 ### Testler
-- 3976 test (`uv run pytest -q`; 1 test bu ortamda atlanır: IPv6 loopback yok), ruff, `mypy --strict` (36 kaynak
+- 3988 test (`uv run pytest -q`; 1 test bu ortamda atlanır: IPv6 loopback yok), ruff, `mypy --strict` (36 kaynak
   dosya) temiz. Önceki durum 3593.
 - Yeni: sembol listesi ve asgari stop karar tablosu (sıra, sınır, tam ondalık, takip alert'leri, alarm kısıtlaması);
   venue profili `signal` bölümü (7 yeni hatalı fixture); Master kimlikleriyle 12 yeni gövde biçimi (toplam 45) şemadan,
@@ -565,19 +575,20 @@ ve on `f_alert` çağrısının kimlik argümanında ayrılıyor; heartbeat gös
   kalma); varış kuralı (60 sn sınırı, tek Conflict'in hoş görülmesi, sessizlikten dönüş, hiç yanıt almamış kopya, boş
   uzun sorgunun yanıt sayılması), iki dakikalık Conflict kuralı, bekleme (polling'in durması, sürecin ayakta kalması,
   girişlerin kesilip çıkışların iletilmesi, düşen giriş mesajlarının bildirimi, komut bekletme ve beklemedeki `/kill`,
-  durdurulurken bekletilen komut, yeniden başlatmada tek alarm, ETKİN bildirimi ve onu erteleyen durumlar).
-- Mutasyon denetimi (kendi koşularım, bekleme tasarımı): iki grupta 55 mutantın 55'i yakalanıyor. İlk koşularda
+  durdurulurken bekletilen komut, yeniden başlatmada "yine BEKLEMEDE" alarmı ve kısıtlaması, ETKİN bildirimi ve onu
+  erteleyen durumlar, işaretin üç olası değeri).
+- Mutasyon denetimi (kendi koşularım, bekleme tasarımı): üç grupta 67 mutantın 67'si yakalanıyor. İlk koşularda
   beşi yaşadı (sessiz kopyanın kendini etkin sayması, süre saatinin duvar saati olması, kurulamayan partinin yanıt
   sayılması, iki dakikalık sınırın tam değeri, Conflict işaretinin gerçek sorgu döngüsünden geçmesi); her biri için
-  test eklendi ya da sıkılaştırıldı. Denetçilerin yaşattığı mutantlar (birinci tur 9, ikinci tur 6) da artık ölüyor;
-  eşdeğer sayılan üçü (davranışı değiştirmeyen) hariç.
+  test eklendi ya da sıkılaştırıldı. Denetçilerin yaşattığı gerçek boşluklar (üç turda 20 mutant) için de test var;
+  eşdeğer ya da yalnızca zamanlama farkı sayılanlar (6) dışarıda bırakıldı.
 - Benzetim (elle, depoya girmedi): iki gerçek `TelegramService` kopyası, "yeni `getUpdates` bekleyen uzun sorguyu
   409 ile keser" kuralını uygulayan sahte bir Bot API'ye karşı, gerçek saat ve gerçek bekletme süreleriyle. Dört
   senaryo: (1) canlı kopya çalışırken ikinci kopya başlar → ikinci beklemeye geçer, o sırada gönderilen 18 komutun
   15'ini canlı kopya uygular, 3'ü ikinci kopyada **reddedilir**, yanlış kopyada uygulanan komut 0; (2) ikisi de
   eskiyken karşılaşma (ağ kesintisinden dönen kopya) → dönen kopya bekler; (3) denetimin kilitlenme senaryosu:
   beklemedeki kopya varken canlı servis yeniden başlar → canlı servis etkin kalır, bekleyen kopya bir daha
-  dinlemez; yeniden başlatılan bekleyen kopya ikinci alarm vermeden yine bekler; (4) iki kopya 5 sn arayla başlar →
+  dinlemez; yeniden başlatılan bekleyen kopya "yine BEKLEMEDE" alarmıyla yine bekler; (4) iki kopya 5 sn arayla başlar →
   ikisi de bekler (açık bulgu 56d); (5) yol vermeyen yabancı bir dinleyici → çalışan kopya önce "başka bir süreç"
   alarmını verir, süre dolunca (benzetimde 25 sn'ye kısaltıldı) beklemeye geçer ve bir daha dinlemez. Benzetim,
   Telegram'ın 409 davranışı hakkındaki varsayıma dayanır (56a).
