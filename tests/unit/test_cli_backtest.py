@@ -5,6 +5,7 @@ and nothing may reach a Go/No-Go PASS (ADR-0007). The tests also pin that a comm
 writes only where its options point (the working directory stays empty).
 """
 
+import dataclasses
 import datetime as dt
 import json
 import shutil
@@ -14,6 +15,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from propbot.backtest import command
 from propbot.backtest.artifacts import (
     BacktestArtifact,
     CostMatrixArtifact,
@@ -29,6 +31,7 @@ from propbot.backtest.runner import RunRequest, run
 from propbot.backtest.trades import read_trades_csv
 from propbot.cli import main
 from propbot.data.ohlcv import load_ohlcv
+from propbot.strategies.registry import STRATEGIES
 from support.paths import CONFIG_DIR, FIXTURES
 
 BARS = FIXTURES / "ohlcv" / "synthetic_5m.csv"
@@ -585,6 +588,15 @@ def test_gonogo_with_no_reports_is_no_go_not_an_error(
             "ny_orb_fvg,master_asian_sweep,master_portfolio",
             "master_portfolio ile bacağı master_asian_sweep aynı raporda değerlendirilemez",
         ),
+        # User decision of 2026-11-20 (open finding 87): one leg alone is refused here, not
+        # left to G4, which could only end NOT_EVALUABLE on the script's two-leg list.
+        (
+            [],
+            "master_ny_orb_fvg",
+            "master_ny_orb_fvg, master_portfolio betiğinin bacağıdır ve tek başına "
+            "değerlendirilemez",
+        ),
+        ([], "ny_orb_fvg,master_asian_sweep", "eksik bacak: master_ny_orb_fvg"),
     ],
 )
 def test_gonogo_errors_exit_2_and_write_nothing(
@@ -634,10 +646,120 @@ def test_the_mix_refusal_says_which_ids_to_give_instead(
     assert "aynı işlemler iki kez sayılır" in err
     assert "ya birleşik kimliği (master_portfolio)" in err
     assert "bacak kimliklerini (master_ny_orb_fvg, master_asian_sweep)" in err
-    # A leg next to an unrelated strategy is no mix (the stand-alone port is another script).
-    assert gonogo(tmp_path / "reports", strategies="master_ny_orb_fvg,ny_orb_fvg") == 1
+    # A leg next to the stand-alone port is no mix (that port is another script), but it is
+    # one leg alone: since the user's decision of 2026-11-20 (open finding 87) the command
+    # refuses that too, with its own message, where it used to write a report (exit 1).
+    assert gonogo(tmp_path / "reports", strategies="master_ny_orb_fvg,ny_orb_fvg") == 2
+    err = capsys.readouterr().err
+    assert "tek başına değerlendirilemez" in err
+    assert "aynı raporda" not in err
+    assert not (tmp_path / "reports").exists()
+
+
+@pytest.mark.parametrize(
+    ("strategies", "leg", "missing", "alone"),
+    [
+        ("master_ny_orb_fvg", "master_ny_orb_fvg", "master_asian_sweep", "ny_orb_fvg"),
+        ("master_asian_sweep", "master_asian_sweep", "master_ny_orb_fvg", "asian_sweep"),
+        # Next to other strategies, repeated or spaced, it is still one leg alone.
+        ("ny_orb_fvg,master_asian_sweep", "master_asian_sweep", "master_ny_orb_fvg", "asian_sweep"),
+        (
+            "master_ny_orb_fvg, master_ny_orb_fvg",
+            "master_ny_orb_fvg",
+            "master_asian_sweep",
+            "ny_orb_fvg",
+        ),
+        (
+            "mtf_trend_cont , master_ny_orb_fvg,asian_sweep",
+            "master_ny_orb_fvg",
+            "master_asian_sweep",
+            "ny_orb_fvg",
+        ),
+    ],
+)
+def test_a_single_master_leg_is_refused_before_any_gate_and_told_what_to_give(
+    tmp_path: Path,
+    cwd: Path,
+    capsys: pytest.CaptureFixture[str],
+    strategies: str,
+    leg: str,
+    missing: str,
+    alone: str,
+) -> None:
+    # User decision of 2026-11-20 (open finding 87). Before it the command wrote a report
+    # in which G4 was NOT_EVALUABLE ("değerlendirilmeyen: <other leg>"): right, but a
+    # report nobody could use and a message that named neither way out.
+    reports = tmp_path / "reports"
+    assert backtest(reports, "--strategy", "master_portfolio") == 0
+    before = sorted(path.name for path in reports.iterdir())
     capsys.readouterr()
-    shutil.rmtree(tmp_path / "reports")
+
+    code = gonogo(reports, strategies=strategies)
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert captured.out == ""
+    assert sorted(path.name for path in reports.iterdir()) == before  # no report written
+    err = captured.err.strip()
+    assert len(err.splitlines()) == 1
+    assert "Traceback" not in err
+    assert err.startswith(
+        f"HATA: --strategies: {leg}, master_portfolio betiğinin bacağıdır ve tek başına "
+        "değerlendirilemez"
+    )
+    assert f"eksik bacak: {missing};" in err
+    # Both ways to judge the Master, and the stand-alone strategy if that was meant.
+    assert "ya bütün bacakları (master_ny_orb_fvg, master_asian_sweep)" in err
+    assert "ya da birleşik kimliği (master_portfolio) verin" in err
+    assert err.endswith(f"Aynı motorun bağımsız stratejisini değerlendirmek için: {alone}")
+
+
+@pytest.mark.parametrize(
+    ("strategies", "shown"),
+    [
+        ("master_ny_orb_fvg,master_asian_sweep", "master_ny_orb_fvg, master_asian_sweep"),
+        ("master_asian_sweep , master_ny_orb_fvg", "master_asian_sweep, master_ny_orb_fvg"),
+        (
+            "master_asian_sweep,ny_orb_fvg,master_ny_orb_fvg",
+            "master_asian_sweep, ny_orb_fvg, master_ny_orb_fvg",
+        ),
+        ("master_portfolio", "master_portfolio"),
+        ("master_portfolio,ny_orb_fvg", "master_portfolio, ny_orb_fvg"),
+    ],
+)
+def test_both_legs_together_and_the_combined_id_are_still_judged(
+    tmp_path: Path, cwd: Path, capsys: pytest.CaptureFixture[str], strategies: str, shown: str
+) -> None:
+    # The single-leg refusal must not reach the two accepted views (finding 72), in any
+    # order and next to other strategies.
+    code = gonogo(tmp_path / "reports", strategies=strategies)
+
+    out = capsys.readouterr().out
+    assert code == 1
+    assert f"stratejiler: {shown}" in out
+
+
+def test_a_leg_whose_name_points_at_no_stand_alone_strategy_gets_the_whole_list(
+    tmp_path: Path, cwd: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The hint guesses the stand-alone id from the leg's name; where no id fits it must not
+    # invent one. A second two-leg script whose legs follow no naming habit:
+    pair = dataclasses.replace(
+        STRATEGIES["master_portfolio"], strategy_id="pair", leg_ids=("pair_a", "pair_b")
+    )
+    monkeypatch.setattr(command, "STRATEGIES", {**STRATEGIES, "pair": pair})
+
+    code = gonogo(tmp_path / "reports", strategies="pair_b")
+
+    err = capsys.readouterr().err.strip()
+    assert code == 2
+    assert err.startswith("HATA: --strategies: pair_b, pair betiğinin bacağıdır")
+    assert "eksik bacak: pair_a;" in err
+    assert "ya bütün bacakları (pair_a, pair_b) ya da birleşik kimliği (pair) verin" in err
+    assert err.endswith(
+        "Bağımsız stratejiler: asian_sweep, ict_silver_bullet, mr_bb_kc_rsi2, mtf_trend_cont, "
+        "ny_orb_fvg"
+    )
 
 
 def judged_files(reports: Path, gate_id: str) -> dict[str, object]:

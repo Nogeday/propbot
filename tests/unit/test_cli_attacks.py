@@ -308,7 +308,13 @@ def test_no_flag_combination_on_synthetic_bars_reaches_go_or_a_passed_g1(
     assert montecarlo(trades, reports, "--r-is-net") == 0
     capsys.readouterr()
 
-    choices = ("ny_orb_fvg", "ny_orb_fvg,ny_orb_fvg", "master_ny_orb_fvg,ny_orb_fvg")
+    # The third choice held one Master leg; one leg alone is refused since 2026-11-20 (open
+    # finding 87), so it now gives both: still strategies without any report of their own.
+    choices = (
+        "ny_orb_fvg",
+        "ny_orb_fvg,ny_orb_fvg",
+        "master_ny_orb_fvg,master_asian_sweep,ny_orb_fvg",
+    )
     for index, strategies in enumerate(choices):
         code = gonogo(reports, strategies, offset=60 + index)
         out = capsys.readouterr().out

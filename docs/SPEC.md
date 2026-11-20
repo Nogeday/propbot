@@ -950,7 +950,11 @@ Rapor `reports/go_no_go_YYYYMMDD.md`; her madde PASS/FAIL ve kanıt bağlantıs�
     artefakt bağlanamaz (DEĞERLENDİRİLEMEDİ). TradingView işlem listesi betik başına olduğundan parite raporu
     `master_portfolio` içindir:
     bir bacağın G6'sı betiğin raporunu okur ve kanıt, oranın bütün bacakları birlikte kapsadığını (bacak başına ayrı
-    oran olmadığını) yazar. Bacağın bağımsız portla (`ny_orb_fvg`, `asian_sweep`) birlikte verilmesi karışım değildir.
+    oran olmadığını) yazar. **Tek bacak** (kullanıcı kararı 2026-11-20; açık bulgu 87 kapandı): bir betiğin
+    bacaklarının yalnızca bir kısmı verilirse (tek başına ya da bağımsız portla birlikte: `master_ny_orb_fvg,ny_orb_fvg`)
+    komut hiçbir kapıyı çalıştırmadan reddeder (çıkış kodu 2, rapor yazılmaz) ve eksik bacağı, iki geçerli yolu ve aynı
+    motorun bağımsız stratejisini söyler; betiğin işlem listesi bütün bacakları taşıdığından G4 tek bacakla bağlanamaz.
+    Saf katman (`evaluate`) değişmedi: oraya yalnızca bu komuttan ulaşılır.
   - *Aynı saniye:* aynı saniyede oluşturulmuş iki aday (karar koşusu, aynı venue'nun Monte Carlo'su, aynı stratejinin
     paritesi, aynı sha'nın doğrulaması) varsa hiçbiri seçilmez (DEĞERLENDİRİLEMEDİ).
   - *G1:* karar koşusunun bar süresi ≤ 60 sn, kapsamı ≥ 2 yıl (365,25 günlük yıl), bar sayısı × bar süresi gerekli her

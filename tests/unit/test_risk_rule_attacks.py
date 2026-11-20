@@ -380,8 +380,9 @@ def test_a_planned_risk_below_a_scripts_minimum_is_one_line_and_an_exit_code(
     assert len(captured.err.strip().splitlines()) == 1
     assert "Traceback" not in captured.err + captured.out
     assert not reports.exists()
-    # A leg is judged with its script's parameters: the same refusal, exit code 2.
-    judged = MASTER_LEGS[0] if strategy_id == MASTER else strategy_id
+    # A leg is judged with its script's parameters: the same refusal, exit code 2. Both
+    # legs are given: one leg alone is refused earlier, for another reason (finding 87).
+    judged = ",".join(MASTER_LEGS) if strategy_id == MASTER else strategy_id
     code = gonogo_code(reports, config_dir, judged)
     assert code == 2
     assert f"HATA: {strategy_id}: planlanan işlem başı risk %0,05" in capsys.readouterr().err

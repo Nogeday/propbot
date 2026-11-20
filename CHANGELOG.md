@@ -805,6 +805,12 @@ Kullanıcı Faz 2 ve yerel web paneli teslimatını onayladı ve altı noktayı 
    hiçbir sayıyı ve hükmü değiştirmez, farklı dolumlar yine uyuşmazlık sayılır (F2-56). Belge: SPEC §3.1 ve §6.6,
    `docs/backtest.md` 6. bölüm, doğrulama listesi P36, ADR-0008 uygulama notu; açık bulgu 64(a).
 
+**Ek karar (2026-11-20) — Master'ın tek bacağı (açık bulgu 87).** Karar: `gonogo --strategies` içine tek bir Master
+bacağı verildiğinde komut bunu G4'e bırakmadan baştan net bir hata mesajıyla reddetsin ve kullanıcıyı
+`master_portfolio` / iki bacağa ya da bağımsız strateji kimliğine yönlendirsin. Yapılan (kod): `backtest/command.py`
+→ `_parse_strategies` bir betiğin bacaklarının yalnızca bir kısmı verildiğinde çıkış kodu 2 ile reddeder, rapor
+yazılmaz (F2-72). Belge: SPEC §9.1, `docs/backtest.md` 7. bölüm. Bulgu 87 kapandı.
+
 **Onaylanan mühendislik eşikleri** (SPEC §9 değeri olmayanlar; `config/backtest.yaml` → `go_no_go`, kodda taban,
 yalnızca sıkılaştırılabilir): OOS'ta en az 30 işlem (`min_oos_trades`), gerekli her yıl için 1500 bar-saati
 (`min_bar_hours_per_year`), en az 5000 Monte Carlo yolu (`min_mc_paths`) ve 100 işlem (`min_mc_trades`), artefakt yaşı
@@ -851,6 +857,7 @@ kanıtlamaz.
 | F2-69 | Test, Master özellik testi (son denetim) | `tests/property/test_strategy_master_portfolio_props.py` "motorun kilitlediği ilk stop dolumdan en az bir tick zarar tarafındadır" diyordu; `tv_ohlc`'de kilit dolum barının `on_bar`'ından sonra gelir ve S1 izi o barda bir adım atmış olabilir (Pine da dolum barında izler: `s1_trailActR` 0 iken hemen), stop girişe eşit ya da daha sıkı olur. Rastgele arama bu örneği ilk kez buldu (düz barlar, sıfır tampon, 0 R aktivasyon) | Motor ve port değişmedi (Pine ile aynı davranış; stop gevşemiyor). Test artık iki şeyi ayrı sınar: yeniden fiyatlanan stop dolumdan en az bir tick zarar tarafındadır (her iki dolum modeli); motorun ilk stop'u ona eşittir, yalnızca `tv_ohlc` + S1 izinde ondan daha sıkı olabilir, hiçbir durumda daha gevşek olamaz. 40 tohumla (2400 örnek) koşuldu |
 | F2-70 | Test, salt-okunur depo (temiz klon doğrulaması) | `tests/unit/test_store_readonly_attacks.py` root altında dosya kiplerini yetkisiz bir alt süreçle (uid 65534) sınar; depo yalnızca root'un girebildiği bir dizindeyken (ör. `/root/...`) alt süreç yorumlayıcıya ulaşamıyor ve 3 test `PermissionError` ile kalıyordu (temiz klonda görüldü) | Ön koşul açıkça sınanır: yetkisiz kullanıcı yorumlayıcıyı çalıştırıp paketi içe aktaramıyorsa testler gerekçesiyle atlanır; normal kullanıcıyla ya da erişilebilir bir yoldan koşulduğunda eskisi gibi çalışır |
 | F2-71 | Depo hijyeni (güvenlik taraması) | `.gitignore` yalnızca tam `.env` adını ve `*.db` dosyalarını dışlıyordu; `.env.local`, `*.sqlite`, anahtar dosyaları yanlışlıkla eklenebilirdi (izlenen böyle bir dosya yok) | `.env.*` (`.env.example` hariç), `*.sqlite`, `*.sqlite3`, `*.pem`, `*.key` eklendi |
+| F2-72 | Go/No-Go komutu, Master'ın tek bacağı (açık bulgu 87; kullanıcı kararı 2026-11-20) | `gonogo --strategies master_ny_orb_fvg` kabul ediliyor, G4 ancak rapor yazıldıktan sonra DEĞERLENDİRİLEMEDİ ("değerlendirilmeyen: master_asian_sweep") diyordu; mesaj ne yapılacağını söylemiyordu | Komut tek bacağı (tek başına, tekrarlı ya da başka stratejilerin yanında) hiçbir kapıyı çalıştırmadan reddeder (çıkış kodu 2, rapor yok): eksik bacağı, iki geçerli yolu (bütün bacaklar ya da birleşik kimlik) ve aynı motorun bağımsız stratejisini (`ny_orb_fvg`, `asian_sweep`; ad uymuyorsa bağımsız stratejilerin listesini) yazar. İki bacak birlikte ve `master_portfolio` eskisi gibi değerlendirilir. Dört testin beklentisi bu kurala göre güncellendi (tek bacak veren adımlar iki bacak verir ya da reddi sınar). Test: `tests/unit/test_cli_backtest.py`, `tests/unit/test_decisions_final_attacks.py` |
 
 Ayrıca: planlanan risk betiğin riskine eşitken (taban `Initial Capital` iken) `--pine-risk` koşuyu planlanan riskle
 yapar, `-pinerisk` etiketi vermez ve bunu bir NOT ile söyler (Go/No-Go kayıtlı alana baktığı için "kullanılmaz" demek
@@ -873,7 +880,7 @@ görülen açık bulgu 86 (panelin "Koşu türü" satırı) aynı gün düzeltil
 | §6.8 (6) ağ ve veritabanı kenar durumları | sağlandı (kanıt: `tests/unit/test_dashboard_attacks.py`, `tests/unit/test_dashboard_live.py`, `tests/unit/test_store_readonly_attacks.py`) |
 
 ### Testler
-- Test sayısı (2026-11-20, tüm paket, kullanıcı kararlarının uygulanması ve son bağımsız denetimden sonra): 7006 geçti, 1 atlandı (IPv6 loopback bu makinede yok) — `uv run pytest -q`;
+- Test sayısı (2026-11-20, tüm paket, kullanıcı kararlarının uygulanması, son bağımsız denetim ve bulgu 87 kararından sonra): 7019 geçti, 1 atlandı (IPv6 loopback bu makinede yok) — `uv run pytest -q`;
   `ruff check` ve `mypy --strict` (77 kaynak dosya) temiz.
 - Faz 2 test dosyaları SPEC §10'da maddelere göre listelidir.
 
@@ -887,7 +894,8 @@ denetiminden, 55–58 2026-11-16 kararlarının uygulamasından. 59–81 Faz 2'd
 
 Durum (2026-11-19, kullanıcı kararları): 72 kabul edildi ve 82 çözüldü (ikisi de kapandı; 82: ADR-0010); 64(a) "beklenen
 güvenli sapma" olarak onaylandı; 74'teki erteleme onaylandı. 86 kararların uygulanması sırasında eklendi ve aynı gün
-düzeltildi (F2-62). 87 son bağımsız denetimde eklendi (karar gerekir).
+düzeltildi (F2-62). 87 son bağımsız denetimde eklendi; kullanıcı 2026-11-20'de karar verdi ve aynı gün çözüldü
+(F2-72).
 
 1. ~~**MTF derleme riski:** `riskPts := ...` bildirimi olmayan değişkene atama.~~ **Çözüldü** (`e997dd5`).
 2. **B4 sayısal değerleri — kısmen:** kod varsayılanı artık MES test profili (E9). FTMO `US500.cash` spread'i/komisyonu
@@ -1214,8 +1222,10 @@ düzeltildi (F2-62). 87 son bağımsız denetimde eklendi (karar gerekir).
     hesaplamaz ve config okumaz. Kalan sınır: satır koşunun yapıldığı andaki durumudur; sonradan `config/risk.yaml`
     ya da OOS başlangıcı değişirse eski bir karar koşusu Go/No-Go'da karşılaştırma koşusu sayılır, kart bunu bilmez.
     Test: `tests/unit/test_dashboard_analysis.py`, `tests/unit/test_risk_rule.py` (gerçek koşucu artefaktlarıyla).
-87. **Master'ın tek bacağı tek başına değerlendirilebiliyor (2026-11-20, karar gerekir):** `gonogo --strategies
+87. ~~**Master'ın tek bacağı tek başına değerlendirilebiliyor (2026-11-20, karar gerekir):** `gonogo --strategies
     master_ny_orb_fvg` (yalnızca bir bacak) reddedilmez; SPEC §9.1 "iki bacak ya da birleşik kimlik" der. Gerçek
     komutlarla G4 bu durumda GEÇTİ olamaz (işlem listesi her zaman iki bacağı taşır, liste değerlendirilen
-    stratejilerle aynı değildir: DEĞERLENDİRİLEMEDİ; test `tests/unit/test_decisions_final_attacks.py`), yani
-    fail-closed'dur. Tek bacağın komutta baştan reddedilip reddedilmeyeceği kullanıcı kararıdır; düzeltilmedi.
+    stratejilerle aynı değildir: DEĞERLENDİRİLEMEDİ), yani fail-closed'dur.~~ **Çözüldü (2026-11-20, kullanıcı
+    kararı; F2-72):** komut tek bacağı hiçbir kapıyı çalıştırmadan reddeder (çıkış kodu 2, rapor yazılmaz) ve
+    kullanıcıyı iki bacağa, `master_portfolio`'ya ya da aynı motorun bağımsız stratejisine yönlendirir. Saf katmanın
+    tek bacaktaki davranışı (G4 DEĞERLENDİRİLEMEDİ) değişmedi ve testle sabittir.

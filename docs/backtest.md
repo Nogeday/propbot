@@ -373,8 +373,12 @@ uv run propbot gonogo --strategies master_portfolio                       # birl
 - Her kimlik kendi artefaktından yargılanır: bacak `backtest_master_ny_orb_fvg_…` / `backtest_master_asian_sweep_…`,
   birleşik `backtest_master_portfolio_…` (üçünü de tek `propbot backtest --strategy master_portfolio` koşusu yazar).
 - Birleşik kimliği bir bacağıyla **aynı raporda** verirsen komut reddeder (çıkış kodu 2): aynı işlemler iki karar
-  koşusunda sayılır ve G4 işlem listesini onlarla iki kez karşılaştırırdı. Bir bacağı bağımsız portla
-  (`master_ny_orb_fvg,ny_orb_fvg`) vermek karışım değildir; onlar ayrı script'lerdir.
+  koşusunda sayılır ve G4 işlem listesini onlarla iki kez karşılaştırırdı.
+- **Tek bacak tek başına verilemez** (2026-11-20 kullanıcı kararı, açık bulgu 87): `--strategies master_ny_orb_fvg`
+  ya da bir bacağın yanında bağımsız port (`master_ny_orb_fvg,ny_orb_fvg`; onlar ayrı script'lerdir) çıkış kodu 2 ile
+  reddedilir ve rapor yazılmaz. Betiğin işlem listesi bütün bacakları taşıdığı için G4 tek bacakla bağlanamazdı; hata
+  mesajı eksik bacağı, iki geçerli yolu (bütün bacaklar ya da `master_portfolio`) ve aynı motorun bağımsız
+  stratejisini (`ny_orb_fvg`, `asian_sweep`) söyler.
 - G4: işlem listesinin satırları ve köken satırı her iki yolda da **bacak kimliklerini** taşır. Birleşik koşu
   satırlarının özetini bacak başına kaydeder; G4 listeyi onunla böyle bağlar. Bu alanı taşımayan eski birleşik artefakt
   bağlanamaz (DEĞERLENDİRİLEMEDİ): backtest'i yeniden koş.

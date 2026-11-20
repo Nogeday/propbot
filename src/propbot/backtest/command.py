@@ -815,7 +815,35 @@ def _parse_strategies(text: str) -> tuple[str, ...]:
                 f"işlemler iki kez sayılır); ya birleşik kimliği ({script}) ya da bacak "
                 f"kimliklerini ({', '.join(known[sid].leg_ids)}) verin"
             )
+    for sid in chosen:
+        spec = known[sid]
+        missing = [leg for leg in spec.leg_ids if leg not in chosen]
+        if sid != spec.strategy_id and missing:
+            # A leg alone is refused here instead of being left to G4 (user decision of
+            # 2026-11-20, open finding 87): the script's trade list always carries all its
+            # legs, so G4 could only end NOT_EVALUABLE, after a report nobody can use.
+            raise BacktestCommandError(
+                f"--strategies: {sid}, {spec.strategy_id} betiğinin bacağıdır ve tek başına "
+                f"değerlendirilemez (eksik bacak: {', '.join(missing)}; betiğin işlem listesi "
+                "bütün bacakları taşır, G4 tek bacakla bağlanamaz); ya bütün bacakları "
+                f"({', '.join(spec.leg_ids)}) ya da birleşik kimliği ({spec.strategy_id}) verin"
+                + _standalone_hint(sid)
+            )
     return tuple(chosen)
+
+
+def _standalone_hint(leg_id: str) -> str:
+    """Where to look when the stand-alone strategy was meant, not the portfolio's leg.
+
+    A leg id ends with the id of the stand-alone port of the same engine
+    (master_ny_orb_fvg / ny_orb_fvg). That is a naming habit, not a rule, so the hint
+    names one id only when exactly one fits and lists them all otherwise.
+    """
+    alone = sorted(sid for sid, spec in STRATEGIES.items() if spec.leg_ids == (sid,))
+    fits = [sid for sid in alone if leg_id.endswith("_" + sid)]
+    if len(fits) == 1:
+        return f". Aynı motorun bağımsız stratejisini değerlendirmek için: {fits[0]}"
+    return f". Bağımsız stratejiler: {', '.join(alone)}"
 
 
 def _compliance_files(directory: Path) -> tuple[str, ...] | None:

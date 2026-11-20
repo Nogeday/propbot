@@ -455,7 +455,6 @@ def test_the_real_master_chain_holds_by_either_view_and_for_no_single_leg(world:
 
     by_id = gate(world.gonogo(MASTER), "G4")
     by_legs = gate(world.gonogo(",".join(MASTER_LEGS)), "G4")
-    one_leg = gate(world.gonogo(MASTER_LEGS[0]), "G4")
 
     # 39 trades and a losing fixture: G4 fails either way, but on its numbers, not on
     # the chain, which the real artifacts close under both views.
@@ -467,8 +466,15 @@ def test_the_real_master_chain_holds_by_either_view_and_for_no_single_leg(world:
         for sid in files:
             assert f"backtest_{sid}_" in found.evidence
     # The list the command writes always holds both legs: one leg alone is not its owner.
-    assert CHAIN not in one_leg.evidence
-    assert f"değerlendirilmeyen: {MASTER_LEGS[1]}" in one_leg.evidence
+    # G4 said so ("değerlendirilmeyen: <other leg>", still pinned at the pure layer above);
+    # since the user's decision of 2026-11-20 (open finding 87) the command refuses one leg
+    # before any gate runs and writes no report.
+    before = sorted(path.name for path in world.reports.iterdir())
+    code, err = world.gonogo_code(MASTER_LEGS[0])
+    assert code == 2
+    assert f"--strategies: {MASTER_LEGS[0]}, {MASTER} betiğinin bacağıdır" in err
+    assert f"eksik bacak: {MASTER_LEGS[1]};" in err
+    assert sorted(path.name for path in world.reports.iterdir()) == before
 
 
 # --- (2) the risk chain through the real commands, config edited between the steps ------------

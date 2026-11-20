@@ -594,7 +594,8 @@ def _add_gonogo_parser(commands: "argparse._SubParsersAction[argparse.ArgumentPa
         "--strategies",
         required=True,
         help="değerlendirilecek strateji kimlikleri, virgülle (Master için ya iki bacak kimliği "
-        "ya da birleşik master_portfolio; ikisi aynı raporda verilemez)",
+        "birlikte ya da birleşik master_portfolio; ikisi aynı raporda ya da tek bacak tek başına "
+        "verilemez)",
     )
     gonogo.add_argument(
         "--venue", help="venue profili adı (config/venues/<ad>.yaml); tek profil varsa gerekmez"

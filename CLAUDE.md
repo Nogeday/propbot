@@ -121,7 +121,8 @@ uv run propbot backtest --strategy <id|all> --data data/<file>.csv [--matrix] [-
 uv run propbot parity --strategy <id> --data <tv_bars.csv> --tv-trades <list_of_trades.csv> --tv-tz <zone>
 uv run propbot montecarlo --trades <trades.csv> --venue config/venues/ftmo_2step_100k.yaml --r-is-net
 uv run propbot gonogo --strategies <id,id> [--venue ftmo_2step_100k]   # Faz 2'de her zaman NO_GO (G5); Master: iki
-                                                        # bacak kimliği ya da master_portfolio, ikisi birlikte değil
+                                                        # bacak kimliği birlikte ya da master_portfolio; ikisi
+                                                        # birlikte ve tek bacak reddedilir
 ```
 
 ## Yapma
