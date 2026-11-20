@@ -472,7 +472,7 @@ def test_the_real_master_chain_holds_by_either_view_and_for_no_single_leg(world:
     before = sorted(path.name for path in world.reports.iterdir())
     code, err = world.gonogo_code(MASTER_LEGS[0])
     assert code == 2
-    assert f"--strategies: {MASTER_LEGS[0]}, {MASTER} betiğinin bacağıdır" in err
+    assert f"--strategies: {MASTER_LEGS[0]} kimliği {MASTER} betiğinin bir bacağıdır" in err
     assert f"eksik bacak: {MASTER_LEGS[1]};" in err
     assert sorted(path.name for path in world.reports.iterdir()) == before
 

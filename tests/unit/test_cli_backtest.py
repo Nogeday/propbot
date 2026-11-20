@@ -589,11 +589,11 @@ def test_gonogo_with_no_reports_is_no_go_not_an_error(
             "master_portfolio ile bacağı master_asian_sweep aynı raporda değerlendirilemez",
         ),
         # User decision of 2026-11-20 (open finding 87): one leg alone is refused here, not
-        # left to G4, which could only end NOT_EVALUABLE on the script's two-leg list.
+        # left to G4, which could never pass on the script's two-leg list.
         (
             [],
             "master_ny_orb_fvg",
-            "master_ny_orb_fvg, master_portfolio betiğinin bacağıdır ve tek başına "
+            "master_ny_orb_fvg kimliği master_portfolio betiğinin bir bacağıdır ve tek başına "
             "değerlendirilemez",
         ),
         ([], "ny_orb_fvg,master_asian_sweep", "eksik bacak: master_ny_orb_fvg"),
@@ -645,7 +645,8 @@ def test_the_mix_refusal_says_which_ids_to_give_instead(
     assert code == 2
     assert "aynı işlemler iki kez sayılır" in err
     assert "ya birleşik kimliği (master_portfolio)" in err
-    assert "bacak kimliklerini (master_ny_orb_fvg, master_asian_sweep)" in err
+    # Written the way it is typed after --strategies (no space after the comma).
+    assert "bacak kimliklerini (master_ny_orb_fvg,master_asian_sweep) verin" in err
     # A leg next to the stand-alone port is no mix (that port is another script), but it is
     # one leg alone: since the user's decision of 2026-11-20 (open finding 87) the command
     # refuses that too, with its own message, where it used to write a report (exit 1).
@@ -687,8 +688,8 @@ def test_a_single_master_leg_is_refused_before_any_gate_and_told_what_to_give(
     alone: str,
 ) -> None:
     # User decision of 2026-11-20 (open finding 87). Before it the command wrote a report
-    # in which G4 was NOT_EVALUABLE ("değerlendirilmeyen: <other leg>"): right, but a
-    # report nobody could use and a message that named neither way out.
+    # in which G4 could never pass (at best NOT_EVALUABLE, "değerlendirilmeyen: <other
+    # leg>"): right, but a report nobody could use and a message that named neither way out.
     reports = tmp_path / "reports"
     assert backtest(reports, "--strategy", "master_portfolio") == 0
     before = sorted(path.name for path in reports.iterdir())
@@ -704,14 +705,16 @@ def test_a_single_master_leg_is_refused_before_any_gate_and_told_what_to_give(
     assert len(err.splitlines()) == 1
     assert "Traceback" not in err
     assert err.startswith(
-        f"HATA: --strategies: {leg}, master_portfolio betiğinin bacağıdır ve tek başına "
-        "değerlendirilemez"
+        f"HATA: --strategies: {leg} kimliği master_portfolio betiğinin bir bacağıdır ve tek "
+        "başına değerlendirilemez"
     )
     assert f"eksik bacak: {missing};" in err
     # Both ways to judge the Master, and the stand-alone strategy if that was meant.
-    assert "ya bütün bacakları (master_ny_orb_fvg, master_asian_sweep)" in err
+    # The first way is written as it is typed: pasted after --strategies it is accepted.
+    assert "ya bütün bacakları (master_ny_orb_fvg,master_asian_sweep)" in err
     assert "ya da birleşik kimliği (master_portfolio) verin" in err
     assert err.endswith(f"Aynı motorun bağımsız stratejisini değerlendirmek için: {alone}")
+    assert gonogo(reports, strategies="master_ny_orb_fvg,master_asian_sweep") == 1
 
 
 @pytest.mark.parametrize(
@@ -753,13 +756,50 @@ def test_a_leg_whose_name_points_at_no_stand_alone_strategy_gets_the_whole_list(
 
     err = capsys.readouterr().err.strip()
     assert code == 2
-    assert err.startswith("HATA: --strategies: pair_b, pair betiğinin bacağıdır")
+    assert err.startswith("HATA: --strategies: pair_b kimliği pair betiğinin bir bacağıdır")
     assert "eksik bacak: pair_a;" in err
-    assert "ya bütün bacakları (pair_a, pair_b) ya da birleşik kimliği (pair) verin" in err
+    assert "ya bütün bacakları (pair_a,pair_b) ya da birleşik kimliği (pair) verin" in err
     assert err.endswith(
         "Bağımsız stratejiler: asian_sweep, ict_silver_bullet, mr_bb_kc_rsi2, mtf_trend_cont, "
         "ny_orb_fvg"
     )
+
+
+def test_a_leg_whose_name_fits_two_stand_alone_strategies_is_not_given_a_guess(
+    tmp_path: Path, cwd: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # "duo_ny_orb_fvg" ends with two stand-alone ids here (ny_orb_fvg and a shorter "fvg"):
+    # naming either as "the same engine" would be a guess, so the list is given instead.
+    duo = dataclasses.replace(
+        STRATEGIES["master_portfolio"],
+        strategy_id="duo",
+        leg_ids=("duo_ny_orb_fvg", "duo_other"),
+    )
+    fvg = dataclasses.replace(STRATEGIES["ny_orb_fvg"], strategy_id="fvg", leg_ids=("fvg",))
+    monkeypatch.setattr(command, "STRATEGIES", {**STRATEGIES, "duo": duo, "fvg": fvg})
+
+    code = gonogo(tmp_path / "reports", strategies="duo_ny_orb_fvg")
+
+    err = capsys.readouterr().err.strip()
+    assert code == 2
+    assert "Aynı motorun" not in err
+    assert err.endswith(
+        "Bağımsız stratejiler: asian_sweep, fvg, ict_silver_bullet, mr_bb_kc_rsi2, "
+        "mtf_trend_cont, ny_orb_fvg"
+    )
+
+
+def test_without_any_stand_alone_strategy_the_refusal_ends_with_the_two_ways(
+    tmp_path: Path, cwd: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Nothing to point at: the message must not end in an empty list.
+    monkeypatch.setattr(command, "STRATEGIES", {"master_portfolio": STRATEGIES["master_portfolio"]})
+
+    code = gonogo(tmp_path / "reports", strategies="master_asian_sweep")
+
+    err = capsys.readouterr().err.strip()
+    assert code == 2
+    assert err.endswith("ya da birleşik kimliği (master_portfolio) verin")
 
 
 def judged_files(reports: Path, gate_id: str) -> dict[str, object]:

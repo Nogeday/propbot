@@ -813,7 +813,9 @@ def _parse_strategies(text: str) -> tuple[str, ...]:
             raise BacktestCommandError(
                 f"--strategies: {script} ile bacağı {sid} aynı raporda değerlendirilemez (aynı "
                 f"işlemler iki kez sayılır); ya birleşik kimliği ({script}) ya da bacak "
-                f"kimliklerini ({', '.join(known[sid].leg_ids)}) verin"
+                # Ids are joined the way they are typed (no space): the text in the
+                # parentheses can be pasted after --strategies as it is.
+                f"kimliklerini ({','.join(known[sid].leg_ids)}) verin"
             )
     for sid in chosen:
         spec = known[sid]
@@ -821,12 +823,13 @@ def _parse_strategies(text: str) -> tuple[str, ...]:
         if sid != spec.strategy_id and missing:
             # A leg alone is refused here instead of being left to G4 (user decision of
             # 2026-11-20, open finding 87): the script's trade list always carries all its
-            # legs, so G4 could only end NOT_EVALUABLE, after a report nobody can use.
+            # legs, so G4 could never pass (at best NOT_EVALUABLE), after a report nobody
+            # can use.
             raise BacktestCommandError(
-                f"--strategies: {sid}, {spec.strategy_id} betiğinin bacağıdır ve tek başına "
-                f"değerlendirilemez (eksik bacak: {', '.join(missing)}; betiğin işlem listesi "
-                "bütün bacakları taşır, G4 tek bacakla bağlanamaz); ya bütün bacakları "
-                f"({', '.join(spec.leg_ids)}) ya da birleşik kimliği ({spec.strategy_id}) verin"
+                f"--strategies: {sid} kimliği {spec.strategy_id} betiğinin bir bacağıdır ve tek "
+                f"başına değerlendirilemez (eksik bacak: {', '.join(missing)}; betiğin işlem "
+                "listesi bütün bacakları taşır, G4 tek bacakla bağlanamaz); ya bütün bacakları "
+                f"({','.join(spec.leg_ids)}) ya da birleşik kimliği ({spec.strategy_id}) verin"
                 + _standalone_hint(sid)
             )
     return tuple(chosen)
@@ -837,9 +840,12 @@ def _standalone_hint(leg_id: str) -> str:
 
     A leg id ends with the id of the stand-alone port of the same engine
     (master_ny_orb_fvg / ny_orb_fvg). That is a naming habit, not a rule, so the hint
-    names one id only when exactly one fits and lists them all otherwise.
+    names one id only when exactly one fits and lists them all otherwise; with no
+    stand-alone strategy at all there is nothing to point at.
     """
     alone = sorted(sid for sid, spec in STRATEGIES.items() if spec.leg_ids == (sid,))
+    if not alone:
+        return ""
     fits = [sid for sid in alone if leg_id.endswith("_" + sid)]
     if len(fits) == 1:
         return f". Aynı motorun bağımsız stratejisini değerlendirmek için: {fits[0]}"
