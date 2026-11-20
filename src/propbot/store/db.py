@@ -1,11 +1,17 @@
 """SQLite store of the signal bot: signal queue, daily budget ledger, Telegram outbox, state.
 
 One process, one connection (`check_same_thread=False`, `isolation_level=None`), guarded by a
-`threading.RLock`. Every read and write happens inside `Store.transaction()`, which runs
+`threading.RLock`. Every write happens inside `Store.transaction()`, which runs
 `BEGIN IMMEDIATE` and commits on success or rolls back on any exception, so a signal's outcome,
 its budget entry and its outbox rows are written together or not at all (exactly-once
 processing). PRAGMAs: `journal_mode=WAL`, `synchronous=FULL`, `foreign_keys=ON`,
 `busy_timeout=5000`.
+
+A caller that only looks (the local panel, ADR-0009) reads inside `Store.read()` instead: a
+`BEGIN DEFERRED` snapshot under `PRAGMA query_only`, which takes no write lock. In WAL mode it
+neither waits for another connection's writer nor makes that writer wait, and nothing can be
+written through it. `Store(path, create=False)` opens an existing database without creating,
+initialising or converting anything.
 
 This is the bottom layer: standard library only. Wire values of the alert schema (action, side,
 order type) are stored as the plain text the caller hands over; enums defined here are checked
@@ -103,6 +109,8 @@ _MIN_SQLITE_VERSION: Final = (3, 37, 0)
 _HEARTBEAT_ACTION: Final = "heartbeat"
 _SCHEMA_VERSION_KEY: Final = "schema_version"
 _SYNCHRONOUS_FULL: Final = 2
+# Lowest INTEGER SQLite stores: "received at or after this" holds for every row.
+_INT64_MIN: Final = -(2**63)
 
 
 class StoreError(Exception):
@@ -173,6 +181,9 @@ class StateKey(StrEnum):
     # Another process was polling with the same bot token when this copy arrived: no entry
     # is forwarded until a later arrival of this copy stays unchallenged (ADR-0004).
     STANDBY = "standby"
+    # Balance / equity the user typed into the local panel (JSON; ADR-0009 item 5). A
+    # declaration, never a measured value: the bot knows no fills before Faz 3.
+    MANUAL_ACCOUNT = "manual_account"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -283,6 +294,13 @@ _SQL_READ_FOREIGN_KEYS: Final = "PRAGMA foreign_keys"
 _SQL_READ_BUSY_TIMEOUT: Final = "PRAGMA busy_timeout"
 
 _SQL_BEGIN: Final = "BEGIN IMMEDIATE"
+_SQL_BEGIN_READ: Final = "BEGIN DEFERRED"
+# BEGIN DEFERRED takes no lock: the first read of the file fixes the snapshot. Reading the
+# header's schema cookie does that at once, so the snapshot is the moment `read()` returned.
+_SQL_START_READ: Final = "PRAGMA schema_version"
+_SQL_QUERY_ONLY_ON: Final = "PRAGMA query_only = ON"
+_SQL_QUERY_ONLY_OFF: Final = "PRAGMA query_only = OFF"
+_SQL_READ_JOURNAL_MODE: Final = "PRAGMA journal_mode"
 _SQL_COMMIT: Final = "COMMIT"
 _SQL_ROLLBACK: Final = "ROLLBACK"
 
@@ -439,6 +457,20 @@ ORDER BY bar_time_ms DESC LIMIT 1
 _SQL_SIGNALS_RECEIVED_BETWEEN: Final = f"""
 SELECT {_SIGNAL_COLUMNS} FROM signals
 WHERE received_at_ms >= ? AND received_at_ms < ? ORDER BY id
+"""
+# Newest first along the `signals_received_at` index, whose entries are ordered by
+# (received_at_ms, rowid): the search starts at the newest end and stops after LIMIT rows,
+# however many older rows the window or the table holds. `ORDER BY id DESC` with the same
+# WHERE scans the table instead and, when the window holds fewer than LIMIT rows, reads all of it.
+_SQL_RECENT_SIGNALS: Final = f"""
+SELECT {_SIGNAL_COLUMNS} FROM signals
+WHERE received_at_ms >= ?
+ORDER BY received_at_ms DESC, id DESC LIMIT ?
+"""
+_SQL_RECENT_SIGNALS_BEFORE: Final = f"""
+SELECT {_SIGNAL_COLUMNS} FROM signals
+WHERE received_at_ms >= ? AND received_at_ms < ?
+ORDER BY received_at_ms DESC, id DESC LIMIT ?
 """
 _SQL_LAST_RECEIVED: Final = "SELECT MAX(received_at_ms) FROM signals"
 _SQL_LAST_RECEIVED_FOR_ACTION: Final = "SELECT MAX(received_at_ms) FROM signals WHERE action = ?"
@@ -808,6 +840,26 @@ class Tx:
         rows = self._all(_SQL_SIGNALS_RECEIVED_BETWEEN, (start_ms, end_ms))
         return [_signal_row(row) for row in rows]
 
+    def recent_signals(
+        self, limit: int, *, since_ms: int | None = None, before_ms: int | None = None
+    ) -> list[SignalRow]:
+        """At most `limit` signals, newest first by (`received_at_ms`, id).
+
+        Only signals with `since_ms <= received_at_ms < before_ms` (each bound optional).
+        Whatever the table holds, this reads at most `limit` rows through an index. Every
+        signal of the window newer than the oldest one returned is returned too.
+        """
+        # SQLite reads a negative LIMIT as "no limit": exactly the unbounded read this exists
+        # to rule out.
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+            raise StoreError("limit negatif olmayan bir tam sayı olmalı")
+        since = _INT64_MIN if since_ms is None else since_ms
+        if before_ms is None:
+            rows = self._all(_SQL_RECENT_SIGNALS, (since, limit))
+        else:
+            rows = self._all(_SQL_RECENT_SIGNALS_BEFORE, (since, before_ms, limit))
+        return [_signal_row(row) for row in rows]
+
     def last_received_ms(self, *, action: str | None = None) -> int | None:
         if action is None:
             row = self._one(_SQL_LAST_RECEIVED)
@@ -1016,6 +1068,102 @@ class Tx:
         self._change(_SQL_DELETE_STATE, (str(key),))
 
 
+class ReadTx:
+    """The open read-only transaction of a `Store`: the read methods of `Tx` and nothing else.
+
+    Valid only inside its `with` block, on its thread (the wrapped `Tx` checks both). Each
+    method is the `Tx` method of the same name; the connection is `query_only` meanwhile, so
+    even a write that reached it some other way would fail with a StoreError.
+    """
+
+    __slots__ = ("_tx",)
+
+    def __init__(self, tx: Tx, key: object) -> None:
+        if key is not _TX_KEY:
+            raise StoreError("ReadTx yalnızca Store.read() ile açılır")
+        self._tx: Final = tx
+
+    # -- signals -----------------------------------------------------------------------------
+
+    def next_queued_signal(self) -> SignalRow | None:
+        return self._tx.next_queued_signal()
+
+    def get_signal(self, signal_id: int) -> SignalRow | None:
+        return self._tx.get_signal(signal_id)
+
+    def latest_signal(
+        self,
+        *,
+        strategy_id: str,
+        symbol: str,
+        action: str,
+        min_bar_time_ms: int,
+        max_bar_time_ms: int,
+        outcome: Outcome | None = None,
+    ) -> SignalRow | None:
+        return self._tx.latest_signal(
+            strategy_id=strategy_id,
+            symbol=symbol,
+            action=action,
+            min_bar_time_ms=min_bar_time_ms,
+            max_bar_time_ms=max_bar_time_ms,
+            outcome=outcome,
+        )
+
+    def signals_received_between(self, start_ms: int, end_ms: int) -> list[SignalRow]:
+        return self._tx.signals_received_between(start_ms, end_ms)
+
+    def recent_signals(
+        self, limit: int, *, since_ms: int | None = None, before_ms: int | None = None
+    ) -> list[SignalRow]:
+        return self._tx.recent_signals(limit, since_ms=since_ms, before_ms=before_ms)
+
+    def last_received_ms(self, *, action: str | None = None) -> int | None:
+        return self._tx.last_received_ms(action=action)
+
+    def queue_depth(self) -> int:
+        return self._tx.queue_depth()
+
+    def latency_samples(self, since_ms: int) -> list[LatencySample]:
+        return self._tx.latency_samples(since_ms)
+
+    # -- daily budget ledger -----------------------------------------------------------------
+
+    def get_budget_entry(self, signal_id: int) -> BudgetRow | None:
+        return self._tx.get_budget_entry(signal_id)
+
+    def budget_entries(self, prop_day: dt.date) -> list[BudgetRow]:
+        return self._tx.budget_entries(prop_day)
+
+    def budget_used(self, prop_day: dt.date) -> float:
+        return self._tx.budget_used(prop_day)
+
+    # -- outbox ------------------------------------------------------------------------------
+
+    def next_pending_message(self) -> OutboxRow | None:
+        return self._tx.next_pending_message()
+
+    def get_message(self, message_id: int) -> OutboxRow | None:
+        return self._tx.get_message(message_id)
+
+    def messages_for_signal(self, signal_id: int) -> list[OutboxRow]:
+        return self._tx.messages_for_signal(signal_id)
+
+    def pending_expired_messages(self, now_ms: int) -> list[OutboxRow]:
+        return self._tx.pending_expired_messages(now_ms)
+
+    def messages_created_between(self, start_ms: int, end_ms: int) -> list[OutboxRow]:
+        return self._tx.messages_created_between(start_ms, end_ms)
+
+    def outbox_counts(self) -> dict[OutboxStatus, int]:
+        return self._tx.outbox_counts()
+
+    # -- state -------------------------------------------------------------------------------
+
+    def get_state(self, key: str) -> str | None:
+        return self._tx.get_state(key)
+
+
 # --------------------------------------------------------------------------------------------
 # Store
 # --------------------------------------------------------------------------------------------
@@ -1028,6 +1176,14 @@ def _rollback_quietly(conn: sqlite3.Connection) -> None:
     with suppress(sqlite3.Error):
         if conn.in_transaction:
             conn.execute(_SQL_ROLLBACK)
+
+
+def _end_query_only(conn: sqlite3.Connection) -> None:
+    """Make the connection writable again after a read; quiet, another error may be leaving."""
+    # Should this fail, the connection stays query-only and every later write transaction
+    # fails with "readonly database": closed to writes, never silently writable.
+    with suppress(sqlite3.Error):
+        conn.execute(_SQL_QUERY_ONLY_OFF)
 
 
 def _scalar(conn: sqlite3.Connection, sql: str) -> object:
@@ -1050,19 +1206,35 @@ def _configure(conn: sqlite3.Connection) -> None:
             raise StoreError(f"PRAGMA {name} ayarlanamadı (beklenen {expected}, okunan {actual!r})")
 
 
-def _enable_wal(conn: sqlite3.Connection, *, in_memory: bool) -> None:
-    """Switch the database file to write-ahead logging (persistent; a no-op when already on)."""
-    journal_mode = _scalar(conn, _SQL_PRAGMA_JOURNAL_MODE_WAL)
+def _enable_wal(conn: sqlite3.Connection, *, in_memory: bool, create: bool) -> None:
+    """Switch the database file to write-ahead logging (persistent; a no-op when already on).
+
+    Without `create` the mode is only checked: every file `serve` made is in WAL mode, and
+    converting someone else's file is not this caller's business.
+    """
+    if create:
+        journal_mode = _scalar(conn, _SQL_PRAGMA_JOURNAL_MODE_WAL)
+    else:
+        journal_mode = _scalar(conn, _SQL_READ_JOURNAL_MODE)
     # An in-memory database has no file to log to and reports "memory".
     if journal_mode != ("memory" if in_memory else "wal"):
         raise StoreError(f"journal_mode=WAL ayarlanamadı (okunan: {journal_mode!r})")
 
 
-def _ensure_schema(conn: sqlite3.Connection) -> None:
-    """Create the schema in an empty database; otherwise require exactly this version."""
-    conn.execute(_SQL_BEGIN)
+def _ensure_schema(conn: sqlite3.Connection, *, create: bool) -> None:
+    """Create the schema in an empty database; otherwise require exactly this version.
+
+    Without `create` an empty database is refused and the check runs in a read transaction:
+    it neither writes nor waits for another connection's writer.
+    """
+    conn.execute(_SQL_BEGIN if create else _SQL_BEGIN_READ)
     try:
         tables = {row[0] for row in conn.execute(_SQL_LIST_TABLES).fetchall()}
+        if not tables and not create:
+            raise StoreError(
+                "veritabanı boş (şema yok): propbot serve henüz oluşturmamış olabilir; "
+                "dosyaya dokunulmadı"
+            )
         if not tables:
             for statement in _SQL_SCHEMA:
                 conn.execute(statement)
@@ -1088,7 +1260,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         raise
 
 
-def _connect(path: Path | str) -> sqlite3.Connection:
+def _connect(path: Path | str, *, create: bool) -> sqlite3.Connection:
     if sqlite3.sqlite_version_info < _MIN_SQLITE_VERSION:
         needed = ".".join(str(part) for part in _MIN_SQLITE_VERSION)
         raise StoreError(f"SQLite {needed}+ gerekli (kurulu: {sqlite3.sqlite_version})")
@@ -1096,6 +1268,9 @@ def _connect(path: Path | str) -> sqlite3.Connection:
         raise StoreError("SQLite kütüphanesi thread desteği olmadan derlenmiş")
     target = str(path)
     in_memory = target == MEMORY_PATH
+    uri = False
+    if in_memory and not create:
+        raise StoreError("bellek içi veritabanı her açılışta yenidir: create=False ile açılamaz")
     if not in_memory:
         if not target:
             raise StoreError("veritabanı yolu boş olamaz")
@@ -1104,12 +1279,19 @@ def _connect(path: Path | str) -> sqlite3.Connection:
             raise StoreError(f"veritabanı klasörü yok: {file_path.parent}")
         if file_path.is_dir():
             raise StoreError(f"veritabanı yolu bir klasör: {file_path}")
+        if not create:
+            if not file_path.exists():
+                raise StoreError(f"veritabanı dosyası yok: {file_path}")
+            # mode=rw: a file removed after the check above is an error, never a new file.
+            target = file_path.absolute().as_uri() + "?mode=rw"
+            uri = True
     try:
         conn = sqlite3.connect(
             target,
             timeout=BUSY_TIMEOUT_MS / 1000.0,
             isolation_level=None,  # no implicit BEGIN: transactions are opened explicitly
             check_same_thread=False,  # shared across threads, serialized by Store's lock
+            uri=uri,
         )
     except sqlite3.Error as exc:
         raise _store_error(exc) from exc
@@ -1117,8 +1299,8 @@ def _connect(path: Path | str) -> sqlite3.Connection:
         conn.row_factory = sqlite3.Row
         _configure(conn)
         # The schema check comes before WAL: a file that is refused is left exactly as it was.
-        _ensure_schema(conn)
-        _enable_wal(conn, in_memory=in_memory)
+        _ensure_schema(conn, create=create)
+        _enable_wal(conn, in_memory=in_memory, create=create)
     except sqlite3.Error as exc:
         conn.close()
         raise _store_error(exc) from exc
@@ -1132,16 +1314,21 @@ class Store:
     """The bot's SQLite database. Open once per process; share between threads freely.
 
     `path` is a file whose parent directory exists (the file is created when missing) or
-    ":memory:" (tests). Close it when done; it is also a context manager. An instance that
+    ":memory:" (tests). With `create=False` the file must already hold this schema: a
+    missing or empty file is a StoreError, and opening neither writes nor waits for another
+    connection's writer. Close it when done; it is also a context manager. An instance that
     is garbage-collected while still open closes its connection and emits a ResourceWarning.
+
+    One transaction at a time, write or read: another thread waits for the open one to end,
+    and opening a second one on the thread that holds one is a StoreError.
     """
 
-    def __init__(self, path: Path | str) -> None:
+    def __init__(self, path: Path | str, *, create: bool = True) -> None:
         self._label: Final = str(path)
         self._lock: Final = threading.RLock()
         self._active: Tx | None = None
         self._conn: sqlite3.Connection | None = None
-        self._conn = _connect(path)
+        self._conn = _connect(path, create=create)
 
     def transaction(self) -> AbstractContextManager[Tx]:
         """Open the one write transaction: `with store.transaction() as tx: ...`.
@@ -1178,6 +1365,53 @@ class Store:
                 raise
             finally:
                 tx._finish()
+                self._active = None
+
+    def read(self) -> AbstractContextManager[ReadTx]:
+        """Open a read-only snapshot: `with store.read() as tx: ...`.
+
+        Takes no write lock: in WAL mode it neither waits for another connection's writer
+        nor makes one wait, and every read inside sees the database as it was when the block
+        began. Inside this process it is a transaction like the others (see the class). Any
+        write through the connection meanwhile fails ("attempt to write a readonly database").
+        """
+        return self._read()
+
+    @contextmanager
+    def _read(self) -> Iterator[ReadTx]:
+        with self._lock:
+            if self._active is not None:
+                raise StoreError("iç içe transaction açılamaz (aynı thread'de zaten açık)")
+            conn = self._conn
+            if conn is None:
+                raise StoreError("veritabanı kapalı")
+            try:
+                conn.execute(_SQL_QUERY_ONLY_ON)
+                conn.execute(_SQL_BEGIN_READ)
+                conn.execute(_SQL_START_READ).fetchall()
+            except BaseException as exc:
+                # Not only sqlite3.Error: an interrupt between these statements would leave
+                # the shared connection query-only (every later write fails) or inside the
+                # read (pinning the WAL), with no `with` block left to undo it.
+                _rollback_quietly(conn)
+                _end_query_only(conn)
+                if isinstance(exc, sqlite3.Error):
+                    raise _store_error(exc) from exc
+                raise
+            tx = Tx(conn, _TX_KEY)
+            self._active = tx
+            try:
+                yield ReadTx(tx, _TX_KEY)
+                try:
+                    conn.execute(_SQL_COMMIT)
+                except sqlite3.Error as exc:
+                    raise _store_error(exc) from exc
+            except BaseException:
+                _rollback_quietly(conn)
+                raise
+            finally:
+                tx._finish()
+                _end_query_only(conn)
                 self._active = None
 
     def close(self) -> None:

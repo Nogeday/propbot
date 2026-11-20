@@ -4,6 +4,7 @@ import ast
 import dataclasses
 import datetime as dt
 import gc
+import inspect
 import sqlite3
 import sys
 import threading
@@ -29,6 +30,7 @@ from propbot.store.db import (
     OutboxRow,
     OutboxStatus,
     Outcome,
+    ReadTx,
     ReleaseReason,
     SignalRow,
     SignalStatus,
@@ -196,6 +198,7 @@ def raw_execute(path: Path, sql: str, *, ignore_checks: bool = False) -> list[tu
                 "last_alive_ms",
                 "restarts_unreported",
                 "standby",
+                "manual_account",
             ],
         ),
     ],
@@ -650,6 +653,7 @@ TX_CALLS: dict[str, Callable[[Tx], object]] = {
         max_bar_time_ms=BAR_MS,
     ),
     "signals_received_between": lambda tx: tx.signals_received_between(0, NOW_MS + 1),
+    "recent_signals": lambda tx: tx.recent_signals(10, since_ms=0, before_ms=NOW_MS + 1),
     "last_received_ms": lambda tx: tx.last_received_ms(),
     "queue_depth": lambda tx: tx.queue_depth(),
     "latency_samples": lambda tx: tx.latency_samples(0),
@@ -2397,3 +2401,490 @@ def test_rollback_in_one_thread_does_not_leak_into_another(store: Store) -> None
     with store.transaction() as tx:
         assert tx.queue_depth() == 0
         assert tx.insert_signal(ENTRY) == 1
+
+
+# --------------------------------------------------------------------------------------------
+# Read-only transactions (Store.read)
+# --------------------------------------------------------------------------------------------
+
+# Every read method of Tx, by name: the whole public surface of ReadTx.
+READ_CALLS: dict[str, Callable[[ReadTx | Tx], object]] = {
+    name: TX_CALLS[name]  # type: ignore[misc]
+    for name in (
+        "next_queued_signal",
+        "get_signal",
+        "latest_signal",
+        "signals_received_between",
+        "recent_signals",
+        "last_received_ms",
+        "queue_depth",
+        "latency_samples",
+        "get_budget_entry",
+        "budget_entries",
+        "budget_used",
+        "next_pending_message",
+        "get_message",
+        "messages_for_signal",
+        "pending_expired_messages",
+        "messages_created_between",
+        "outbox_counts",
+        "get_state",
+    )
+}
+WRITE_NAMES = frozenset(TX_CALLS) - frozenset(READ_CALLS)
+
+
+def other_connection(path: Path) -> sqlite3.Connection:
+    """A second connection, the way `serve` would hold the file. Never waits for a lock."""
+    return sqlite3.connect(path, isolation_level=None, timeout=0, check_same_thread=False)
+
+
+def never_wait(store: Store) -> None:
+    """Drop the store's busy timeout: any wait for a lock becomes an immediate error."""
+    conn = store._conn
+    assert conn is not None
+    conn.execute("PRAGMA busy_timeout = 0")
+
+
+def filled(store: Store) -> None:
+    """One row of every kind, so that each read method has something to return."""
+    signal_id = insert(store)
+    with store.transaction() as tx:
+        tx.add_budget_entry(signal_id=signal_id, prop_day=DAY, risk_amount=1.0, now_ms=NOW_MS)
+        tx.enqueue_message(kind=OutboxKind.SIGNAL, text="x", now_ms=NOW_MS, signal_id=signal_id)
+        tx.set_state("k", "v", NOW_MS)
+
+
+def test_read_tx_offers_exactly_the_read_methods_of_tx() -> None:
+    public = {name for name in vars(ReadTx) if not name.startswith("_")}
+
+    assert public == set(READ_CALLS)
+    assert {
+        "insert_signal",
+        "complete_signal",
+        "add_budget_entry",
+        "set_budget_counted",
+        "enqueue_message",
+        "enqueue_alarm",
+        "mark_message_sent",
+        "mark_message_retry",
+        "flag_pending_deadlines_uncertain",
+        "mark_message_failed",
+        "mark_message_expired",
+        "set_state",
+        "delete_state",
+    } == WRITE_NAMES
+    for name in READ_CALLS:
+        assert inspect.signature(getattr(ReadTx, name)) == inspect.signature(getattr(Tx, name))
+
+
+@pytest.mark.parametrize("name", sorted(READ_CALLS))
+def test_each_read_method_answers_as_the_write_transaction_does(store: Store, name: str) -> None:
+    filled(store)
+    with store.transaction() as tx:
+        expected = READ_CALLS[name](tx)
+
+    with store.read() as reader:
+        assert READ_CALLS[name](reader) == expected
+
+
+def test_writing_through_a_read_fails_at_runtime_and_the_store_stays_writable(
+    file_store: Store, db_path: Path
+) -> None:
+    conn = file_store._conn
+    assert conn is not None
+
+    with file_store.read() as reader:
+        # Below the typed surface: the wrapped Tx and the raw connection are both refused.
+        with pytest.raises(StoreError, match="readonly database"):
+            reader._tx.set_state("k", "v", NOW_MS)
+        with pytest.raises(StoreError, match="readonly database"):
+            reader._tx.insert_signal(ENTRY)
+        for statement in (
+            "INSERT INTO state (key, value, updated_at_ms) VALUES ('k', 'v', 1)",
+            "CREATE TABLE extra (x INTEGER)",
+            "PRAGMA user_version = 7",
+        ):
+            with pytest.raises(sqlite3.OperationalError, match="readonly database"):
+                conn.execute(statement)
+
+    assert raw_execute(db_path, "SELECT COUNT(*) FROM state") == [(0,)]
+    assert raw_execute(db_path, "PRAGMA user_version") == [(0,)]
+    assert conn.execute("PRAGMA query_only").fetchone()[0] == 0
+    assert insert(file_store) == 1
+
+
+def test_a_read_ended_by_an_exception_also_leaves_the_store_writable(store: Store) -> None:
+    with pytest.raises(Boom), store.read():
+        raise Boom
+
+    assert insert(store) == 1
+    with store.read() as reader:
+        assert reader.queue_depth() == 1
+
+
+def test_read_tx_cannot_be_built_outside_store_read(file_store: Store) -> None:
+    with file_store.transaction() as tx, pytest.raises(StoreError, match=r"Store\.read\(\)"):
+        ReadTx(tx, object())
+
+
+@pytest.mark.parametrize("name", sorted(READ_CALLS))
+def test_read_tx_is_dead_after_its_block(store: Store, name: str) -> None:
+    with store.read() as reader:
+        pass
+
+    with pytest.raises(StoreError, match="transaction kapandı"):
+        READ_CALLS[name](reader)
+
+
+def test_read_tx_refuses_other_threads(store: Store) -> None:
+    errors: list[BaseException] = []
+
+    def intruder(reader: ReadTx) -> None:
+        try:
+            reader.queue_depth()
+        except BaseException as exc:
+            errors.append(exc)
+
+    with store.read() as reader:
+        thread = threading.Thread(target=intruder, args=(reader,))
+        thread.start()
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    assert len(errors) == 1
+    assert "başka bir thread" in str(errors[0])
+
+
+@pytest.mark.parametrize(
+    ("outer", "inner"),
+    [("read", "read"), ("read", "transaction"), ("transaction", "read")],
+)
+def test_nesting_reads_and_writes_on_one_thread_is_refused(
+    store: Store, outer: str, inner: str
+) -> None:
+    # One connection holds one transaction: a nested BEGIN would fail or, worse, a write
+    # would run under query_only, so the rule is the one of nested write transactions.
+    with getattr(store, outer)() as tx:
+        with pytest.raises(StoreError, match="iç içe transaction"):
+            getattr(store, inner)().__enter__()
+        assert tx.queue_depth() == 0
+        if outer == "transaction":
+            tx.set_state("k", "v", NOW_MS)
+
+    with store.transaction() as tx:
+        assert tx.get_state("k") == ("v" if outer == "transaction" else None)
+
+
+def test_close_inside_a_read_is_refused(store: Store) -> None:
+    with store.read(), pytest.raises(StoreError, match="açık transaction"):
+        store.close()
+
+    with store.read() as reader:
+        assert reader.queue_depth() == 0
+
+
+def test_read_of_a_closed_store_is_refused(db_path: Path) -> None:
+    opened = Store(db_path)
+    opened.close()
+
+    with pytest.raises(StoreError, match="veritabanı kapalı"):
+        opened.read().__enter__()
+
+
+def test_a_read_and_a_write_of_different_threads_take_turns(store: Store) -> None:
+    # Inside one process the read is a transaction like the others: the connection serves
+    # one at a time, and the writer waits instead of failing.
+    inside = threading.Event()
+    release = threading.Event()
+    writer_entered = threading.Event()
+    order: list[str] = []
+    errors: list[BaseException] = []
+
+    def reading() -> None:
+        try:
+            with store.read() as reader:
+                assert reader.get_state("k") is None
+                inside.set()
+                assert release.wait(timeout=10)
+                order.append("read-end")
+        except BaseException as exc:
+            errors.append(exc)
+
+    def writing() -> None:
+        try:
+            with store.transaction() as tx:
+                writer_entered.set()
+                order.append("write")
+                tx.set_state("k", "v", NOW_MS)
+        except BaseException as exc:
+            errors.append(exc)
+
+    first = threading.Thread(target=reading)
+    second = threading.Thread(target=writing)
+    first.start()
+    assert inside.wait(timeout=10)
+    second.start()
+    assert not writer_entered.wait(timeout=0.2)
+    release.set()
+    first.join(timeout=10)
+    second.join(timeout=10)
+
+    assert errors == []
+    assert order == ["read-end", "write"]
+    with store.read() as reader:
+        assert reader.get_state("k") == "v"
+
+
+# -- across connections (another process) ----------------------------------------------------
+
+
+def test_a_read_is_a_snapshot_from_the_moment_it_opened(file_store: Store, db_path: Path) -> None:
+    insert(file_store)
+    with closing(other_connection(db_path)) as other, file_store.read() as reader:
+        # Committed after the read opened but before its first query: still not visible.
+        other.execute("INSERT INTO state (key, value, updated_at_ms) VALUES ('k', 'theirs', 1)")
+        assert reader.get_state("k") is None
+        other.execute("BEGIN IMMEDIATE")
+        other.execute("DELETE FROM signals WHERE id = 1")
+        other.execute("UPDATE state SET value = 'later' WHERE key = 'k'")
+        other.execute("COMMIT")
+        assert reader.queue_depth() == 1
+        assert reader.get_signal(1) is not None
+        assert reader.get_state("k") is None
+
+    with file_store.read() as reader:
+        assert reader.get_state("k") == "later"
+        assert reader.queue_depth() == 0
+
+
+def test_another_connection_writes_without_waiting_while_a_read_is_open(
+    file_store: Store, db_path: Path
+) -> None:
+    with closing(other_connection(db_path)) as other, file_store.read() as reader:
+        assert reader.queue_depth() == 0
+        # timeout=0: a writer that had to wait for this read would fail here at once.
+        other.execute("BEGIN IMMEDIATE")
+        other.execute("INSERT INTO state (key, value, updated_at_ms) VALUES ('k', 'v', 1)")
+        other.execute("COMMIT")
+        other.execute("BEGIN EXCLUSIVE")
+        other.execute("DELETE FROM state")
+        other.execute("COMMIT")
+
+    assert raw_execute(db_path, "SELECT COUNT(*) FROM state") == [(0,)]
+
+
+@pytest.mark.parametrize("lock", ["BEGIN IMMEDIATE", "BEGIN EXCLUSIVE"])
+def test_a_read_does_not_wait_for_another_connections_write_lock(
+    file_store: Store, db_path: Path, lock: str
+) -> None:
+    set_state_raw = "INSERT INTO state (key, value, updated_at_ms) VALUES ('k', 'theirs', 1)"
+    never_wait(file_store)
+    with closing(other_connection(db_path)) as other:
+        other.execute(lock)  # in WAL mode EXCLUSIVE locks out writers only, as IMMEDIATE does
+        other.execute(set_state_raw)
+        with file_store.read() as reader:
+            assert reader.get_state("k") is None  # their write is not committed
+        # The write path still waits for (here: fails on) the other writer, as before.
+        with pytest.raises(StoreError, match="database is locked"):
+            file_store.transaction().__enter__()
+        other.execute("COMMIT")
+
+    with file_store.read() as reader:
+        assert reader.get_state("k") == "theirs"
+
+
+def test_a_checkpoint_neither_blocks_an_open_read_nor_is_blocked_by_it(
+    file_store: Store, db_path: Path
+) -> None:
+    insert(file_store)
+    never_wait(file_store)
+    with closing(other_connection(db_path)) as other, file_store.read() as reader:
+        assert reader.queue_depth() == 1
+        other.execute("INSERT INTO state (key, value, updated_at_ms) VALUES ('k', 'v', 1)")
+        # PASSIVE (what SQLite runs on its own) copies what it can and returns busy = 0;
+        # TRUNCATE cannot reset the log under a reader and says so (busy = 1) instead of
+        # waiting, since the other connection never waits.
+        assert other.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()[0] == 0
+        assert other.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 1
+        assert reader.queue_depth() == 1
+        assert reader.get_state("k") is None
+
+    with file_store.read() as reader:
+        assert reader.get_state("k") == "v"
+    with closing(other_connection(db_path)) as other:
+        assert other.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
+
+
+# -- opening without creating ----------------------------------------------------------------
+
+
+def test_opening_without_create_refuses_a_missing_file_and_creates_nothing(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "propbot.db"
+
+    with pytest.raises(StoreError, match="veritabanı dosyası yok"):
+        Store(path, create=False)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_opening_without_create_refuses_an_empty_file_and_leaves_it_untouched(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "propbot.db"
+    path.touch()
+
+    with pytest.raises(StoreError, match="veritabanı boş"):
+        Store(path, create=False)
+
+    assert path.stat().st_size == 0
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_opening_without_create_refuses_memory() -> None:
+    with pytest.raises(StoreError, match="create=False"):
+        Store(":memory:", create=False)
+
+
+@pytest.mark.parametrize("stored", ["2", "4", ""])
+def test_opening_without_create_refuses_another_schema_version_unchanged(
+    db_path: Path, stored: str
+) -> None:
+    Store(db_path).close()
+    raw_execute(db_path, f"UPDATE meta SET value = '{stored}' WHERE key = 'schema_version'")
+    before = db_path.read_bytes()
+
+    with pytest.raises(StoreError, match="şema sürümü uyuşmuyor: beklenen 3") as refused:
+        Store(db_path, create=False)
+
+    assert "runbook" in str(refused.value)
+    assert db_path.read_bytes() == before
+
+
+def test_opening_without_create_refuses_a_foreign_database_unchanged(db_path: Path) -> None:
+    raw_execute(db_path, "CREATE TABLE notes (body TEXT)")
+
+    with pytest.raises(StoreError, match="PropBot veritabanı değil"):
+        Store(db_path, create=False)
+
+    assert raw_execute(db_path, "PRAGMA journal_mode") == [("delete",)]
+
+
+def test_opening_without_create_does_not_convert_the_journal_mode(db_path: Path) -> None:
+    Store(db_path).close()
+    raw_execute(db_path, "PRAGMA journal_mode = DELETE")
+
+    with pytest.raises(StoreError, match="journal_mode=WAL"):
+        Store(db_path, create=False)
+
+    assert raw_execute(db_path, "PRAGMA journal_mode") == [("delete",)]
+
+
+def test_opening_without_create_does_not_wait_for_another_writer(db_path: Path) -> None:
+    Store(db_path).close()
+    with closing(other_connection(db_path)) as other:
+        other.execute("BEGIN IMMEDIATE")
+        other.execute("INSERT INTO state (key, value, updated_at_ms) VALUES ('k', 'v', 1)")
+        # The creating open would wait here for the busy timeout (5 s) and then fail.
+        with Store(db_path, create=False) as opened:
+            never_wait(opened)
+            with opened.read() as reader:
+                assert reader.get_state("k") is None
+        other.execute("COMMIT")
+
+
+def test_a_store_opened_without_create_reads_and_writes(db_path: Path) -> None:
+    Store(db_path).close()
+
+    with Store(str(db_path), create=False) as opened:
+        signal_id = insert(opened)
+        with opened.read() as reader:
+            assert reader.get_signal(signal_id) is not None
+
+    assert raw_execute(db_path, "SELECT COUNT(*) FROM signals") == [(1,)]
+
+
+# -- the bounded newest-first read -----------------------------------------------------------
+
+
+def test_recent_signals_newest_first_with_limit_and_bounds(store: Store) -> None:
+    # Received out of id order on purpose: the order is the receive time, ties by id.
+    a = insert(store, bar_time_ms=bar(0), received_at_ms=1000)
+    b = insert(store, bar_time_ms=bar(1), received_at_ms=3000)
+    c = insert(store, bar_time_ms=bar(2), received_at_ms=2000)
+    d = insert(store, bar_time_ms=bar(3), received_at_ms=3000)
+    e = insert(store, bar_time_ms=bar(4), received_at_ms=4000)
+
+    def ids(limit: int, **bounds: int | None) -> list[int]:
+        with store.read() as reader:
+            return [row.id for row in reader.recent_signals(limit, **bounds)]
+
+    assert ids(10) == [e, d, b, c, a]
+    assert ids(3) == [e, d, b]
+    assert ids(0) == []
+    assert ids(10, since_ms=2000) == [e, d, b, c]  # since is inclusive
+    assert ids(10, before_ms=3000) == [c, a]  # before is exclusive
+    assert ids(10, since_ms=2000, before_ms=4000) == [d, b, c]
+    assert ids(1, since_ms=2000, before_ms=4000) == [d]
+    assert ids(10, since_ms=4001) == []
+    assert ids(10, since_ms=None, before_ms=None) == [e, d, b, c, a]
+    with store.read() as reader:
+        assert reader.recent_signals(1, since_ms=4000) == [
+            dataclasses.replace(_as_row(ENTRY, e), bar_time_ms=bar(4), received_at_ms=4000)
+        ]
+
+
+@pytest.mark.parametrize("limit", [-1, -1000, True, 1.5, "3"])
+def test_recent_signals_refuses_a_limit_that_is_not_a_count(store: Store, limit: object) -> None:
+    insert(store)
+
+    with store.read() as reader, pytest.raises(StoreError, match="limit"):
+        reader.recent_signals(limit)  # type: ignore[arg-type]
+
+
+def query_plan(store: Store, sql: str, params: tuple[object, ...]) -> list[str]:
+    conn = store._conn
+    assert conn is not None
+    return [row[3] for row in conn.execute(f"EXPLAIN QUERY PLAN {sql}", params).fetchall()]
+
+
+@pytest.mark.parametrize(
+    ("sql", "params"),
+    [
+        (db._SQL_RECENT_SIGNALS, (0, 10)),
+        (db._SQL_RECENT_SIGNALS_BEFORE, (0, 1, 10)),
+    ],
+)
+def test_recent_signals_walks_the_receive_time_index_and_sorts_nothing(
+    store: Store, sql: str, params: tuple[object, ...]
+) -> None:
+    # Bounded: the search starts at the newest index entry and stops after LIMIT rows. A
+    # full scan or a sort (temp b-tree) would read the whole window or table first.
+    plan = query_plan(store, sql, params)
+
+    assert len(plan) == 1
+    assert plan[0].startswith("SEARCH signals USING INDEX signals_received_at")
+    assert "TEMP B-TREE" not in " ".join(plan)
+
+
+@pytest.mark.parametrize(
+    ("sql", "params", "index"),
+    [
+        (db._SQL_MESSAGES_FOR_SIGNAL, (1,), "outbox_signal_id"),
+        (db._SQL_GET_BUDGET_ENTRY, (1,), "INTEGER PRIMARY KEY"),
+        (db._SQL_BUDGET_ENTRIES, ("2026-11-13",), "budget_entries_prop_day"),
+        (db._SQL_BUDGET_USED, ("2026-11-13",), "budget_entries_prop_day"),
+        (db._SQL_GET_STATE, ("k",), "sqlite_autoindex_state_1"),
+    ],
+)
+def test_per_row_lookups_of_a_refresh_are_index_searches(
+    store: Store, sql: str, params: tuple[object, ...], index: str
+) -> None:
+    plan = query_plan(store, sql, params)
+
+    assert len(plan) == 1
+    assert plan[0].startswith("SEARCH ")
+    assert index in plan[0]
+    assert "TEMP B-TREE" not in plan[0]
