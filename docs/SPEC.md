@@ -1,6 +1,6 @@
 # PropBot — Teknik Spesifikasyon
 
-Sürüm 0.3 · 2026-11-13 · Sahibi: Oğuz
+Sürüm 0.4 · 2026-11-19 (Faz 2 uygulandığı hâliyle; 2026-11-19 kullanıcı kararları işlendi) · Sahibi: Oğuz
 `CLAUDE.md`'nin ayrıntısıdır. Sayı içeren her prop kuralı **VERIFY** etiketlidir: kullanılmadan önce firmanın
 resmi sayfasından doğrulanır ve venue profilindeki `rules_verified_at` güncellenir.
 
@@ -39,16 +39,35 @@ Faz 2+: MarketDataFeed ─► Strategy.on_bar() ─► Signal ─► RiskEngine 
 Faz 3 : MT5 terminal ⇄ bridge EA (MQL5) ⇄ Python (MarketDataFeed + ExecutionAdapter uygulaması)
 ```
 
-### 2.2 Çekirdek tipler (`src/propbot/core`)
-- `Bar(ts_open_utc, symbol, tf, open, high, low, close, volume)` — zaman damgası bar **açılış** anı (TradingView `time` ile aynı).
-- `Signal(id, strategy_id, symbol, bar_ts, side, setup, entry_ref, stop, tp, rr, stop_method, meta)`
-- `OrderIntent(client_id, signal_id, side, qty, sl, tp, kind)` — `client_id` idempotency anahtarıdır.
-- `Fill`, `Position`, `AccountState(balance, equity, day_start_balance, day_start_equity, realized_today, open_risk)`.
+### 2.2 Çekirdek tipler (uygulandığı hâliyle, 2026-11-18)
+- **Bar ve seri** (`src/propbot/core/bars.py`): `Bar(ts_open_ms, open, high, low, close, volume)` — zaman damgası bar
+  **açılış** anı, UTC epoch ms (TradingView `time` ile aynı). Sembol ve bar süresi seriye aittir:
+  `BarSeries(symbol, tf_seconds, bars, source)`, açılış anına göre kesin artan. `DataSource(name, format, sha256,
+  synthetic, bar_tz)`: dosya adı, biçim (`generic` · `mt5` · bellekte üretilen seri için `synthetic`), dosya
+  baytlarının sha256'sı, **sentetik** işareti (ADR-0007) ve duvar saatlerinin hangi dilimle okunduğu.
+- **Enstrüman** (`core/instrument.py`): `Instrument(symbol, kind, tick_size, point_value, qty_step, min_qty)`;
+  `floor_qty` boyutu adıma aşağı yuvarlar, asla yukarı. Değerler `config/backtest.yaml` profilinden.
+- **Strateji arayüzü** (`src/propbot/strategies/base.py`, ADR-0008): `on_bar(bar, ctx) → [Entry | Exit | Cancel |
+  Close | CloseAll]` ve `on_fill(fill, ctx) → [Exit | Cancel]`; `ctx` (`StrategyContext`) salt-okunur hesap
+  görünümüdür (Pine `strategy.position_size`, `position_avg_price`, `opentrades`, `closedtrades`, `equity`,
+  `netprofit` karşılıkları, ayrıca enstrüman ve bar süresi). Kayıtlar (`src/propbot/backtest/model.py`):
+  `TradeRecord` = bir çıkış dolumu (List of Trades satırı; kısmi çıkış ayrı satır, çıkış nedeni `stop` · `target` ·
+  `close` · `end_of_data`); `EntryResult` = bir girişin bütün çıkışları (istatistik birimi).
+- **Faz 3'e kalanlar:** `Signal`, `OrderIntent(client_id, …)`, `Fill`, `Position`, `AccountState` ve
+  `MarketDataFeed` / `ExecutionAdapter` protokolleri henüz yoktur; canlı yürütme yolunda tanımlanacaklar. Faz 1'in
+  sinyal kaydı `signals/schema.py` (`TvAlert`) ve `store/db.py`'dedir.
 
-### 2.3 Bar döngüsü (her kapanan 1m bar)
-1. Bar doğrulama (sıra, boşluk, çift kayıt, saat sapması). 2. Takvim/seans durumu. 3. `strategy.on_bar(bar, ctx)` →
-sinyaller ve pozisyon yönetimi niyetleri. 4. Risk motoru (veto/boyut). 5. Yürütme. 6. Kayıt + bildirim.
-Strateji kodu saat, dosya, ağ ya da ortam değişkeni okumaz; her şey `ctx` ile gelir.
+### 2.3 Bar döngüsü
+**Backtest (uygulandı, `src/propbot/backtest/engine.py`):** her bar için (1) açılış: açılışın zaten geçtiği stop ve
+limitler açılış fiyatından dolar (boşluk kuralı), sonra bekleyen piyasa girişleri açılıştan dolar; (2) bar, dolum
+modelinin seçtiği sırayla iki uca ve kapanışa yürünür, emirler fiyatın ulaştığı sırayla tetiklenir (aynı fiyatta
+önce stop, sonra hedef, sonra giriş); (3) kapanış: strateji `on_bar` ile kapanışta hesabı görür, eylemleri sırayla
+uygulanır (`Close` / `CloseAll` bu kapanışta, gerisi sonraki bardan itibaren). Seans sonu bayrağı veriden türetilir
+(§6.1). Değişmez kural 2 her barda denetlenir: stop'suz dolan giriş ya da stop'u zarar yönüne taşıyan bir parti
+koşuyu `EngineError` ile durdurur.
+**Canlı (Faz 3):** her kapanan 1m bar: bar doğrulama (sıra, boşluk, çift kayıt, saat sapması) → takvim/seans durumu →
+`strategy.on_bar` → risk motoru (veto/boyut) → yürütme → kayıt + bildirim. Strateji kodu saat, dosya, ağ ya da ortam
+değişkeni okumaz; her şey `ctx` ile gelir (iki döngüde de aynı strateji kodu).
 
 ## 3. Strateji semantiği (parite spesifikasyonu)
 
@@ -70,6 +89,13 @@ Strateji kodu saat, dosya, ağ ya da ortam değişkeni okumaz; her şey `ctx` il
   (Pine `backtest_fill_limits_assumption = 1`); dokunma dolum sayılmaz.
 - **Boyut:** `qty = risk% × risk tabanı / (stop mesafesi × point value)`; risk tabanı varsayılanı **başlangıç bakiyesi**
   (Pine `Risk base = Initial Capital`, §8.1). Tahmini giriş = sinyal barı kapanışı; aşağı yuvarlama, < 1 ise işlem atlanır.
+  **Hangi risk%** (kullanıcı kararı 2026-11-19, ADR-0010): script'lerin risk girdisinin varsayılanı 0,5'tir ve yalnızca
+  tekil strateji varsayımıdır. Canlı çalışma ve portföy düzeyindeki her değerlendirme `config/risk.yaml` →
+  `risk_per_trade_pct` (0,25) ile yapılır: karar koşusu bu değeri betiğin risk girdisine (`risk_pct`; MTF'de
+  `risk_percent`) yazar. Betiğin kendi değeri yalnızca parite koşusunda (§6.6) ve `propbot backtest --pine-risk`
+  karşılaştırma koşusunda kullanılır. R boyuttan bağımsız olmadığı için (yuvarlama, atlanan işlem, yüzde kesicileri)
+  iki riskle üretilen işlem listeleri aynı liste değildir. Planlanan risk başlangıç bakiyesinin yüzdesidir: risk
+  tabanı `config/strategies.yaml`'da `Initial Capital` dışında bir değere çekilmişse karar koşusu yapılamaz (§6.4).
 - Strateji başına günde en fazla 1 işlem (tüm script'lerde varsayılan). Seans sonunda pozisyon kesinlikle kapalı
   (takvim tabanlı; yarım günler dahil).
 - **Zorunlu kapanışlar** (seans/pencere sonu, günlük zarar ihlali, tarih aralığı sonu) koşulun görüldüğü barın
@@ -77,6 +103,42 @@ Strateji kodu saat, dosya, ağ ya da ortam değişkeni okumaz; her şey `ctx` il
 - **Günlük zarar kesicisi (Pine içi, varsayılan %2):** gün içi zarar — gerçekleşen ya da bar kapanışı özsermayesiyle
   yüzen — eşiğe ulaşınca gün için yeni giriş yok ve (varsayılan) açık pozisyon kapatılır. Bar kapanışında
   değerlendirilir; bar içi ihlal ancak bar kapanınca görülür. Botun bağlayıcı günlük bütçesi §8.1'dir.
+- **Betik bazında istisnalar** (Faz 2 portları ve denetimleri, 2026-11-18). Yukarıdaki ortak kurallarla bir script'in
+  kodu ayrıldığında **Pine kodu kazanır** ve Python portu onu izler (parite, ADR-0007 madde 1). Satır numaraları Pine
+  referansı `144abab`'a göredir; ayrıntı ve Pine bulguları `CHANGELOG.md` açık bulgular 59–64.
+  - *Silver Bullet:* tahmini giriş sinyal barı kapanışı değil **limit seviyesidir**; boyut `f_qty(ent, stp)` ile
+    limit seviyesinden (`ict_silver_bullet_strategy.pine` 396–404), TP limit seviyesinden fiyatlanır. Dolumda yeniden
+    fiyatlama yoktur: yapısal stop (`sweepExtreme ± tickOffset`) ve TP her barda değişmeden yeniden verilir (448–451);
+    "stop dolumun en az 1 tick zarar tarafında" kuralı uygulanmaz (CE girişinde risk 0,5 tick olabilir).
+  - *Mean Reversion:* stop dolumda `position_avg_price ∓ atrMult × atrStored` olarak kesinleşir ve dolumun 1 tick
+    zarar tarafına **zorlanmaz** (`mean_reversion_bb_kc_rsi2_strategy.pine` 303–310); lehte boşlukla dolan işlemde
+    stop sinyal barındaki tahminden geniş olabilir.
+  - *Boyut kapısı:* "aşağı yuvarla, < 1 ise atla" yalnızca tam birim modunda geçerlidir. "Fractional" (ya da vadeli
+    olmayan sembolde "Auto") modunda script'ler küsuratlı boyutu `qty > 0` ile işler: NY 421/457, Asian 396/419
+    (başlık 48 ve ipucu 124 "< 1 atla" der), Master 582/614/727/748, Silver Bullet 250 ve 401 (`roundToInt`
+    kapalıyken), MR 176–178, MTF 373–374 / 401–402 (`roundUnits` kapalıyken). Portlar boyutu ayrıca enstrümanın lot
+    adımına aşağı yuvarlar (`Instrument.floor_qty`) ve 0 ise atlar: varsayılan olmayan bu modlarda Python boyutu daha
+    küçük olabilir.
+  - *NY ORB — gün sıfırlaması:* yönetim durumu (`inDir`, stop/TP alanları) yeni günde yalnızca pozisyon
+    yokken sıfırlanır (`ny_open_fvg_strategy.pine` 226–232); grafiğin ilk barı yeni gün sayılmaz (`ta.change` ilk
+    barda na; 213). OR ayrıca `not na(orHigh)` ve `curMin <= sessEnd` ister (240); seans sonu kapanışı `closeAtEnd`'e
+    bağlıdır (523). Wick modunda iki tarafı da kıran barda önce yukarı denenir (338–341).
+  - *Günlük kesicinin ilk günü (NY, Asian, Master):* gün başı özsermaye ve gün başı net kâr ilk gün değişimine kadar
+    na'dır; grafiğin ilk (kısmi) gününde kesici devre dışıdır (NY 305–307 ve 322–326, Master 476–480). Gün başı değeri
+    günün **ilk barının kapanışında** alınır; o barda oluşan K/Z o günün kayıp hesabına girmez.
+  - *MTF:* gün başı özsermaye günün ilk barının kapanışındaki `strategy.equity`'dir, açık K/Z dahil
+    (`mtf_trend_continuation_strategy.pine` 296–297); başa baş biten işlem (`tradeNet == 0`) ardışık zarar sayacında
+    **zarar** sayılır (314–318).
+  - *MTF ısınma — beklenen güvenli sapma (kullanıcı onayı 2026-11-19):* Pine'da trail göstergeleri henüz na iken (ilk
+    `chLen` / `atrTrailLen` bar) `math.max(be, na)` na verir ve runner **stop'suz** kalır (449, 465). Port bu durumda
+    adayı başa baş alır (değişmez kural 2). Yalnızca serinin ilk ~22 barında 1,5R'ye ulaşan işlemi etkiler. Kullanıcı
+    Python'un bu davranışını onayladı (prop risk yönetimi açısından güvenli olan budur): port değişmez, Pine dosyası da
+    değişmez. Parite raporu ve artefaktı bu stratejide "Beklenen güvenli sapma" başlığıyla bunu yazar; sapma **tolerans
+    değildir**, o penceredeki farklı dolumlar yine uyuşmazlık sayılır ve ısınma `--warmup-bars` ile dışarıda bırakılır
+    (§6.6).
+  - *Master:* S2 silahının geçersizleşmesi giriş kapılarından bağımsız çalışır (`master_prop_firm_portfolio.pine`
+    708–712): durdurmada, günün işleminden sonra ya da öbür bacak engellerken de silah ölür. Bacak durumu kapanan
+    işlem sayısından değil açık işlem taramasından sıfırlanır.
 
 ### 3.2 NY Open ORB + FVG/IFVG (`pine/ny_open_fvg_strategy.pine`)
 - **OR:** NY saatiyle [09:30, 09:30 + orMinutes) aralığında açılan barların en yüksek high / en düşük low'u; `orEnd`'den itibaren hazır.
@@ -111,7 +173,8 @@ Strateji kodu saat, dosya, ağ ya da ortam değişkeni okumaz; her şey `ctx` il
   → `sweep_hi_bar`. Aşağı simetrik.
 - **Short arming:** `sweep_hi_bar`'dan ≤ maxBars bar içinde ayı FVG (`high < low[2]`) ∧ `close < asianHigh` ∧ boyut
   filtresi → bölge [high, low[2]]; sweep tüketilir. Long simetrik. Aynı barda ikisi birden olursa long kazanır (Pine
-  sırası); yeni arming eskisinin üzerine yazar.
+  sırası; Faz 2 denetimi: aynı barda ayı ve boğa FVG geometrik olarak oluşamaz, kural fiilen işlemez); yeni arming
+  eskisinin üzerine yazar.
 - **Giriş:** önce invalidasyon (long: close < alt; short: close > üst → iptal), sonra arming barından sonraki bir barda
   temas (long: `low ≤ üst`; short: `high ≥ alt`). Dolum barı aktif pencerenin içinde olmalı (§3.1): 1m'de son giriş
   sinyali 10:58 barı.
@@ -144,6 +207,11 @@ Strateji kodu saat, dosya, ağ ya da ortam değişkeni okumaz; her şey `ctx` il
 - **Alert:** S1 → `master_ny_orb_fvg`, S2 → `master_asian_sweep` (tek TradingView alarmı yeterli). Kimlikler bağımsız
   NY Open / Asian Sweep script'lerinkinden ayrıdır (E14): Master ile bağımsız script'ler aynı sembolde yan yana
   alarmlanabilir.
+- **Değerlendirme (kullanıcı kararı 2026-11-19; açık bulgu 72 kapandı):** Go/No-Go'da Master hem iki bacağı üzerinden
+  (`master_ny_orb_fvg`, `master_asian_sweep`) hem de birleşik koşusu üzerinden (`master_portfolio`) değerlendirilebilir;
+  ikisi de kabul edilir. Bir raporda yalnızca biri verilebilir (uygulamanın getirdiği sınır, kararın parçası değil;
+  §9.1). Planlanan risk (§3.1) iki motorun ortak `riskPct` girdisine bir kez yazılır; `maxConcurrentRiskPct` (1,0)
+  betiğin kendi girdisi olarak kalır.
 
 #### 3.4.2 ICT Silver Bullet (`pine/ict_silver_bullet_strategy.pine`)
 - **Grafik:** 1m veya 5m. **Pencereler (NY):** AM [10:00, 11:00) ve PM [14:00, 15:00); ayrı ayrı açılıp kapatılabilir.
@@ -524,28 +592,130 @@ token'ı ister (runbook §4).
 
 > **Ön dilim (kullanıcı kararı, 2026-11-13):** proje iskeleti, `config/` şemaları (§8.1, §8.3) ve Monte Carlo prop
 > simülatörü (§6.5) Faz 0 kabulü ve Faz 1 beklenmeden yapıldı; fiyat verisi ve derlenmiş Pine tabanı gerektirmezler.
-> §6.1–6.4 ve §6.6, veri ve doğrulanmış Pine tabanı gelince "Faz 2'ye geç" kararıyla yapılır; §6.7 kabulü o zaman aranır.
+>
+> **Erken geçiş (kullanıcı kararı, 2026-11-18; ADR-0007):** Faz 2'nin kalan dilimleri (§6.1–6.4, §6.6) ve yerel web
+> paneli (§6.8) Faz 0'ın TradingView derlemesi (§4.2 madde 5) ve Faz 1'in 10 günlük koşusu (§5.7) beklenmeden yapılır; o ikisi
+> "operasyonel saha testi" olarak sürer. Pine referansı `144abab` commit'idir. Gerçek veri ve TradingView dışa aktarımı
+> gelene kadar geliştirme deterministik **sentetik** barlarla yapılır; sentetik veriyle üretilen her rapor "SENTETİK
+> VERİ" uyarısı taşır ve Go/No-Go'da PASS veremez. §6.7'nin veriye ve TradingView'a bağlı maddeleri o dosyalar gelince
+> kanıtlanır.
+>
+> **Uygulama durumu (2026-11-18):** §6.1–6.6 ve §6.8 kodda (`src/propbot/data/`, `strategies/`, `backtest/`,
+> `dashboard/`); komutlar ve sırası `docs/backtest.md`, panel işletimi `docs/runbook.md` §13. Depoda hâlâ gerçek veri ve
+> TradingView dışa aktarımı yok: aşağıdaki her davranış sentetik barlarla ve elle yazılmış örnek dosyalarla test edildi.
+>
+> **Teslim onayı (kullanıcı kararı, 2026-11-19):** Faz 2 ve panel teslimatı onaylandı ve altı nokta karara bağlandı
+> (açık bulgu 72 ve 82 dahil; altı karar ve her biri için yapılan: `CHANGELOG.md` Faz 2 bölümü, "Kullanıcı kararları
+> (2026-11-19)"; işlem başı risk kuralı ADR-0010). Onay kodun teslimini kapsar: §6.7'nin parite ve veri maddeleri yine
+> gerçek dosyalarla kanıtlanmayı bekler.
 
 ### 6.1 Veri
-- İçe aktarma: CSV/Parquet (MT5 "Bars → Export", TradingView grafik verisi dışa aktarımı, tedarikçi verisi).
-  MT5 bar saatleri **sunucu saatindedir** → `server_tz` ile UTC'ye çevir (VERIFY: terminalde bilinen bir 09:30 NY mumuyla karşılaştır).
-  FTMO'da sunucu saati resmi kaynaklara göre New York + 7 saattir (GMT+2, ABD yaz saatinde GMT+3; 2026-11-13). Tek bir
-  IANA dilimi bunu karşılamadığı için profilde `server_tz` boş; alanın biçimi içe aktarma yazılırken kararlaştırılır.
-- Doğrulama raporu: çift bar, sıra dışı bar, gün içi boşluklar, seans kapsaması, DST geçişleri, aykırı fiyat sıçramaları.
-- Veri kaynağı ve kapsama tarihleri her rapora yazılır.
+- **İçe aktarma** (`src/propbot/data/ohlcv.py`): yalnızca CSV; biçim başlık satırından tanınır. (a) Genel biçim
+  (TradingView grafik dışa aktarımı, tedarikçi, propbot'un kendi dosyaları): virgülle ayrılmış `time,open,high,low,close`
+  + isteğe bağlı `volume`, fazla sütunlar yok sayılır; `time` Unix saniye/milisaniye, ofsetli ya da ofsetsiz ISO 8601.
+  (b) MT5 "Export Bars": sekmeyle ayrılmış `<DATE> <TIME> <OPEN> <HIGH> <LOW> <CLOSE> <TICKVOL> <VOL> <SPREAD>`;
+  `<VOL>` 0 ise hacim `<TICKVOL>`'dur. UTF-8 (BOM kabul) zorunlu; UTF-16 reddedilir. İki biçim de gerçek bir dışa
+  aktarımla denenmedi (VERIFY). **Parquet desteklenmez** (ADR-0008 madde 7).
+- **`bar_tz`:** ofsetsiz duvar saatinin nasıl okunacağı: `UTC` (varsayılan), bir IANA dilimi ya da `NY+7` (New York
+  duvar saati + 7 saat: FTMO MT5 sunucu saati, GMT+2 / ABD yaz saatinde GMT+3; VERIFY: terminalde bilinen bir 09:30 NY
+  barı 16:30 görünmeli). MT5 dosyası `bar_tz` verilmeden okunmaz (sunucu gerçekten UTC ise `Etc/UTC`). Yaz saati
+  başındaki olmayan saat satır hatasıdır; sonundaki iki kez yaşanan saat önceki ana okunur (dosyanın artan kalması
+  gerekiyorsa sonrakine). Venue profilindeki `server_tz` alanı hâlâ boştur ve kullanılmaz: saat dilimi komut
+  satırında verilir (açık bulgu 30).
+- **Hiçbir şey onarılmaz:** okunamayan satır, tutarsız OHLC, yinelenen, sıra dışı ya da üst üste binen bar dosyayı
+  yüklenemez yapar; satır numaralarıyla (ilk 20) listelenir.
+- **Doğrulama raporu** (`data/validate.py`): engelleyiciler (yukarıdakiler) + seans içi boşluklar (eksik bar sayısıyla)
+  + aykırı bar (aralık > 25 × kayan medyan gerçek aralık, 240 bar; seans içi açılış sıçraması > 15 ×; ilk 30 bar ve
+  seans ilk barı denenmez) + saat dilimi kayması (ABD ve AB yaz saati geçişlerinin iki yanındaki 5 seansın ilk barı
+  farklı NY saatinde açılıyorsa) — bunlardan biri varsa rapor **temiz değil**. Bilgi olarak: kısa seanslar (tipik
+  seansın %90'ından az bar), seansı olmayan hafta içi günler, hacmi sıfır bar sayısı. Seanslar veriden türetilir:
+  iki bar arasında ≥ `session.min_gap_minutes` (30) dk boşluk seans sonudur; daha uzun bir veri deliği kısa seans
+  görünür. Takvim kütüphanesi kullanılmaz (ADR-0008 madde 6).
+- **Kaynak ve kapsam** her rapora yazılır: dosya adı, biçim, sha256, `bar_tz`, sentetik işareti, ilk/son bar.
+- **Sentetik veri** (`data/synthetic.py`, ADR-0007): sabit tohumlu, platformdan bağımsız bayt bayt aynı üretim; ilk
+  satır `#propbot-synthetic` işaretidir ve yükleyici `DataSource.synthetic`'i ondan kurar (başlıktan önceki herhangi bir
+  `#` satırında). Seans şablonu bir varsayımdır (NY 18:00–17:00, tatil yok).
 
-### 6.2 Dolum modeli
-Piyasa emri: sonraki bar açılışı + `slippage_ticks`. Stop: değdiği an stop fiyatı (boşlukla açılışta açılış fiyatı) + slipaj.
-Limit: fiyat seviyeyi 1 tick geçince limit fiyatından (slipaj yok; Pine `backtest_fill_limits_assumption = 1` ile aynı). Aynı barda SL+TP → §3.1.
+### 6.2 Dolum modeli (`backtest/engine.py`, ADR-0008)
+- **Piyasa girişi:** sonraki barın açılışı + `slippage_ticks` (aleyhte). **Stop:** değdiği an stop fiyatı + slipaj;
+  açılış seviyeyi aşmışsa açılış + slipaj. **Limit:** fiyat seviyeyi `limit_through_ticks` (1) tick **geçince**
+  limit fiyatından, slipajsız; açılış seviyeyi en az 1 tick geçmişse açılıştan (iyi fiyat), 1 tick'ten az geçmişse
+  açılışta dolmaz. **`Close` / `CloseAll`:** sinyal barının kapanışından, slipajlı (Pine'ın bu durumda slipaj uygulayıp
+  uygulamadığı VERIFY).
+- Açılışta önce zaten açık pozisyonun boşlukla geçilen çıkışları, sonra piyasa girişleri, sonra onların çıkışları dolar.
+  Aynı fiyatta önce stop, sonra hedef, sonra giriş; aynı sırada olanlar veriliş sırasıyla.
+- **`pessimistic`** (varsayılan, karar raporları): açılışta pozisyon varsa (ya da açılışta piyasa girişi dolduysa) bar
+  önce aleyhte uca yürünür; düz başlayan barda bekleyen limit giriş varsa önce lehte uca (hedefe doğru hareket girişten
+  önce harcanır). Dolum anında `on_fill` çağrılır; strateji stop/TP'yi gerçek dolumdan kurar.
+- **`tv_ohlc`** (yalnızca parite): açılış yükseğe daha yakınsa O→H→L→C, değilse O→L→H→C (eşitlikte önce düşük);
+  `on_fill` çağrılmaz, strateji dolum barının kapanışında yeniden fiyatlar. Sinyal barında kurulan tahmini parantez
+  dolum barı boyunca geçerlidir (Pine'ın davranışı).
+- **Pyramiding:** aynı yönde en çok `pyramiding` giriş (0 ve 1 = bir giriş; Master 2). Sınırı aşan giriş sessizce
+  düşer ve sayılır. Ters yönlü giriş (çevirme) ve iki yönde birden bekleyen limitin dolması hata verir.
+- **"İlk stop" ve R:** dolumdan sonraki ilk strateji çağrısından (`on_fill` ya da `tv_ohlc`'de dolum barının `on_bar`'ı)
+  sonra yürürlükteki stop. `tv_ohlc`'de bu çağrı stop'u girişin ötesine taşırsa (MTF'de dolum barında TP1/1,5R) ilk
+  stop odur ve R 1 tick riskle şişer (açık bulgu 77); karar koşuları etkilenmez.
 
-### 6.3 Maliyet modeli (venue/enstrüman bazlı, config)
-CFD: spread (sabit ya da saat dilimine göre tablo; NY açılışında genişleme) + slipaj + komisyon (varsa).
-MES/ES: kontrat başı taraf başı nakit + 1 tick slipaj. Maliyetsiz koşu yalnızca karşılaştırma içindir ve raporda kırmızı uyarı taşır.
+### 6.3 Maliyet modeli (`config/backtest.yaml` → `instruments`)
+- Enstrüman profili: `kind` (`futures` · `cfd`), `tick_size`, `point_value`, `qty_step`, `min_qty` ve `costs`
+  (`commission_per_unit_side` taraf başı, `slippage_ticks`, `spread_points`, NY saatine göre `spread_windows`).
+  **MES** dolu (taraf başı 0,50 USD, 1 tick, spread 0; Pine başlığıyla aynı). **US500.cash** alanları boş (VERIFY: MT5
+  sembol şartnamesi); boş alanlı profille backtest çalışmaz.
+- CFD barları **bid** kabul edilir: alım yönlü her dolum ve tetik ask'e (bid + spread) göre, satışlar bid'e göre. Spread
+  fiyata gömülüdür. Açık K/Z long'u bid'den, short'u ask'ten değerler ve komisyon içermez (TradingView'ın açık K/Z'ye
+  komisyon katıp katmadığı VERIFY).
+- **Maliyet duyarlılık matrisi:** aynı koşu `cost_factors` (1,0 / 1,5 / 2,0) ile; 1,0 sütunu karar koşusunun kendisidir.
+- **Maliyetsiz koşu** yalnızca karşılaştırmadır: özeti, artefaktı ve paneldeki kartı kırmızı "MALİYETSİZ KOŞU" taşır;
+  Go/No-Go onu karar koşusu saymaz.
 
-### 6.4 Analitik
-R ve $ bazında: işlem sayısı, kazanma %, ortalama R, beklenti, profit factor, maks DD (R ve %), en uzun kayıp serisi,
-beklentinin t-istatistiği, IS/OOS ayrımı, hafta günü ve saat tabloları (Pine tablosuyla aynı tanım), aylık tablo,
-walk-forward (kayan pencereler). Parametre optimizasyonu varsayılan olarak kapalı; açılırsa yalnızca IS'te ve deneme sayısı raporlanır.
+### 6.4 Analitik (`backtest/analytics.py`, `walkforward.py`, `runner.py`)
+- **Birim giriştir** (`EntryResult`): bir girişin bütün çıkışları toplanır. R = net K/Z (maliyet sonrası) ÷
+  (|dolum − ilk stop| × boyut × puan değeri). Veri sonunda açık kalan giriş (`end_of_data`) istatistiğe girmez, sayılır.
+- Örneklem başına (tümü / IS / OOS): işlem sayısı, kazanma/kayıp/başa baş (net K/Z işaretiyle), kazanma %, ortalama ve
+  medyan R, örneklem standart sapması, beklentinin t-istatistiği (n < 2 ya da sapma 0 ise yok), profit factor, toplam
+  R ve $, ortalama kazanç/kayıp R, maks. düşüş (R; ve başlangıç sermayesi + kümülatif K/Z'nin zirvesine göre %), çıkış
+  sırasıyla en uzun kayıp serisi (başa baş seriyi bitirir).
+- **IS/OOS:** giriş zamanı `samples.oos_start`'tan (UTC gece yarısı) itibaren OOS (Pine `isOOS = time >= oosStart`).
+  G3 oranı = OOS beklentisi ÷ IS beklentisi.
+- **Zaman tabloları:** girişin New York duvar saatine göre hafta günü (Pzt–Cum her zaman, Cmt/Paz yalnızca varsa), saat
+  (işlem olan saatler) ve ay (ilk ile son ay arası boş aylar sıfır satırla). Pine tablosundan **farkı:** Pine her
+  `closedtrades` satırını (kısmi çıkış ayrı) ve brüt fiyat mesafesi R'sini sayar; buradaki tablolar giriş başına net R
+  sayar. Sayılar maliyet ve kısmi çıkışlar kadar farklıdır.
+- **Walk-forward:** tek koşunun girişleri, ilk tamamlanmış girişin NY gününden başlayan kayan takvim pencerelerine
+  bölünür (`walk_forward`: IS 180, OOS 60, adım 60 gün; adım ≥ OOS). OOS penceresi verinin dışına taşan pencere
+  alınmaz. **Parametre araması yoktur** (parametreler Pine varsayılanları, işlem başı risk koşunun riski; ADR-0008
+  madde 9, ADR-0010). Çıktı: pencere başına IS/OOS istatistiği, pozitif OOS pencere oranı (işlemsiz pencere pozitif
+  sayılmaz), birleşik OOS, verim oranı.
+- **Master:** iki bacak (`master_ny_orb_fvg`, `master_asian_sweep`) ayrı istatistik ve artefakt alır; ayrıca birleşik
+  görünüm `master_portfolio`. Piramitleme sınırında düşen girişler bacaklara dağıtılamaz, portföy toplamı yazılır.
+  `propbot backtest --strategy all` yalnızca beş bağımsız portu koşar; Master ayrıca `--strategy master_portfolio`
+  ile koşulur. Go/No-Go'ya ikisi de verilebilir: ya iki bacak kimliği ya da birleşik `master_portfolio` (kullanıcı
+  kararı 2026-11-19; §9.1). Bacak ve birleşik artefaktlar, işlem listesi satırlarının özetini satırın taşıdığı kimlik
+  başına kaydeder (`trades_digests`): birleşik koşunun satırları bacak kimliklerini taşır ve G4 listeyi onunla böyle
+  bağlar.
+- **İşlem başı risk (kullanıcı kararı 2026-11-19, ADR-0010):** `propbot backtest` koşuyu `config/risk.yaml` →
+  `risk_per_trade_pct` ile boyutlar (değer betiğin risk girdisine yazılır ve artefaktın parametrelerinde kayıtlıdır);
+  özet "İşlem başı risk" satırında kullanılan değeri, kaynağını ve Pine varsayılanını yazar. `--pine-risk` betiğin
+  kendi değerini korur ve karşılaştırma koşusu üretir. `config/strategies.yaml` risk girdisini taşıyamaz (yükleme
+  hatası); planlanan riski betiğin girdisi kabul etmiyorsa koşu hatayla durur, değer sessizce değiştirilmez. Farklı
+  riskle yapılmış koşular tek işlem listesinde birleştirilmez. *Risk tabanı:* planlanan risk hesabın başlangıç
+  bakiyesinin yüzdesidir (§8.1); `config/strategies.yaml` bir portun `risk_base` girdisini `Initial Capital` dışında
+  bir değere çekmişse aynı yüzde başka bir risktir ve planlanan riskle koşu reddedilir (`backtest` çıkış kodu 1,
+  `gonogo` 2; `config check` NOT yazar). Parite ve `--pine-risk` betiğin girdileriyle koşar ve risk satırında yüzdenin
+  hesabın yüzdesi olmadığını söyler. *İşaretli liste:* betiğin kendi riskiyle yapılmış koşunun işlem listesi satır
+  kimliklerinde ve köken satırında `-pinerisk` ekini taşır; G4 onu reddeder (§9.1).
+- **Etiket politikası:** karar koşusu (`pessimistic`, maliyet açık, çarpan tam 1,0, config'teki OOS başlangıcı,
+  planlanan risk) yalnızca bacak kimliğiyle etiketlenir; başka her koşu farkını bu sırayla ekler (`-tv`, `-free`,
+  `-x1p5`, `-oos20261020`, `-pinerisk`). Karşılaştırma koşusunun özeti "KARAR KOŞUSU DEĞİL" ile başlar. Go/No-Go
+  etikete değil kayıtlı alanlara bakar (§9.1).
+- **Rapor artefaktları** (`backtest/artifacts.py`): `reports/<tür>_<etiket>_<YYYYMMDDTHHMMSSZ>.json`; türler `backtest`,
+  `cost_matrix`, `walk_forward`, `monte_carlo`, `go_no_go`, `data_validation`, `parity`. Ortak zarf: tür, şema sürümü,
+  oluşturulma anı, etiket, sentetik işareti, veri kaynağı, notlar. Dosya hiç üzerine yazılmaz; okuyucu hiçbir şeye
+  güvenmez (boyut sınırı, katı UTF-8 ve JSON, NaN ve yinelenen anahtar yok, katı şema; sembolik bağ reddedilir).
+  Modelin kendi kuralları: sentetik artefakt "SENTETİK VERİ" notunu, maliyetsiz backtest "MALİYETSİZ KOŞU" notunu
+  taşımak zorundadır; Go/No-Go artefaktı yalnızca sentetik değilse ve yedi kapı PASS ise GO diyebilir; parite artefaktının
+  oranı sayılarıyla tutarlı olmalıdır.
+- Parametre optimizasyonu yoktur; açılması ayrı karar ister (açılırsa yalnızca IS'te ve deneme sayısı raporlanır).
 
 ### 6.5 Monte Carlo prop simülatörü
 - Girdi: giriş/çıkış zamanlı işlem R listesi (CSV; biçim `docs/monte-carlo.md`), venue profili, risk %, maliyetler,
@@ -557,14 +727,91 @@ walk-forward (kayan pencereler). Parametre optimizasyonu varsayılan olarak kapa
 - Çıktı: P(faz 1), P(iki faz), P(ihlal) ve faz × neden dağılımı, sonuçlanmayan yol oranı, geçme süresi dağılımı
   (piyasa günü), maks. düşüşün %95 / %99 dilimleri ve beklenen kuyruk kaybı (ES). Modelleme kararları: ADR-0002.
 - Sağlık testi: E = 0, RR 1:2 durumunda sonuç analitik sınır-geçme olasılığıyla tutarlı (tolerans testte tanımlı).
+- **Kanıt zinciri (2026-11-18):** `propbot backtest --trades-out` işlem listesinin ilk satırına köken satırı
+  (`#propbot-trades …`) yazar: sentetik mi, maliyetsiz mi, dolum modeli, maliyet çarpanı, veri sha256'sı, stratejiler,
+  oluşturulma anı. Okuyucu satırı yeniden kodlayıp birebir karşılaştırır (elle düzenlenmiş satır hatadır) ve satırda
+  adı geçip listede tek işlemi olmayan stratejiyi reddeder. `propbot montecarlo` sonucu `monte_carlo` artefaktı olarak
+  da yazar ve köken satırını taşır; G4 bu zinciri izler (§9). Köken satırı olmayan liste simüle edilir ama G4'ü geçemez.
 
-### 6.6 Parite testi
-Aynı barlar üzerinde: TradingView'dan (Faz 0 sonrası Pine) grafik verisi + "List of Trades" dışa aktar → Python aynı
-barlarda çalışır → giriş zamanı / yön / çıkış nedeni eşleşmesi ≥ %98; fiyat toleransı 1 tick (§3.1'deki TP farkı hariç).
-Uyuşmazlıklar tek tek raporlanır. Altın dosyalar `tests/parity/golden/`.
+### 6.6 Parite testi (`backtest/parity.py`)
+- **Yöntem:** TradingView'dan aynı grafiğin bar verisi ve Strategy Tester "List of Trades" dışa aktarılır; Python aynı
+  barlarda **`tv_ohlc`** ile çalışır (başka dolum modeli reddedilir; bu modelde §3.1'deki dolum anı/kapanış TP farkı
+  oluşmaz). Karşılaştırma birimi bir çıkış dolumudur.
+- **Eşleşme:** giriş zamanı, yön ve çıkış nedeni aynı; giriş ve çıkış fiyatı ≤ 1 tick farklı. Fiyat toleransı 1 tick'ten,
+  zaman toleransı 1 bardan gevşetilemez (zaman toleransı varsayılan kapalıdır, açılırsa sayılır). Çıkış zamanı ve miktar
+  bilgi amaçlıdır. Çıkış nedeni: "Signal" sütunu emrin yorumunu ya da kimliğini gösterebilir (VERIFY); ikisi de kabul
+  edilir ve rapor hangisinin tuttuğunu sayar. Eşleştirme deterministik açgözlü atamadır; giriş zamanları en çok 3 bar
+  arayla olan tek alanı farklı satırlar tek uyuşmazlık olarak, farklı alanların adıyla raporlanır.
+- **Oran** = eşleşen ÷ (eşleşen + uyuşmayan çift + yalnızca Python + yalnızca TradingView). Geçme: oran ≥
+  `min_parity_rate` (0,98) **ve** ısınma (bar sayısıyla) ve ortak pencere dışında bırakılan satırlar iki listenin hiçbirinde
+  %2'yi aşmıyor. Python'un `end_of_data` satırları ile TradingView'ın açık işlemleri dışarıda bırakılır ve sayılır.
+  Aynı Python satırının iki kez verilmesi hatadır.
+- **Ayrıştırıcı:** başlık adlarıyla okur (takma adlar, yalnızca fiyat sütununda para birimi eki), UTF-8 (BOM'lu ya da
+  değil), virgül / noktalı virgül / sekme ayırıcı, dosya başına tek ondalık işareti, binlik grupları denetlenir; ofsetsiz
+  zamanlar grafiğin saat diliminde okunur, yaz saati geçişindeki belirsiz ya da olmayan saat reddedilir; satırlar her
+  iki sırada olabilir; kısmi çıkışın iki düzeni desteklenir. Dışa aktarım düzeni **doğrulanmadı** (VERIFY,
+  `docs/tv-verification-checklist.md` P bölümü).
+- **Risk (2026-11-19 kullanıcı kararının uygulaması, ADR-0010):** parite her zaman **betiğin kendi işlem başı
+  riskiyle** koşulur (Pine varsayılanı 0,5; `config/risk.yaml` riski burada kullanılmaz), çünkü TradingView betiği
+  kendi girdileriyle çalıştırır. Rapor ve artefakt bunu tek satırda yazar. TradingView dışa aktarımı da risk girdisi
+  varsayılandayken alınmalıdır. Bu yüzden TradingView'ın %0,5'teki sonuçları parite koşusuyla karşılaştırılabilir,
+  %0,25'teki karar koşularıyla karşılaştırılamaz.
+- **Beklenen güvenli sapma (kullanıcı kararı 2026-11-19):** portun Pine'dan bilerek ayrıldığı ve botun bir değişmez
+  kuralını koruduğu yerler `parity.EXPECTED_DEVIATIONS` tablosundadır; bugün tek kayıt `mtf_trend_cont`'un trail
+  ısınmasındaki başa baş stop'udur (§3.1). O stratejinin raporu ve artefakt notları bunu "Beklenen güvenli sapma"
+  başlığıyla yazar. Kayıt açıklar, **hoş görmez**: hiçbir sayıyı ve hükmü değiştirmez, farklı dolumlar uyuşmazlık
+  sayılır; ısınmayı karşılaştırma dışında tutmanın yolu `--warmup-bars`'tır (%2 dışarıda bırakma sınırı geçerlidir).
+- **Sınırlar:** parite yalnızca `tv_ohlc` ile ölçülür, karar raporları `pessimistic` ile üretilir. Emülatörün
+  belgelenmemiş köşeleri (pivot eşitliği, EMA tohumu, HTF kovası, kapanışta kayma, ızgara dışı fiyatlar) ilk gerçek
+  koşuda fark çıkarabilir. MTF'nin HTF EMA'ları TradingView'ın grafikten önceki saatlik geçmişini görmez: ilk günler
+  ısınma olarak dışarıda bırakılmalıdır.
+- **Altın dosyalar** (`tests/parity/golden/`, 6 strateji × 2 sentetik fikstür × 2 dolum modeli = 24 dosya) yalnızca
+  Python motorunun kendi çıktısını sabitler (regresyon); TradingView kanıtı değildir ve dosyalarda böyle yazar. Bilerek
+  yeniden üretme: `PYTHONPATH=tests .venv/bin/python -m support.golden`.
 
 ### 6.7 Kabul
-Parite raporu ≥ %98; veri doğrulama raporu temiz; Go/No-Go raporu (§9) tek komutla üretiliyor.
+Parite raporu ≥ %98; veri doğrulama raporu temiz; Go/No-Go raporu (§9) tek komutla üretiliyor; panel (§6.8) kabul
+maddeleri sağlanıyor. Parite ve veri maddeleri **gerçek** TradingView dışa aktarımı ve gerçek veriyle kanıtlanır
+(ADR-0007): sentetik veriyle elde edilen sonuç kanıt sayılmaz, teslim raporunda "kanıt bekliyor" olarak listelenir.
+Madde madde durum: `CHANGELOG.md` Faz 2 bölümü.
+
+### 6.8 Yerel web paneli (`uv run propbot dashboard`; ADR-0009; işletim `docs/runbook.md` §13)
+- **Çalışma:** ayrı süreç; yalnızca loopback (`--host` 127.0.0.1 ya da ::1, varsayılan port 8787). Başka adres
+  seçeneksiz reddedilir; uzaktan bakış iki uçta aynı portla SSH tüneli (kullanıcı onayı 2026-11-19: panelin yalnızca
+  `127.0.0.1` üzerinde kalması uygun, SSH tüneli yeterli; davranış değişmedi). Çalışırken hiçbir yapay zekâ/model
+  çağrısı ve dış kaynak (CDN) yoktur. Arayüz Türkçedir; açık ve koyu tema.
+- **Canlı Hesap & Sinyal ekranı** (`/`; canlı bölüm 5 sn'de bir yenilenir, sekme gizliyken durur): `data/propbot.db`
+  (yoksa ya da boşsa **oluşturulmaz**, dokunulmaz) + venue/risk profilleri. Okuma yazma kilidi almadan tek bir anlık
+  görüntüyle yapılır (`Store.read()`; dosya `create=False` ile açılır; dosya yeniden adlandırılırsa panel bunu görür).
+  Gösterilenler: bot durumu (KILL > BEKLEMEDE > DURAKLATILDI > ETKİN; kurulu öbür bayraklar yanında listelenir) ve servis
+  canlılığı (`last_alive_ms`, 90 sn sınır); bakiye (varsayılan `initial_balance` "varsayılan" etiketiyle ya da elle
+  girilen değer, "elle girildi · tarih", prop günü değişince "güncel değil"); Faz 1 / Faz 2 hedef ilerlemesi; günlük
+  tampon (botun risk defteri + beyan edilen günlük kayıp) ve toplam kayıp tamponu (`min(bakiye, özsermaye)`; gün sonu
+  trailing türü için "hesaplanamıyor"); son 7 günün sinyalleri (en çok 1000 satır okunur, 25'i gösterilir) ve sinyal
+  kayıtlarından türetilen açık/kapalı işlemler (en çok 50; "dolum değildir" notuyla). Ölçülmeyen değer ölçülmüş gibi
+  gösterilmez.
+- **Yerel kontrol:** Duraklat / Devam Et (yerel onay kutusu), Acil Kapat — KILL ve "KILL'i kaldır" (PIN; 5 yanlış / 15
+  dk kilit Telegram ile ortak), "Telegram Durum/Test Özeti Gönder", elle bakiye girişi (onay kutusu). Aksiyonlar
+  `Commands.handle` üzerinden Telegram komutlarıyla aynı kuraldan geçer; sonuç bayrakları geri okunarak doğrulanır
+  (200 yapıldı · 409 yapılmadı · 500 sonucu bilinmiyor · 503 veritabanı meşgul). Her aksiyon giden kutusuna
+  süresi dolmayan bir "[PANEL]" bildirimi yazar; `serve` çalışmıyorsa bildirim bekler. KILL açık pozisyonu kapatmaz.
+  **Salt-okunur** açılış: sırlar okunamazsa, `config/tv_alerts.yaml` okunamazsa ya da veritabanı yok / boş / okunamaz
+  ise. BEKLEMEDE kopyanın veritabanında özet ve bakiye reddedilir.
+- **Analiz & Simülasyon ekranı** (`/analiz`): `reports/` altındaki artefaktlardan, her tür ve etiket için en yenisi:
+  Go/No-Go (GEÇTİ/KALDI/DEĞERLENDİRİLEMEDİ rozetleri), Monte Carlo (olasılık çubukları, faz × neden tablosu, geçme süresi,
+  maks. düşüş histogramı), backtest (tümü/IS/OOS, kümülatif R, zaman tabloları), maliyet matrisi, walk-forward, parite
+  ve veri doğrulama kartları; sunucuda üretilen SVG. Sentetik kart "SENTETİK VERİ", maliyetsiz koşu "MALİYETSİZ KOŞU"
+  taşır. Panel hüküm hesaplamaz; eşik çizgileri SPEC §9 kod tabanlarıdır. Rapor yoksa üreten komutlar listelenir,
+  okunamayan dosya hata metniyle listelenir.
+- **Güvenlik:** her istekte `Host` bu panel olmalı (yabancı 421, eksik/yinelenen 400); durum değiştiren her istek
+  `POST` + aynı kaynak `Origin` (yoksa `Referer`) + süreç başına CSRF belirteci (sabit zamanlı); yalnızca urlencoded form,
+  en çok 2048 bayt. Her yanıtta `default-src 'none'` tabanlı CSP, `X-Frame-Options: DENY`, `nosniff`,
+  `Referrer-Policy: same-origin`, `Cache-Control: no-store`; satır içi betik ve stil yok; çerez yok; erişim günlüğü
+  kapalı; PIN loglanmaz ve sayfaya yazılmaz.
+- **Kabul:** (1) loopback dışı adreste başlamıyor; (2) yabancı `Host`/`Origin` ve belirteçsiz `POST` reddediliyor;
+  (3) veritabanı ya da `.env` yokken salt-okunur açılıyor; (4) panelden Duraklat/Devam/KILL, Telegram komutlarıyla
+  aynı durumu üretiyor ve giden kutusuna bildirim yazıyor; yanlış PIN kilidi ortak; (5) analiz ekranı rapor yokken,
+  bozuk rapor dosyasıyla ve sentetik raporla doğru davranıyor; (6) testler ağ ve veritabanı kenar durumlarını kapsıyor.
 
 ## 7. Faz 3 — MT5 köprüsü, paper ve approve (yalnızca demo hesap)
 
@@ -596,7 +843,12 @@ canlı sonuçlar backtest'in %95 güven aralığında.
 ## 8. Risk motoru ve venue profilleri
 
 ### 8.1 Kurallar (kodda zorunlu)
-- `risk_per_trade_pct` varsayılan 0,25; kod tavanı 0,5. Başlangıç bakiyesi üzerinden.
+- `risk_per_trade_pct` varsayılan 0,25; kod tavanı 0,5. Başlangıç bakiyesi üzerinden. **İşlem başı riskin tek
+  kaynağıdır** (kullanıcı kararı 2026-11-19, ADR-0010): canlı çalışma (Faz 1 mesajındaki lot önerisi, Faz 3 risk
+  motoru) ve portföy düzeyindeki değerlendirmeler (karar koşuları, Monte Carlo, Go/No-Go) bu değeri kullanır. Pine
+  script'lerindeki 0,5 yalnızca tekil strateji varsayımıdır; yalnızca paritede ve `--pine-risk` karşılaştırma
+  koşusunda geçerlidir. `config/strategies.yaml` bir portun risk girdisini taşıyamaz; risk tabanını `Initial Capital`
+  dışında bir değere çekerse o portun karar koşusu yapılamaz (§6.4).
 - **Faz 1 (emir yok):** bot dolumu ve gerçekleşen K/Z'yi bilmediği için ön kontrol yerine temkinli bir defter kullanır:
   iletilen her giriş prop günü boyunca tam riskiyle sayılır, yalnızca `/atladim` ya da kanıtlanmış iletilememe serbest
   bırakır (ADR-0005). Haftalık tavan, ardışık zarar duraklatması ve eşzamanlılık sınırı Faz 3'te risk motoruyla gelir.
@@ -641,27 +893,172 @@ aynı olan TradingView sembolleri; en az 1, en çok 32, yinelemesiz) ve `min_sto
 - **G2** Her strateji için OOS'ta maliyet sonrası beklenti > 0 ve t-istatistiği ≥ 2,0.
   (RR 1:2'de σ ≈ 1,45R → +0,2R beklenti için ~220, +0,1R için ~840 işlem gerekir.)
 - **G3** OOS beklentisi ≥ IS beklentisinin %50'si; gün/saat filtreleri yalnızca IS'te seçildi.
-- **G4** Monte Carlo: seçilen risk ve venue kurallarıyla P(iki fazı geçme) ≥ %60 ve P(ihlal) ≤ %20.
+- **G4** Monte Carlo: seçilen risk ve venue kurallarıyla P(iki fazı geçme) ≥ %60 ve P(ihlal) ≤ %20. Seçilen risk
+  `config/risk.yaml` → `risk_per_trade_pct`'tir; işlem listesi de o riskle boyutlanmış karar koşularından gelir (§9.1).
 - **G5** Demo forward (Faz 3): §7.5 sağlandı.
 - **G6** Parite ≥ %98 (§6.6).
 - **G7** `rules_verified_at` ≤ 30 gün; gereken yerde firmadan yazılı otomasyon onayı `docs/compliance/` altında.
 Rapor `reports/go_no_go_YYYYMMDD.md`; her madde PASS/FAIL ve kanıt bağlantısıyla.
 
+### 9.1 Raporlayıcı (`backtest/gonogo.py`, `uv run propbot gonogo`; uygulandığı hâliyle 2026-11-18, son çapraz denetim ve kullanıcı kararlarıyla 2026-11-19)
+- **Faz 2'de sonuç hiçbir zaman GO değildir:** G5 Faz 3'ün demo koşusunu ister ve her zaman DEĞERLENDİRİLEMEDİ'dir.
+  Rapor yine de öbür kapıların durumunu gösterir. Çıkış kodu 0 yalnızca GO, 1 NO_GO, 2 hata.
+- Her kapı GEÇTİ (PASS) / KALDI (FAIL) / DEĞERLENDİRİLEMEDİ (NOT_EVALUABLE). Her şüphe "geçmedi" yönüne çözülür:
+  bir kapıda KALDI > DEĞERLENDİRİLEMEDİ > GEÇTİ. GO yalnızca yedi kapı GEÇTİ ve hiçbir girdi sentetik değilse
+  mümkündür (artefakt modeli de bunu zorlar).
+- **Girdi:** `reports/` altındaki **bütün** okunabilir artefaktlar (en yeni 300 dosya; sınıra takılınca veri kapıları
+  DEĞERLENDİRİLEMEDİ). Okunamayan bir dosya, gizleyebileceği kapıları DEĞERLENDİRİLEMEDİ yapar (backtest → G1–G4,
+  doğrulama → G1, Monte Carlo → G4, parite → G6). Dosya adı içerikle uyuşmuyorsa ya da iki girdi aynı adı taşıyorsa
+  rapor üretilmez.
+- **Seçim kuralları:** strateji eşleşmesi artefaktın `strategy_id`'siyle (etiket ve dosya adı kanıt değildir).
+  - *Karar koşusu (G1–G3):* stratejinin en yeni **karşılaştırma olmayan** koşusu (karşılaştırma = `tv_ohlc`,
+    maliyetsiz, kayıtlı çarpanı 1,0 olmayan, kayıtlı OOS başlangıcı `config/backtest.yaml` → `samples.oos_start`
+    ile aynı olmayan ya da kayıtlı işlem başı riski planlanan riskten farklı olan; sonuncusu aşağıda, *Risk*). Başka
+    bir OOS sınırı, sonuçlara bakılarak seçilmiş olabilecek bir "ya şöyle olsaydı" koşusudur
+    (`--cost-factor` gibi): ne karar verir ne de daha eski bir karar koşusunu gizler; koşucu onu `-oos20261020`
+    gibi bir etiket ekiyle ve "KARAR KOŞUSU DEĞİL" notuyla yazar. Yapılandırılmış OOS başlangıcı raporlayıcıya
+    verilmezse hiçbir koşu karar koşusu olarak doğrulanamaz. Karar koşusu sayılması için `pessimistic`, maliyetli,
+    çarpan **tam** 1,0 ve kayıtlı komisyon/slipaj/spread/spread pencereleri (pencerelerin saat dilimi `session.tz`
+    dahil) ile enstrüman (tür, tick, puan değeri, `qty_step`, `min_qty`) `config/backtest.yaml`'daki profille
+    **birebir** aynı olmalı. Başlangıç sermayesi venue profilinin `initial_balance` değerine, seans sonu boşluğu
+    `session.min_gap_minutes`'a eşit olmalı (2026-11-19, kapı saldırısı K–M): boyutlar tam kontrattır ve `min_qty`
+    altı atlanır (R boyuttan bağımsız değildir), seans sonu da stratejilerin okuduğu `session.islastbar`'ı belirler;
+    üçü de işlemleri değiştirir. Yapılandırılmış boşluk raporlayıcıya verilmezse hiçbir koşu doğrulanamaz. Kayıtlı
+    strateji parametreleri de `config/strategies.yaml`'ın bugün verdiği etkin parametrelerle (Pine varsayılanları + o
+    dosyadaki değişiklikler + risk girdisinde planlanan risk) ad ve değer olarak birebir aynı olmalı (tip dahil: `1`,
+    `1.0` ve `true` üç ayrı değerdir; Master bacağı `master_portfolio` parametrelerine bakar): başka parametrelerle
+    yapılmış koşu başka bir stratejiyi test etmiştir.
+    En yeni aday doğrulanamazsa (çarpan kayıtsız, profil yok ya da boş, maliyet, enstrüman ya da parametre farklı)
+    strateji DEĞERLENDİRİLEMEDİ olur: **daha eski bir koşuya geçilmez** ve en iyi koşu asla seçilmez.
+  - *Risk (kullanıcı kararı 2026-11-19, ADR-0010; açık bulgu 82 kapandı):* karar koşusu, kayıtlı risk girdisi
+    (`risk_pct`; MTF'de `risk_percent`) planlanan riske (`risk.yaml` → `risk_per_trade_pct`) **eşit** olan koşudur.
+    Başka riskle yapılmış koşu (betiğin kendi riski, `--pine-risk`) karşılaştırma koşusudur: karar vermez, eskisini
+    gizlemez; kanıt iki değeri de yazar. Sınıflandırma etikete değil kayıtlı değere göredir. Kayıtlı risk bilinmiyorsa
+    (girdinin adı raporlayıcıya verilmemiş, alan yok ya da sayı değil) koşu doğrulanamaz: DEĞERLENDİRİLEMEDİ, eskisine
+    geçilmez. `risk.yaml` değişirse eski karar koşuları karşılaştırma koşusu olur; backtest, işlem listesi ve Monte
+    Carlo yeniden üretilir. Beklenen parametreler koşucunun kayıtta kullandığı aynı fonksiyonla kurulur.
+    Değerlendirilen bir stratejinin risk tabanı `config/strategies.yaml`'da `Initial Capital` dışındaysa beklenen küme
+    kurulamaz ve komut rapor üretmeden durur (çıkış kodu 2; §6.4). Kod tavanının (§8.1) üstünde bir planlanan riskle
+    de rapor üretilmez.
+  - *Master (kullanıcı kararı 2026-11-19; açık bulgu 72 kapandı):* `--strategies` ya iki bacak kimliğini ya da birleşik
+    `master_portfolio` kimliğini alır; ikisi de kabul edilir ve her biri kendi artefaktından yargılanır (bacaklar →
+    `backtest_master_ny_orb_fvg_…` ve `backtest_master_asian_sweep_…`, birleşik → `backtest_master_portfolio_…`).
+    Uygulamanın getirdiği sınır (kararın parçası değil): birleşik kimlik bir bacağıyla **aynı raporda** verilemez, iki
+    görünüm iki ayrı raporla değerlendirilir. Aynı raporda aynı işlemler iki karar koşusunda sayılırdı; komut reddeder
+    (çıkış kodu 2), saf katman G4'ü DEĞERLENDİRİLEMEDİ yapar. G4 işlem listesini birleşik koşuya satır kimliği başına
+    özetlerle bağlar (liste satırları ve köken satırı bacak kimliklerini taşır); bu özetleri taşımayan eski birleşik
+    artefakt bağlanamaz (DEĞERLENDİRİLEMEDİ). TradingView işlem listesi betik başına olduğundan parite raporu
+    `master_portfolio` içindir:
+    bir bacağın G6'sı betiğin raporunu okur ve kanıt, oranın bütün bacakları birlikte kapsadığını (bacak başına ayrı
+    oran olmadığını) yazar. Bacağın bağımsız portla (`ny_orb_fvg`, `asian_sweep`) birlikte verilmesi karışım değildir.
+  - *Aynı saniye:* aynı saniyede oluşturulmuş iki aday (karar koşusu, aynı venue'nun Monte Carlo'su, aynı stratejinin
+    paritesi, aynı sha'nın doğrulaması) varsa hiçbiri seçilmez (DEĞERLENDİRİLEMEDİ).
+  - *G1:* karar koşusunun bar süresi ≤ 60 sn, kapsamı ≥ 2 yıl (365,25 günlük yıl), bar sayısı × bar süresi gerekli her
+    yıl için ≥ 1500 saat, ve **aynı sha256'lı ve aynı okumalı** (bar saat dilimi, bar süresi, ilk ve son bar) en yeni
+    doğrulama raporu temiz. Aynı dosyanın başka okuması (ör. `--bar-tz` NY+7 ile doğrulanıp UTC ile backtest edilmiş)
+    başka barların doğrulamasıdır: o sha için uyan doğrulama yoksa KALDI, iki değer de cümlede yazılır.
+  - *G2:* OOS'ta n ≥ 30, ortalama > 0, t ≥ 2,0; kayıtlı t ortalama/sapma/n'den yeniden hesaplanır ve küçük olan
+    karar verir (elle düzenlenmiş değer KALDI). *G3:* IS ve OOS'ta n ≥ 30; oran yeniden hesaplanır, küçük olan karar verir.
+  - *G4:* venue adı eşleşen en yeni Monte Carlo: planlanan riskle (`risk.yaml` → `risk_per_trade_pct`; **risk zinciri**:
+    listenin arkasındaki her karar koşusu da aynı riskle boyutlanmış olmalı, zincir tutuyorsa kanıt bunu tek cümlede
+    yazar, bir halka eksikse yazmaz ve G4 GEÇTİ olamaz), venue profilinin kurallarıyla, deneysel risk kademesi ve
+    varsayılmış `min_trading_days` olmadan, ≥ 5000 yol, ≥ 100 işlem; olasılıklar kendi içinde tutarlı. **Köken
+    zinciri:** işlem listesinin köken satırı olmalı (yoksa DEĞERLENDİRİLEMEDİ); sentetik değil (sentetikse KALDI),
+    maliyetsiz değil, `pessimistic`, çarpan 1,0; köken satırında `-pinerisk` işaretli kimlik yok (betiğin kendi riskiyle
+    yapılmış koşunun listesi işaret yüzünden reddedilir, satırları karar koşusununkilerle aynı olsa bile:
+    DEĞERLENDİRİLEMEDİ); strateji kümesi değerlendirilen stratejilerle aynı (birleşik `master_portfolio` için: karar
+    koşusunun satırlarının taşıdığı bacak kimlikleri); veri sha256'sı onların karar koşularıyla aynı; işlem sayısı
+    karar koşularının tamamlanmış işlem toplamına eşit;
+    listenin R toplamı ve mae_r toplamı karar koşularınınkine (`stats_all.total_r`, `mae_total_r`) eşit (yalnızca
+    toplamların kayan nokta yuvarlaması kadar tolerans: CSV değerleri `repr()` ile yazılır, kendi yuvarlaması yoktur);
+    listenin satırları (giriş/çıkış zamanı, R, mae_r, strateji) strateji başına sıralanıp sha256 ile özetlenir ve karar
+    koşusunun kendi satırlarının özetine eşit olmalı (zamanı kaydırılmış satır sayıyı ve toplamları korur ama hangi
+    işlemlerin aynı prop gününe düştüğünü değiştirir; 2026-11-19, kapı saldırısı P);
+    liste en yeni karar koşusundan yeni, Monte Carlo'dan eski. **Kurallar:** Monte Carlo artefaktı simülasyon anındaki
+    `max_loss_type`, `daily_loss_basis` ve `daily_reset` (saat dilimi ve saat) değerlerini kaydeder; hepsi bugünkü
+    profille aynı olmalı, profil `static` dışı bir toplam kayıp türü taşıyorsa (simülatör onu modellemez) G4
+    DEĞERLENDİRİLEMEDİ. Günlük kayıp bazı tek modelle hesaplanır (ADR-0002 madde 7); kanıt metni bunu yazar.
+    **İşlem içi model** yalnızca kötümser `stop` olabilir (`closed` iyimserdir). **Tekrar üretilebilir koşu**
+    (2026-11-19, kapı saldırısı N): tohum varsayılan (`20261113`), yol sayısı karar değeri (10.000 ya da config'teki
+    daha sıkı `min_mc_paths`), ufuk varsayılan 1000 piyasa günü, işlem atlama olasılığı 0 olmalı. Bunlar firma kuralı
+    değildir ama sonucu değiştirir: 5000 yolda P(geçme)'nin standart hatası ≈ 0,7 puandır, 40 tohum arasından en iyisi
+    tipik olandan ≈ 1,2 puan yüksektir; kısa ufuk ihlalleri "sonuçlanmadı"ya iter.
+  - *G6:* strateji başına en yeni parite raporu `passed`, oran (kayıtlı ile yeniden hesaplananın küçüğü) ≥ 0,98,
+    karşılaştırılan işlem ≥ 100; Python tarafının kayıtlı parametreleri `config/strategies.yaml`'ın bugünkü etkin
+    parametreleriyle **betiğin kendi riskinde** (parite planlanan riskle koşulmaz; karar kümesiyle karşılaştırılsaydı
+    her dürüst rapor reddedilirdi; planlanan riskle yapılmış parite raporu ya da verilmemiş beklenen küme
+    DEĞERLENDİRİLEMEDİ), enstrümanı (tür, tick, puan değeri, `qty_step`, `min_qty`) `config/backtest.yaml`'daki
+    profille, seans sonu boşluğu ve başlangıç sermayesi karar koşusununkiyle aynı kurala göre birebir aynı ve
+    karşılaştırılan barların veri bilgisi kayıtlı. TradingView geçmişi kısa olduğundan parite verisinin karar koşusunun
+    dosyası olması istenmez; ikisi de kanıtta yazılır.
+  - *G7:* `rules_verified_at` boş ya da > 30 gün → KALDI, ileri tarihli → DEĞERLENDİRİLEMEDİ;
+    `automation_allowed: false` → KALDI; `docs/compliance/` dosyaları listelenir (göreli `--compliance-dir` çalışma
+    dizinine göre çözülür; kanıt listelenen klasörün mutlak yolunu yazar, klasör bulunamazsa "klasör yok" der, "dosya
+    yok" demez), yazılı onay elle teyit edilir.
+- **Eski artefaktlar:** yukarıdaki kayıtları (OOS dışında: işlem içi model, R/mae_r toplamları, kural alanları,
+  parite parametreleri/enstrümanı; 2026-11-19'dan: seans sonu boşluğu, spread saat dilimi, `qty_step`/`min_qty`,
+  satır özetleri, paritenin boşluğu ve sermayesi) taşımayan eski dosyalar yine yüklenir ve panelde görünür; ilgili kapı
+  DEĞERLENDİRİLEMEDİ olur ("eski rapor" cümlesiyle), asla GEÇTİ olmaz. 2026-11-19 kararından önce betiğin %0,5'iyle
+  yapılmış backtest'ler karşılaştırma koşusu sayılır (karar koşusu yok); yeniden üretilirler.
+- **Her artefakt için:** sentetik → o kapı KALDI ("SENTETİK VERİ"); 30 günden eski ya da rapor anından ileri tarihli →
+  DEĞERLENDİRİLEMEDİ.
+- **Elle teyit maddeleri** (kod denetleyemez, raporda yazar): verinin mekanın ya da eşdeğerinin beslemesinden geldiği
+  (G1), gün/saat filtrelerinin yalnızca IS'te seçildiği (G3; GEÇTİ yalnızca oranı kapsar), Monte Carlo listesinin
+  maliyet sonrası olduğu (G4), gereken yerde yazılı otomasyon onayı (G7).
+- **SPEC değeri olmayan eşikler — mühendislik seçimi; kullanıcı 2026-11-19'da onayladı, değerler aynen kalır:** OOS'ta
+  en az 30 işlem (G2/G3), gerekli her yıl için 1500 bar-saati (G1; NY normal seansı yılda ~1638 saat), en az 5000 Monte
+  Carlo yolu ve 100 işlem (G4), artefakt yaşı en çok 30 gün (G1–G4, G6), paritede en az 100 karşılaştırılan işlem (G6;
+  hiç fark yokken gerçek oranın %95 alt sınırı ≈ 1 − 3/n: 50 işlemde %94, 100 işlemde %97 — %98 tabanına yakın olan en
+  küçük sayı).
+  Değerleri `config/backtest.yaml` → `go_no_go`; SPEC §9 değerleri ve bu altısı kodda tabandır, config yalnızca
+  sıkılaştırabilir (gevşek değer yükleme hatası).
+- **Yazım:** JSON artefakt hiç üzerine yazılmaz; `go_no_go_YYYYMMDD.md` o günün en yeni hükmünü gösterir (işaret
+  satırıyla; daha eski ya da aynı saniyedeki bir koşu onu değiştirmez, işaret satırı olmayan ya da sembolik bağ olan
+  dosyaya dokunulmaz). Artefakt metni Markdown'a kaçışlanarak yazılır.
+
 ## 10. Zorunlu testler
+Her maddenin bugün hangi test dosyalarında karşılandığı (2026-11-18; yollar `tests/` altında). Faz 3'e kalan
+maddeler öyle yazılmıştır.
 - **Strateji birim:** OR kurulumu; bias (Close/Wick); boğa/ayı FVG + min boyut; IFVG geçişleri ve ölüm; en yeniden eskiye
   tarama; aktivasyon barı kuralı; Asya penceresinin gece yarısını sarması; arming → sweep → giriş sırası; invalidasyon;
-  günde ≤ 1 işlem.
+  günde ≤ 1 işlem. → `unit/test_strategy_<port>.py` ve Pine satırlarına bağlı izleme testleri
+  `unit/test_strategy_<port>_pine_trace.py` (altı port: `ny_orb_fvg`, `asian_sweep`, `master_portfolio`,
+  `ict_silver_bullet`, `mean_reversion`, `mtf_trend`); varsayılanların Pine girdileriyle eşliği
+  `unit/test_pine_inputs.py`, `unit/test_strategy_registry.py`.
 - **Takvim:** ABD DST 2026-03-08 ve 2026-11-01; AB DST 2026-03-29 ve 2026-10-25; yarım gün 2026-11-27 ve 2026-12-24;
-  tatiller; eksik barlar.
+  tatiller; eksik barlar. → `unit/test_propday.py`, `unit/test_session_clock.py`, `unit/test_sessions.py`,
+  `unit/test_ohlcv_loader.py` (NY+7 ve yaz saati geçişleri), `unit/test_bar_validation.py` (saat dilimi kayması, kısa
+  seans, seansı olmayan gün, seans içi boşluk), `unit/test_indicators.py` (HTF kovası DST haftalarında). Backtest'te
+  takvim veriden türetilir (§6.1); canlı takvim Faz 3'e kaldı (açık bulgu 75).
 - **Property (hypothesis):** stop daima zarar tarafında ve ≥ 1 tick uzakta; risk hiçbir zaman bütçeyi aşmaz; seans sonunda
-  açık pozisyon yok; pozisyon sayısı limitleri.
+  açık pozisyon yok; pozisyon sayısı limitleri. → `property/test_strategy_<port>_props.py` (Silver Bullet ve Mean
+  Reversion'da stop kuralı §3.1 istisnalarına göre), `property/test_engine_props.py`, `property/test_sizing_props.py`.
 - **Risk:** günlük bütçe matematiği, reset saat dilimi, taban/düzleştirme, ardışık kayıp ve haftalık duraklama,
-  mod kilitleri (`auto` hiçbir koşul eksikken açılamaz).
+  mod kilitleri (`auto` hiçbir koşul eksikken açılamaz). → `unit/test_sizing.py`, `unit/test_risk_config.py`,
+  `unit/test_propday.py`, `unit/test_venue_profile.py`, `unit/test_modes.py`, `unit/test_processor.py` (Faz 1 defteri).
+  Taban/düzleştirme, ardışık kayıp ve haftalık duraklama risk motoruyla Faz 3'te gelir; bugün yalnızca config şemaları
+  testlidir.
 - **Alıcı:** yanlış token, yanlış IP, bayat bar, çift istek, bozuk JSON, büyük gövde, 3 sn yanıt süresi.
-- **Telegram:** yetkisiz sohbet, `/kill` onayı, ağ hatası motoru bloklamıyor.
+  → `unit/test_receiver.py`, `unit/test_alert_schema.py`, `integration/test_service.py`.
+- **Telegram:** yetkisiz sohbet, `/kill` onayı, ağ hatası motoru bloklamıyor. → `unit/test_telegram.py`,
+  `unit/test_commands.py`.
 - **Köprü (Faz 3):** bağlantı kopması, pozisyon açıkken yeniden başlatma, çift emir engeli, mutabakat uyuşmazlığı.
-- **Monte Carlo:** E = 0 sağlık testi, sabit tohumla tekrarlanabilirlik.
-- **Parite:** altın dosyalar.
+  → henüz yok (Faz 3).
+- **Monte Carlo:** E = 0 sağlık testi, sabit tohumla tekrarlanabilirlik. → `unit/test_montecarlo.py`,
+  `property/test_montecarlo_props.py`; köken satırı `unit/test_trades.py`, `unit/test_provenance.py`,
+  `unit/test_provenance_attacks.py`.
+- **Parite:** altın dosyalar. → `parity/test_golden.py` (24 dosya, yalnızca Python regresyonu; §6.6),
+  `unit/test_parity.py`, `unit/test_parity_attacks.py`, `property/test_parity_props.py`.
+- **Faz 2 ekleri:** motor `unit/test_engine.py`, `unit/test_engine_spec.py` (yalnızca sözleşmeden yazılmış kara kutu
+  testleri), `unit/test_backtest_model.py`; veri `unit/test_ohlcv_loader.py`, `unit/test_bar_validation.py`,
+  `unit/test_synthetic_bars.py`, `property/test_ohlcv_props.py`, `unit/test_cli_data.py`; analitik ve artefaktlar
+  `unit/test_analytics.py`, `unit/test_walkforward.py`, `unit/test_artifacts.py`, `unit/test_runner.py`,
+  `unit/test_runner_attacks.py`; Go/No-Go `unit/test_gonogo.py`, `unit/test_gonogo_attacks.py`,
+  `property/test_gonogo_props.py`; işlem başı risk kuralı (ADR-0010) `unit/test_risk_rule.py`,
+  `unit/test_risk_rule_attacks.py`, `unit/test_decisions_final_attacks.py`; panel `unit/test_dashboard_*.py`,
+  `integration/test_dashboard.py`; salt-okunur
+  okuma `unit/test_store_readonly_attacks.py`; komutlar `unit/test_cli_backtest.py`, `unit/test_cli_data.py`,
+  `integration/test_pipeline.py` (veriden Go/No-Go'ya uçtan uca).
 
 ## 11. Operasyon (özet; ayrıntı `docs/runbook.md`)
 - **Uçuş öncesi kontrol** (NY açılıştan 60 dk önce, otomatik): `rules_verified_at`, saat sapması, köprü heartbeat'i,

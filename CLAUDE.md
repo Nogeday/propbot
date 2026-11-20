@@ -11,12 +11,19 @@ Ayrıntılı spesifikasyon `docs/SPEC.md`'de — bir faza başlamadan önce o fa
 |---|---|---|
 | 0 | Pine hata düzeltmeleri (§4.1 B-maddeleri) + kural/varsayılan hizalaması (§4.3 E-maddeleri) + TradingView doğrulama listesi | §4 |
 | 1 | TradingView → webhook → Telegram sinyal botu (emir YOK) | §5 |
-| 2 | Python strateji motoru + maliyetli backtest + parite + Monte Carlo prop simülatörü | §6 |
+| 2 | Python strateji motoru + maliyetli backtest + parite + Monte Carlo prop simülatörü + yerel web paneli (kod 2026-11-18, teslim onayı 2026-11-19; parite ve veri kanıtı gerçek veri ve TV dışa aktarımı bekliyor) | §6 |
 | 3 | MT5 köprüsü, `paper` ve `approve` modları (yalnızca demo hesap) | §7 |
 | 4 | Ücretli sınav — yalnızca §9 Go/No-Go kapısı PASS ve kullanıcı kararıyla | §9 |
 
 Faz 2 ön dilimi (2026-11-13 kullanıcı kararı): proje iskeleti, config şemaları ve Monte Carlo prop simülatörü Faz 0
-kabulü ve Faz 1 beklenmeden yapıldı (SPEC §6 başındaki not). Faz sırası bunun dışında değişmedi.
+kabulü ve Faz 1 beklenmeden yapıldı (SPEC §6 başındaki not).
+Faz 2 erken geçişi (2026-11-18 kullanıcı kararı, ADR-0007): Faz 2'nin kalan dilimleri ve yerel web paneli
+(`propbot dashboard`, SPEC §6.8, ADR-0009) Faz 0'ın TradingView derlemesi ve Faz 1'in 10 günlük koşusu beklenmeden
+yapılır; o ikisi operasyonel saha testi olarak sürer. Gerçek veri gelene kadar sentetik bar kullanılır: sentetik veri
+kanıt değildir, raporlarda "SENTETİK VERİ" uyarısı taşır ve Go/No-Go'da PASS veremez. Faz 3 ve sonrası için sıra aynen
+geçerlidir ("Faz 3'e geç" denmeden emir gönderen hiçbir kod yazılmaz). Faz 2 teslimatı 2026-11-19'da onaylandı ve
+altı nokta karara bağlandı (kararlar ve §6.7/§6.8 kabul durumu: `CHANGELOG.md` Faz 2 bölümü; işlem başı risk:
+ADR-0010); §6.7'nin parite ve veri maddeleri hâlâ gerçek dosya bekliyor.
 
 Öncelik sırası: (1) sermaye ve prop kuralı koruma → (2) Pine ile parite → (3) gözlemlenebilirlik → (4) özellik/hız.
 
@@ -27,6 +34,11 @@ kabulü ve Faz 1 beklenmeden yapıldı (SPEC §6 başındaki not). Faz sırası 
 - Mimari kararları `docs/adr/NNNN-baslik.md` olarak yaz (bağlam, seçenekler, karar, sonuçlar).
 - Küçük, odaklı commit'ler (conventional commits). Gereksiz bağımlılık ekleme; sürümler `uv.lock` ile sabit.
 - Testi geçirmek için testi gevşetme; hatayı düzelt. Testsiz risk/strateji kodu yok.
+- Sentetik veri hiçbir zaman Go/No-Go PASS'ını desteklemez (ADR-0007): sentetik girdi kullanan kapı KALDI; sentetik
+  ya da maliyetsiz sonuç kanıt diye raporlanmaz. `tv_ohlc` sonucu yalnızca parite (G6) içindir, karar koşusu sayılmaz.
+- İşlem başı riskin tek kaynağı `config/risk.yaml` → `risk_per_trade_pct` (%0,25): canlı çalışma ve karar koşuları
+  (backtest, Monte Carlo, Go/No-Go) onu kullanır. Pine'daki %0,5 yalnızca tekil strateji varsayımıdır: parite ve
+  `--pine-risk` karşılaştırması (2026-11-19 kullanıcı kararı, ADR-0010).
 
 ## Pine kuralları
 - `pine/` dosyalarının kaynağı kullanıcının TradingView'daki güncel script'leridir; düzeltilen dosya TradingView'a
@@ -65,27 +77,31 @@ kabulü ve Faz 1 beklenmeden yapıldı (SPEC §6 başındaki not). Faz sırası 
 
 ## Teknoloji
 Python 3.12 · uv · ruff · mypy --strict (`src/`) · pytest + hypothesis · pydantic v2 + pydantic-settings · PyYAML ·
-FastAPI + uvicorn (Faz 1) · python-telegram-bot (async) · SQLite (WAL) · pandas/numpy · exchange_calendars ·
-structlog · MQL5 (Faz 3, ince köprü EA). Dağıtım: Ubuntu · systemd · Caddy (TLS) · ufw · chrony.
+FastAPI + uvicorn (Faz 1 alıcısı, panel) · python-telegram-bot (async) · SQLite (WAL) · numpy · structlog ·
+MQL5 (Faz 3, ince köprü EA). pandas, pyarrow (Parquet) ve exchange_calendars **kullanılmıyor** (ADR-0008): CSV,
+standart kütüphane, seans sonu veriden. Dağıtım: Ubuntu · systemd · Caddy (TLS) · ufw · chrony.
 
 ## Dizin yapısı
 ```
 pine/                 Pine kaynakları (Faz 0 sonrası strateji mantığının referansı)
 src/propbot/
-  core/               Bar, Signal, OrderIntent, Fill, Position, AccountState; zaman/takvim yardımcıları
-  strategies/         saf, deterministik, bar-bazlı durum makineleri (I/O, saat, env okumaz)
+  core/               Bar/BarSeries, Instrument, zaman/seans/prop günü (Signal, OrderIntent, Fill … Faz 3'te)
+  data/               CSV içe aktarma (genel/TradingView, MT5), doğrulama, sentetik barlar, `data` komutları
+  strategies/         altı Pine portu + registry + göstergeler: saf, deterministik (I/O, saat, env okumaz)
   risk/               venue profilleri, boyutlandırma, günlük/haftalık bütçe, kill switch, mod kilitleri
-  execution/          ExecutionAdapter protokolü, paper, mt5_bridge
-  data/               CSV/Parquet içe aktarma, doğrulama, canlı besleme arayüzü
+  execution/          ExecutionAdapter protokolü, paper, mt5_bridge (Faz 3; henüz yok)
   signals/            Faz 1 webhook alıcısı + şema
   notify/             Telegram
-  backtest/           motor, dolum ve maliyet modeli, IS/OOS, walk-forward, Monte Carlo, raporlar
-  store/              SQLite erişimi
+  backtest/           motor, dolum/maliyet, analitik, walk-forward, parite, Monte Carlo, Go/No-Go, artefaktlar
+  dashboard/          yerel web paneli (yalnızca loopback; ADR-0009)
+  store/              SQLite erişimi (panel: salt-okunur `Store.read()`)
 mql5/                 köprü EA (Faz 3)
-config/               strategies.yaml, risk.yaml, tv_alerts.yaml, venues/*.yaml
+config/               risk.yaml, tv_alerts.yaml, venues/*.yaml, backtest.yaml (enstrüman, maliyet, Go/No-Go eşikleri),
+                      strategies.yaml (Pine varsayılanlarından sapmalar; bugün boş)
 deploy/               systemd birimi, Caddyfile (Faz 1; adımlar docs/runbook.md)
-tests/                unit/, property/, parity/, integration/
-docs/                 SPEC.md, adr/, runbook.md, tv-verification-checklist.md
+tests/                unit/, property/, parity/ (golden: yalnızca Python regresyonu, sentetik), integration/
+docs/                 SPEC.md, adr/, runbook.md, backtest.md (Faz 2 kılavuzu), monte-carlo.md,
+                      tv-verification-checklist.md
 ```
 
 ## Komutlar (oluşturuldukça güncelle)
@@ -94,11 +110,18 @@ uv sync
 uv run pytest -q
 uv run ruff check . && uv run mypy src
 uv run propbot config check
-uv run propbot montecarlo --trades <trades.csv> --venue config/venues/ftmo_2step_100k.yaml --cost-r 0.05
 uv run propbot serve --mode signal                      # Faz 1: webhook → Telegram, emir yok (docs/runbook.md)
 uv run propbot signals report --since 2026-12-01        # Faz 1 kabul kanıtı: sayılar + gecikme
-# Henüz yok (kendi fazında):
-uv run propbot backtest --strategy ny_orb_fvg --data data/<file>.parquet --oos-start 2025-01-01
+uv run propbot dashboard [--port 8787]                  # yerel panel, yalnızca loopback (runbook §13)
+# Faz 2 (sıra ve seçenekler: docs/backtest.md)
+uv run propbot data synth --out data/<file>.csv         # SENTETİK barlar, yalnızca deneme
+uv run propbot data check --data data/<file>.csv [--bar-tz NY+7]
+uv run propbot backtest --strategy <id|all> --data data/<file>.csv [--matrix] [--walk-forward] [--trades-out <csv>]
+                                                        # karar koşusu risk.yaml riskiyle; --pine-risk = karşılaştırma
+uv run propbot parity --strategy <id> --data <tv_bars.csv> --tv-trades <list_of_trades.csv> --tv-tz <zone>
+uv run propbot montecarlo --trades <trades.csv> --venue config/venues/ftmo_2step_100k.yaml --r-is-net
+uv run propbot gonogo --strategies <id,id> [--venue ftmo_2step_100k]   # Faz 2'de her zaman NO_GO (G5); Master: iki
+                                                        # bacak kimliği ya da master_portfolio, ikisi birlikte değil
 ```
 
 ## Yapma

@@ -5,7 +5,7 @@ Tasarım kararları: `docs/adr/0000`, `docs/adr/0004`. Spesifikasyon: `docs/SPEC
 
 İçindekiler: 1 Ön koşullar · 2 Kurulum · 3 Sırlar ve config · 4 Servis · 5 Seçenek A (DuckDNS + Caddy) ·
 6 Seçenek B (kendi bilgisayarın + tünel) · 7 İstemci IP doğrulaması · 8 TradingView alarmları · 9 Duman testi ·
-10 Günlük işletim · 11 Sorun giderme · 12 Kabul testi (SPEC §5.7)
+10 Günlük işletim · 11 Sorun giderme · 12 Kabul testi (SPEC §5.7) · 13 Yerel web paneli (Faz 2) · 14 Faz 2 araçları
 
 > **Doğrulama durumu.** Caddy, Tailscale ve Cloudflare ile ilgili maddeler 2026-11-13'te projelerin resmi GitHub
 > depolarından (doküman kaynağı ve kaynak kod), `ufw` ve `chronyc` sözdizimi Ubuntu man sayfalarından okundu.
@@ -436,6 +436,21 @@ Uçtan uca test TradingView'dan yapılır: heartbeat alarmını kur, saat başı
 | `status=226/NAMESPACE` | birimdeki `ReadWritePaths` klasörü yok (depo yolu değişti ama satır değişmedi; `data/` oluşturulmadı) | birimdeki işaretli dört satır; `mkdir -p data` |
 | `/saglik` yanıt vermiyor | Telegram token/sohbet kimliği yanlış; ağ yok | `journalctl -u propbot -n 50` |
 | Mesajda "boyut hesaplanamadı" | venue profilinde `contract.*` boş | 3.3 |
+| Panel: `HATA: --host '…' reddedildi: panel yalnızca loopback adresinde …` | `--host` loopback dışı bir adres | panel yalnızca `127.0.0.1` / `::1`; uzaktan SSH tüneli (13. bölüm) |
+| Panel: `HATA: 127.0.0.1:8787 dinlenemiyor` | port başka bir süreçte (ikinci bir panel?) | `ss -ltnp \| grep 8787`; ya da `--port <numara>` (tünelde de aynı numara) |
+| Panel sayfası 421 "Host başlığı bu panele ait değil" | tarayıcı paneli başka bir adla açtı: SSH tünelinde iki uçta farklı port (`-L 9000:127.0.0.1:8787`), bir alan adı ya da makinenin ağ adresi | iki uçta aynı port: `ssh -L 8787:127.0.0.1:8787 …` ve `http://127.0.0.1:8787/`; `localhost` ve `[::1]` de kabul edilir |
+| Panel: 400 "Host başlığı bu panele ait değil" ya da güvenlik başlıksız düz 400 | `Host` başlığı eksik ya da yinelenmiş (yinelenmişse uvicorn isteği uygulamaya gelmeden kendi 400'üyle reddeder) | tarayıcıdan olmaz; elle yazılmış istek (açık bulgu 76) |
+| Panel aksiyonu 403 "Origin/Referer bu panel değil" | form başka bir sekmeden/siteden ya da farklı adresle açılmış sayfadan gönderildi | paneli adres çubuğundan aç, formu oradan gönder |
+| Panel aksiyonu 403 "form belirteci eksik ya da geçersiz" | panel yeniden başlatıldı (belirteç süreç başınadır) ya da sayfa çok eski | sayfayı yenile, yeniden dene |
+| Panel aksiyonu 409 "yapılmadı" | yanlış / eksik PIN, PIN kilidi (5 yanlış → 15 dk, Telegram ile ortak), KILL yokken "KILL'i kaldır", KILL sürerken Devam, BEKLEMEDE kopyanın veritabanında özet ya da bakiye | sayfadaki yanıt metni Telegram'ın vereceği yanıttır |
+| Panel aksiyonu 503 "Hiçbir şey değiştirilmedi" | veritabanı o anda kilitli (5 sn bekleme doldu) | yeniden dene |
+| Panel aksiyonu 500 "sonucu bilinmiyor" | komut çalıştı ama bayraklar geri okunamadı | `/durum` ile Telegram'dan kontrol et |
+| Panel: "Telegram bildirimi giden kutusuna YAZILAMADI" | aksiyon (bayrak) yazıldı, bildirimi yazılamadı (iki ayrı işlem; açık bulgu 73) | durum yine de değişti; `/durum` ile doğrula |
+| Panel: "veritabanı yok — propbot serve hiç çalışmamış olabilir" | `data/propbot.db` yok ya da yeniden adlandırıldı | panel dosya oluşturmaz; `propbot serve` oluşturur. `--db` yolunu kontrol et |
+| Panel: "veritabanı dosyası boş" | 0 baytlık dosya; `serve` şemayı henüz yazmadı | panel dosyaya dokunmaz; `serve`'i başlat |
+| Panel: "veritabanı şu an kilitli" | başka bir süreç uzun bir yazma yapıyor | sonraki yenilemede düzelir; sürerse `serve` günlüğü |
+| Panel: "veritabanı açılamıyor/okunamıyor: … şema sürümü uyuşmuyor" | eski sürümle oluşturulmuş dosya | yukarıdaki "şema sürümü uyuşmuyor" satırı; panel de aynı dosyayı açmayı reddeder |
+| Panel: "kontroller: KAPALI, panel salt-okunur — …" | sırlar okunamadı (`.env` yok, izinler, eksik değer) ya da `config/tv_alerts.yaml` okunamadı | gerekçe başlangıç satırında yazar; 3.2, 3.3 |
 
 ## 12. Kabul testi (SPEC §5.7)
 
@@ -455,3 +470,84 @@ Uçtan uca test TradingView'dan yapılır: heartbeat alarmını kur, saat başı
    "SAĞLANMADI" yapar, kuyrukta bekleyen sinyal "EKSİK". Koşu sırasında `/duraklat` ya da `/kill` kullanırsan o anda
    bekleyen giriş mesajları düşürülür ve onlar da "ulaşmayan" sayılır: kabul koşusunu duraklatmadan yürüt.
 5. Sonuçları (rapor çıktısı + TradingView Alert Log sayıları) Claude Code oturumuna yapıştır.
+
+## 13. Yerel web paneli (Faz 2; ADR-0009, SPEC §6.8)
+
+Panel, botun durumunu ve Faz 2 raporlarını tarayıcıda gösteren ayrı bir süreçtir. Emir göndermez, hiçbir yapay zekâ
+ya da dış kaynak çağrısı yapmaz, `serve`'den bağımsızdır: panel çökerse sinyal hattı etkilenmez, `serve` kapalıyken de
+raporlar görülür. Panel için systemd birimi yoktur; gerektiğinde elle başlatılır.
+
+### 13.1 Başlatma
+```bash
+uv run propbot dashboard            # http://127.0.0.1:8787/  · durdurmak için Ctrl+C
+```
+Seçenekler: `--port` (8787), `--host` (yalnızca `127.0.0.1` ya da `::1`; başka adres reddedilir), `--db`
+(`data/propbot.db`), `--config-dir` (`config`), `--venue` (tek profil varsa gerekmez), `--env-file` (`.env`) ya da
+`--no-env-file` (sırlar yalnızca ortam değişkenlerinden), `--reports-dir` (`reports`), `--log-level`. Başlangıç satırları
+adresi, venue'yu, veritabanını ve kontrollerin açık mı salt-okunur mu olduğunu (gerekçesiyle) yazar. Erişim günlüğü
+kapalıdır; PIN ve sırlar loglanmaz.
+
+### 13.2 Ne gösterir
+- **Canlı** (`/`; canlı bölüm 5 sn'de bir yenilenir, sekme gizliyken durur, bağlantı yoksa "bağlantı yok" der):
+  bot durumu (KILL > BEKLEMEDE > DURAKLATILDI > ETKİN; kurulu öbür bayraklar yanında) ve `serve`'in canlılığı (son
+  90 sn'de yaşam işareti); bakiye (varsayılan `initial_balance` "varsayılan" etiketiyle ya da elle girilen değer,
+  prop günü değişince "güncel değil"); hedef ilerlemesi; günlük tampon (botun risk defteri ve beyan edilen günlük kayıp)
+  ve toplam kayıp tamponu; son 7 günün sinyalleri (en çok 1000 satır okunur, 25'i gösterilir) ve sinyal kayıtlarından
+  türetilen açık/kapalı işlemler (en çok 50). Bunlar **sinyal kayıtlarıdır, dolum değildir**: bot emir göndermez ve
+  işlemlerini bilmez. Ölçülmemiş değer ölçülmüş gibi gösterilmez.
+- **Analiz** (`/analiz`): `reports/` altındaki raporlar (her tür ve etiket için en yenisi): Go/No-Go, Monte Carlo,
+  backtest, maliyet matrisi, walk-forward, parite, veri doğrulama. Panel hüküm hesaplamaz; GEÇTİ/KALDI yalnızca Go/No-Go
+  raporundan gelir. Okuma kılavuzu: `docs/backtest.md`.
+- Panel veritabanını yazma kilidi almadan tek bir anlık görüntüyle okur ve dosyayı hiçbir zaman **oluşturmaz**: yoksa
+  "veritabanı yok", 0 baytsa "boş" der ve dokunmaz. Dosya yeniden adlandırılır ya da silinirse (11. bölümdeki şema
+  geçişi) panel bunu bir sonraki yenilemede görür; eski dosyaya yazmaz.
+
+### 13.3 Salt-okunur açılış
+Kontroller şu durumlarda kapalıdır ve sayfa nedenini yazar: sırlar okunamadı (`.env` yok, `chmod 600` değil ya da bir
+değer eksik), `config/tv_alerts.yaml` okunamadı, veritabanı yok / boş / okunamıyor / şema sürümü uyuşmuyor. PIN kilidi
+sürerken PIN isteyen düğmeler devre dışıdır. BEKLEMEDE bir kopyanın veritabanında (ADR-0004) özet ve bakiye
+aksiyonları reddedilir; Telegram'da olduğu gibi yalnızca KILL ve Duraklat uygulanır.
+
+### 13.4 Uzaktan bakmak: SSH tüneli, iki uçta aynı port
+Panel yalnızca loopback'te dinler (varsayılan `127.0.0.1`); Caddy'ye ya da ufw'ye **eklenmez**. **Kullanıcı onayı
+(2026-11-19):** panelin yalnızca `127.0.0.1` üzerinde kalması uygun bulundu, uzaktan erişim için SSH tüneli yeterlidir;
+davranış değişmedi, başka adreste dinleme seçeneği yoktur (ADR-0009 karar 1). Başka bir bilgisayardan:
+```bash
+ssh -L 8787:127.0.0.1:8787 kullanici@sunucu      # kendi bilgisayarında; sonra tarayıcıda http://127.0.0.1:8787/
+```
+İki uçtaki port **aynı** olmalı: panel her istekte `Host` başlığını denetler (`127.0.0.1:<port>`, `localhost:<port>`,
+`[::1]:<port>`); `-L 9000:127.0.0.1:8787` tarayıcıya `127.0.0.1:9000` yazdırır ve panel 421 ile reddeder. Başka port
+gerekiyorsa paneli o portla başlat (`--port 9000`) ve tüneli `-L 9000:127.0.0.1:9000` kur.
+
+**Çok kullanıcılı bir makinede çalıştırma:** panelde kimlik doğrulama yoktur. Aynı makinede oturum açabilen herkes
+paneli açabilir ve Duraklat/Devam'ı kullanabilir (KILL ve kaldırılması PIN ister). Tarayıcıdaki başka sitelere karşı
+koruma `Host`/`Origin` denetimi ve form belirtecidir; makinedeki başka kullanıcılara karşı koruma yoktur.
+
+### 13.5 Aksiyonlar
+| Düğme | Ne yapar | Ne ister |
+|---|---|---|
+| Duraklat / Devam Et | `/duraklat` / `/devam` ile aynı | onay kutusu |
+| Acil Kapat (KILL) | `/kill <PIN>` ile aynı: yeni giriş sinyallerini keser | PIN |
+| KILL'i kaldır | `/devam <PIN>` ile aynı; KILL yokken reddedilir (bilinçli bir duraklatmayı sessizce kaldırmasın) | PIN |
+| Telegram Durum/Test Özeti Gönder | `/durum` ve `/saglik` özetini giden kutusuna yazar (panelin kendi süreç satırları çıkarılır) | — |
+| Bakiye | güncel bakiye / özsermaye ve isteğe bağlı gün başı bakiyesi; "elle girildi · tarih" etiketiyle saklanır | onay kutusu |
+
+- Aksiyonlar Telegram komutlarının kodundan geçer: PIN kilidi (5 yanlış → 15 dk) Telegram ile **ortaktır**, yanıt
+  metni Telegram'ın vereceği metindir. Panel sonucu bayrakları geri okuyarak doğrular: 200 yapıldı, 409 yapılmadı,
+  503 veritabanı meşgul (hiçbir şey değişmedi), 500 sonucu bilinmiyor.
+- Her aksiyon giden kutusuna "[PANEL]" başlıklı, süresi dolmayan bir bildirim yazar; mesajı çalışan `propbot serve`
+  gönderir. **`serve` çalışmıyorsa bildirim kutuda bekler** ve sonuç sayfası bunu söyler; aksiyonun kendisi (bayrak)
+  yine de yazılmıştır. Duraklat/Devam/KILL/KILL'i kaldır/Özet ile bildirimi iki ayrı veritabanı işlemidir: bildirim
+  yazılamazsa durum değişmiş kalır ve sayfa "YAZILAMADI" der (açık bulgu 73). Bakiye ve bildirimi tek işlemdir.
+- **KILL ne yapar, ne yapmaz:** yeni giriş sinyallerini keser (stop, çıkış ve iptal mesajları gelmeye devam eder).
+  Bot emir göndermediği için açık bir pozisyonu **kapatmaz**: pozisyon terminalindedir, onu sen kapatırsın. KILL'i
+  kaldırmak PIN ister; hiçbir panel yolu onu PIN'siz kaldırmaz.
+
+## 14. Faz 2 araçları
+
+Veri dosyasından Go/No-Go raporuna kadar komutlar (`propbot data synth`, `data check`, `backtest`, `parity`,
+`montecarlo`, `gonogo`) ve raporların nasıl okunacağı ayrı bir belgededir: `docs/backtest.md`. Bar dosyası biçimleri
+(TradingView grafik verisi, MT5 "Export Bars", `--bar-tz NY+7`) o belgenin 2. bölümündedir. `reports/` ve `data/`
+git'e girmez. İşlem başı risk kuralı (2026-11-19, ADR-0010): backtest karar koşuları, Monte Carlo ve Go/No-Go
+`config/risk.yaml` → `risk_per_trade_pct` ile çalışır (Faz 1 mesajındaki lot önerisi gibi); Pine'daki %0,5 yalnızca
+paritede ve `propbot backtest --pine-risk` karşılaştırma koşusunda kullanılır (`docs/backtest.md` 4.0).

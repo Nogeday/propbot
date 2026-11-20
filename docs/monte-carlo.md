@@ -5,7 +5,8 @@
 Fiyat verisi gerekmez; yalnızca R cinsinden işlem listesi ve venue profili gerekir (SPEC §6.5).
 
 **Ne değildir:** backtest motoru değildir, strateji üretmez; listedeki işlemler ne kadar gerçekçiyse sonuç o kadar
-gerçekçidir. Go/No-Go hükmü vermez (SPEC §9 G4 kararı senindir). Modelleme kararları: `docs/adr/0002`.
+gerçekçidir. Go/No-Go hükmü vermez: G4'ü `propbot gonogo` bu komutun yazdığı artefakttan değerlendirir (SPEC §9.1,
+`docs/backtest.md`). Modelleme kararları: `docs/adr/0002`.
 
 ## Hızlı başlangıç
 
@@ -16,7 +17,9 @@ uv run propbot montecarlo --trades tests/fixtures/trades/synthetic_trades.csv \
 ```
 
 `tests/fixtures/trades/synthetic_trades.csv` **uydurma** bir listedir (`tests/support/synthetic.py` üretir); yalnızca
-aracın çalıştığını gösterir. FTMO profilinde `min_trading_days` 2026-11-13'te doğrulandı (4), bu yüzden
+aracın çalıştığını gösterir. Komut raporu ekrana yazar ve ayrıca `reports/` altına bir `monte_carlo` artefaktı yazar
+(`--no-artifact` ile yazmaz, `--reports-dir` ile başka klasör). Adında `synthetic` ya da `sentetik` geçen liste
+sentetik işaretlenir. FTMO profilinde `min_trading_days` 2026-11-13'te doğrulandı (4), bu yüzden
 `--assume-min-trading-days` gerekmez. Bayrak yalnızca bu alanı boş olan bir profille zorunludur ve raporda VARSAYIM
 olarak yazılır.
 
@@ -44,10 +47,96 @@ entry_time,exit_time,r,strategy_id,mae_r
 - **R nasıl hesaplanır:** `r = işlemin net kâr/zararı ÷ o işlemde riske edilen tutar`. TradingView'da "Risk base =
   Initial Capital" ile nominal risk sabittir (ör. 100.000 × %0,5 = 500 $). Tam kontrata yuvarlama gerçek riski nominalin
   altına çeker; o zaman tam stop −1'den küçük çıkar (ör. −0,8). `mae_r` aynı tutara bölünmüş en kötü yüzen zarardır.
-- TradingView "List of Trades" dışa aktarımını doğrudan okuyan dönüştürücü henüz yok (örnek dosya bekleniyor).
+- **Liste hangi riskle üretildi:** R boyuttan bağımsız değildir (boyut tam birime yuvarlanır, asgari boyutun altı
+  atlanır, script'lerin yüzde kesicileri başka sayıda kayıpta tetiklenir). Simülatör listeyi `--risk-pct` ile ölçekler
+  ama listeyi **yeniden boyutlamaz**: Go/No-Go için liste, simülasyonla aynı riskte (`config/risk.yaml` →
+  `risk_per_trade_pct`) boyutlanmış karar koşularından gelmelidir (2026-11-19 kullanıcı kararı, ADR-0010).
+  `propbot backtest` varsayılanı budur. `--pine-risk` ile (betiğin %0,5'iyle, planlanan riskten farklıyken) üretilmiş
+  liste satırlarının `strategy_id`'sinde ve köken satırında `-pinerisk` işaretini taşır (`ny_orb_fvg-pinerisk`);
+  simülatör onu okur ve "Köken" satırında (artefakt notunda da) listenin planlanan hesabın işlemleri olmadığını, bu
+  koşunun G4'ü GEÇTİ yapamayacağını yazar; G4 için işaret tek başına ret nedenidir (DEĞERLENDİRİLEMEDİ), satırlar
+  karar koşusununkilerle birebir aynı olsa bile.
+- Go/No-Go'da kullanılacak liste `propbot backtest --trades-out` ile üretilir (`docs/backtest.md` 4.5). TradingView
+  "List of Trades" dışa aktarımını Monte Carlo listesine çeviren bir dönüştürücü yok (açık bulgu 26); o dışa aktarım
+  yalnızca `propbot parity` ile kullanılır.
 - **Hangi script sürümünden:** listeyi depodaki güncel `pine/` sürümünden (E12 dahil) ve maliyetler açıkken dışa aktar.
   E12 ile TP limitleri fiyat seviyeyi 1 tick geçince doluyor (`backtest_fill_limits_assumption = 1`); daha eski bir
   sürümden alınan liste "dokunma = dolum" sayar ve daha iyimserdir. Simülatör listenin hangi sürümden geldiğini bilemez.
+
+### Köken satırı (`#propbot-trades`)
+
+`propbot backtest`'in yazdığı işlem listesi, başlık satırından **önce** tek bir köken satırıyla başlar: liste hangi
+koşudan, hangi veriden ve hangi stratejilerden geldi. Örnek (tek satır):
+
+```text
+#propbot-trades v=1 synthetic=false cost_free=false fill_model=pessimistic cost_factor=1.0 data_sha256=<64 onaltılık> data_file=us500_1m.csv strategy_ids=asian_sweep,ny_orb_fvg created_utc=2026-11-17T10:00:00Z
+```
+
+- Alanlar tam olarak bu sırayla ve tek boşlukla ayrılır; satırda başka alan, fazladan boşluk ya da sondaki boşluk
+  olamaz. `synthetic`/`cost_free` yalnızca `true`/`false`; `fill_model` `pessimistic` ya da `tv_ohlc`; `cost_factor`
+  Python'un kısa ondalık yazımı (`1.0`, `1.5`); `data_sha256` veri dosyasının sha256'sı (bellekte üretilen seride boş).
+- `data_file` ve her strateji kimliği yüzde kodlamalıdır (UTF-8; harf, rakam ve `_ . - ~` dışındaki her karakter
+  büyük harfli `%XX`): böylece boşluk, virgül, `=` ya da satır sonu içeren bir dosya adı satırı bozamaz. Strateji
+  kimlikleri sıralı, tekrarsız ve virgülle ayrılır.
+- Okuyucu satırı ayrıştırıp yeniden yazar ve birebir aynı olmasını ister: elle düzenlenmiş (sıra değişmiş, `1.00`,
+  küçük harfli `%xx` …) ya da bozuk bir köken satırı **hatadır**, "köken yok" sayılmaz.
+- Listedeki her işlemin `strategy_id`'si köken satırında adı geçen stratejilerden biri olmalıdır; tersine, köken
+  satırında adı geçen her stratejinin listede **en az bir** işlemi olmalıdır. Satırda adı geçip tek işlemi olmayan
+  strateji listeyi geçersiz kılar (satırlar silinmiş demektir); yazıcı da böyle bir liste yazmaz. Bu yüzden
+  `backtest --trades-out`, bir bacağında tamamlanmış işlem olmayan stratejiyi listeye hiç almaz ve ekrana "NOT"
+  satırı yazar.
+- Yalnızca **ilk** satır köken satırı olabilir. `#` ile başlayan başka her satır eskisi gibi hatadır (ilk satırdaysa
+  başlık sayılır ve zorunlu sütunlar eksik çıkar; daha aşağıdaysa geçersiz tarih satırıdır).
+
+Köken satırı **olmayan** (elle hazırlanmış ya da başka araçtan gelen) liste simülatörde eskisi gibi çalışır, ama
+Go/No-Go raporunda **G4'ü geçemez**: "işlem listesinin kaynağı bilinmiyor; listeyi propbot backtest üretmeli"
+(DEĞERLENDİRİLEMEDİ). G4 ayrıca şunları ister (SPEC §9.1):
+- liste sentetik değil (sentetikse KALDI); maliyetsiz değil; `pessimistic` dolum modeli ve 1,0 maliyet çarpanıyla
+  üretilmiş;
+- `strategy_ids` değerlendirilen strateji listesiyle (`gonogo --strategies`) aynı; `data_sha256` o stratejilerin karar
+  koşularının verisiyle aynı ve her stratejinin bir karar koşusu var. Master birleşik kimliğiyle (`master_portfolio`)
+  değerlendirilirken köken satırı ve satırlar yine bacak kimliklerini (`master_ny_orb_fvg`, `master_asian_sweep`)
+  taşır; G4 bunları birleşik karar koşusunun bacak başına satır özetleriyle eşler (birleşik kimliğin kabulü
+  2026-11-19 kullanıcı kararıdır; eşleme yolu uygulamanın seçimidir);
+- **işlem sayısı:** Monte Carlo'nun simüle ettiği işlem sayısı, karar koşularının tamamlanmış işlem sayılarının
+  toplamına eşit. Listeden satır silmek (ör. kaybedenleri) bu yüzden G4'ü geçemez; komut listenin tamamını simüle eder;
+- **toplamlar:** artefakt listenin okunduğu hâliyle (`--cost-r` düşülmeden) R toplamını ve mae_r toplamını kaydeder;
+  ikisi karar koşularının `stats_all.total_r` ve `mae_total_r` toplamlarına eşit olmalı. Satır sayısı aynı kalsa da R
+  ya da mae_r değerleri yeniden yazılmış liste G4'ü geçemez. Tolerans yalnızca toplamaların kayan nokta yuvarlamasıdır:
+  `propbot backtest` değerleri `repr()` ile (geri okunduğunda aynı sayı) yazar, CSV'nin kendi yuvarlaması yoktur;
+- **işlem içi model:** yalnızca `--intratrade stop` (varsayılan, kötümser) G4'ü geçebilir; `closed` iyimserdir.
+  Artefakt modeli kaydeder;
+- **kurallar:** artefakt venue profilinin simülasyon anındaki `max_loss_type`, `daily_loss_basis` ve `daily_reset`
+  (saat dilimi, saat) değerlerini de kaydeder; hepsi bugünkü profille aynı olmalı. Profil sonradan değiştiyse eski koşu
+  DEĞERLENDİRİLEMEDİ olur. Simülatör yalnızca `static` toplam kaybı modeller (`trailing_eod` reddedilir); günlük kayıp
+  bazının iki değeri tek modelle hesaplanır (ADR-0002 madde 7: stratejiler reset'te pozisyon taşımaz, bakiye =
+  özsermaye) ve G4 kanıtı bunu yazar;
+- sıra: liste en yeni karar koşusundan sonra, Monte Carlo koşusundan önce oluşturulmuş;
+- koşu planlanan riskle (`risk.yaml` → `risk_per_trade_pct`), venue profilinin kurallarıyla, `--dd-risk-steps` ve
+  `--assume-min-trading-days` olmadan, en az 5000 yol ve 100 işlemle yapılmış (bu iki alt sınır mühendislik seçimidir;
+  kullanıcı 2026-11-19'da onayladı);
+- **risk zinciri (2026-11-19, ADR-0010):** listenin arkasındaki her karar koşusu da planlanan riskle boyutlanmış
+  (kayıtlı risk girdisi `risk.yaml` değerine eşit). Zincir tutuyorsa G4 kanıtı "risk zinciri: karar koşuları planlanan
+  riskle … boyutlandırıldı, işlem listesi o koşulardan, simülasyon aynı riskte" cümlesini taşır; bir halka eksikse
+  cümle yazılmaz ve G4 GEÇTİ olamaz. Köken satırında `-pinerisk` işaretli kimlik varsa (betiğin kendi riskiyle
+  yapılmış koşunun listesi) bu tek başına ret nedenidir: satır karşılaştırmasının sonucu ne olursa olsun G4 GEÇTİ
+  olamaz.
+
+- tekrar üretilebilir koşu (2026-11-19): `--seed` varsayılan (`20261113`), `--paths` karar değeri (10 000 ya da
+  config'teki daha sıkı `min_mc_paths`), `--max-days` varsayılan (1000), `--skip-prob` 0. Bunlar firma kuralı değildir
+  ama sonucu değiştirir: 5000 yolda P(geçme)'nin standart hatası ≈ 0,7 puan, 40 tohumun en iyisi tipik olandan ≈ 1,2
+  puan yukarıda; kısa ufuk ihlalleri "sonuçlanmadı"ya iter. Başka değerlerle koşmak serbesttir ama G4'ü geçemez;
+- listenin satırları değiştirilmemiş: artefakt strateji başına satırların (giriş/çıkış zamanı, R, mae_r) sıralı sha256
+  özetini kaydeder ve karar koşusunun kendi özetiyle aynı olmalı. Zamanı kaydırılmış bir satır sayıyı ve toplamları
+  korur ama günlere dağılımı (günlük kayıp ihlalleri) değiştirir.
+
+FTMO programında süre sınırı olup olmadığı resmi sayfadan doğrulanmalı (açık bulgu 78); varsayılan 1000 piyasa günü
+bir mühendislik seçimidir. Listenin R değerlerinin maliyet sonrası olduğu (`--r-is-net`) G4'te elle teyit maddesidir. Köken satırı
+listenin maliyetsiz bir koşudan geldiğini söylüyorsa rapor "MALİYETSİZ işlem listesi" der, "maliyet sonrası" ifadesini
+kullanmaz ve `--r-is-net` yok sayılır (köken satırı bayraktan üstündür).
+
+Bu alanları taşımayan eski `monte_carlo` artefaktları yine yüklenir ve panelde görünür; G4 onlar için "eski rapor"
+cümlesiyle DEĞERLENDİRİLEMEDİ olur, asla GEÇTİ olmaz.
 
 ## Seçenekler
 
@@ -67,6 +156,8 @@ entry_time,exit_time,r,strategy_id,mae_r
 | `--max-days` | `1000` | Sınav ufku, piyasa günü. Dolunca yol "sonuçlanmadı" sayılır |
 | `--dd-days` | `250` | Maks. düşüşün ölçüldüğü pencere, piyasa günü |
 | `--trades-tz` | — | Ofsetsiz zaman damgalarının saat dilimi |
+| `--reports-dir` | `reports` | `monte_carlo` artefaktının yazılacağı klasör |
+| `--no-artifact` | kapalı | Artefakt yazma; rapor yalnızca ekrana |
 
 Çıkış kodu: 0 başarılı · 1 geçersiz config ya da girdi · 2 kullanım hatası.
 
