@@ -1,0 +1,18 @@
+# Strategy parameters — overrides of the Pine input defaults (ADR-0008 item 9).
+# An empty mapping means "exactly the defaults of the Pine script in pine/". Every value
+# written here is a deviation from the TradingView script: parity (SPEC §6.6) holds for
+# that strategy only if the same value is set in the script's inputs, and a parameter
+# search is not what this file is for (optimisation is off; SPEC §6.4).
+# Field names are the snake_case names of the Pine inputs (src/propbot/strategies/<port>.py).
+# The per-trade risk input (risk_pct; risk_percent for mtf_trend_cont) may NOT be set here, whatever the
+# value: its one source is config/risk.yaml -> risk_per_trade_pct (ADR-0010); the key is a load error.
+# The risk base (risk_base, fixed_bal) may be set, but the planned risk is a percent of the initial
+# balance: with any risk_base other than "Initial Capital" the strategy has NO decision run (backtest
+# without --pine-risk stops, and so does gonogo); parity and the --pine-risk comparison run still work.
+strategies:
+  ny_orb_fvg: {}
+  asian_sweep: {}
+  ict_silver_bullet: {}
+  mr_bb_kc_rsi2: {}
+  mtf_trend_cont: {}
+  master_portfolio: {}
