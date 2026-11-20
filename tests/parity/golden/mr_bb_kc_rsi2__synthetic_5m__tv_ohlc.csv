@@ -1,0 +1,8 @@
+# python-engine regression pin, NOT TradingView evidence: SENTETİK VERİ — python-engine regression pin on SYNTHETIC data, not evidence; strategy=mr_bb_kc_rsi2 params=pine-defaults fixture=synthetic_5m.csv sha256=04c42f5e060c10d8a0c161024a35ff544b8eb19f8ec853942e71c5eaa3d12be6 fill_model=tv_ohlc instrument=MES tick_size=0.25 point_value=5 costs=commission_per_unit_side:0.5,slippage_ticks:1,spread_points:0 initial_capital=100000
+seq,strategy_id,entry_id,exit_id,reason,setup,comment,side,qty,entry_time_utc,exit_time_utc,entry_price,exit_price,pnl,r
+0,mr_bb_kc_rsi2,Short,Exit S,target,MR Short,,short,35.000000,2026-10-21T17:10:00.000Z,2026-10-21T17:45:00.000Z,4963.000000,4961.162500,286.562500,0.582079
+1,mr_bb_kc_rsi2,Long,Exit L,target,MR Long,,long,30.000000,2026-10-23T18:00:00.000Z,2026-10-23T18:05:00.000Z,5007.250000,5011.300000,577.500000,1.187914
+2,mr_bb_kc_rsi2,Short,Exit S,stop,MR Short,,short,27.000000,2026-11-02T19:25:00.000Z,2026-11-02T20:10:00.000Z,5023.000000,5026.826914,-543.633398,-1.125807
+3,mr_bb_kc_rsi2,Long,Exit L,target,MR Long,,long,35.000000,2026-11-03T18:45:00.000Z,2026-11-03T20:00:00.000Z,5056.500000,5057.212500,89.687500,0.183112
+4,mr_bb_kc_rsi2,Short,Exit S,stop,MR Short,,short,19.000000,2026-11-09T20:05:00.000Z,2026-11-09T20:20:00.000Z,5049.000000,5054.459894,-537.689923,-1.086374
+5,mr_bb_kc_rsi2,Long,,close,MR Long,Session end,long,31.000000,2026-11-13T19:35:00.000Z,2026-11-13T20:45:00.000Z,5140.000000,5139.000000,-186.000000,-0.382012

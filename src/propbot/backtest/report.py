@@ -40,6 +40,16 @@ def tr_int(value: int) -> str:
     return f"{value:,d}".replace(",", ".")
 
 
+def risk_shown(percent: float) -> str:
+    """A per-trade risk for people, exact: 0.25 -> "%0,25".
+
+    Never rounded: two risks that differ must never read the same in a refusal. One
+    function for the runner, the commands and the Go/No-Go report, so their sentences
+    about the same risk cannot drift apart.
+    """
+    return "%" + repr(float(percent)).replace(".", ",")
+
+
 def tr_percent(fraction: float, digits: int = 1) -> str:
     """Format a probability the Turkish way: 0.623 -> %62,3."""
     return "%" + tr_number(100.0 * fraction, digits)
@@ -74,6 +84,14 @@ class ReportContext:
     stats: TradeStats
     trades_crossing_reset: int
     freshness: RulesFreshness
+    # The list's provenance line says its backtest ran without costs. It wins over
+    # --r-is-net: a user's "already net" cannot make a cost-free list net.
+    trades_cost_free: bool = False
+
+    @property
+    def r_net(self) -> bool:
+        """The R values may be read as after costs (declared net and not cost-free)."""
+        return self.r_is_net and not self.trades_cost_free
 
 
 def render_report(context: ReportContext, summary: MonteCarloSummary) -> str:
@@ -102,10 +120,12 @@ def _input_lines(context: ReportContext) -> list[str]:
     min_days = str(rules.min_trading_days) + (
         " (VARSAYIM)" if rules.min_trading_days_assumed else ""
     )
-    if context.r_is_net:
+    if context.r_net:
         cost = "R değerleri maliyet dahil (kullanıcı beyanı)"
     else:
         cost = f"maliyet {tr_number(context.cost_r, 2)}R / işlem"
+    # A cost-free list stays without its own costs whatever --cost-r adds: never "after".
+    net_text = "MALİYETSİZ işlem listesi" if context.trades_cost_free else "maliyet sonrası"
     assumptions = [
         f"risk {tr_level(params.risk_pct)} / işlem (başlangıç bakiyesi üzerinden, sabit) · {cost}",
         f"işlem atlama olasılığı {tr_percent(params.skip_prob, 0)} · "
@@ -124,7 +144,7 @@ def _input_lines(context: ReportContext) -> list[str]:
         f"              {tr_int(stats.n_trades)} işlem · {stats.first_day} → {stats.last_day} · "
         f"{tr_int(stats.n_days)} piyasa günü ({tr_int(stats.n_days_with_trades)}'inde işlem var)",
         f"              ortalama {tr_r(stats.mean_r)} · std {tr_number(stats.std_r, 2)}R · "
-        f"kazanma {tr_percent(stats.win_rate)} · t = {t_stat}   (maliyet sonrası)",
+        f"kazanma {tr_percent(stats.win_rate)} · t = {t_stat}   ({net_text})",
         f"Venue       : {venue.venue} / {venue.program} · "
         f"{tr_int(round(venue.initial_balance))} {venue.account_currency} · {context.venue_path}",
         f"Kurallar    : hedef {targets} · günlük kayıp {tr_level(rules.daily_loss_limit_pct)} "
@@ -158,7 +178,13 @@ def _warning_lines(context: ReportContext) -> list[str]:
             f"min_trading_days profilde boş: {context.rules.min_trading_days} değeri "
             "--assume-min-trading-days ile verilen VARSAYIMDIR; firmanın resmi sayfasından doğrula."
         )
-    if context.cost_r == 0.0 and not context.r_is_net:
+    if context.trades_cost_free:
+        ignored = " --r-is-net yok sayıldı." if context.r_is_net else ""
+        warnings.append(
+            "MALİYETSİZ işlem listesi: köken satırına göre liste maliyetsiz bir backtest'ten "
+            f"(SPEC §6.3); R değerleri maliyet içermez.{ignored}"
+        )
+    if context.cost_r == 0.0 and not context.r_is_net and not context.trades_cost_free:
         warnings.append(
             "MALİYETSİZ KOŞU: yalnızca karşılaştırma içindir (SPEC §6.3). --cost-r ver ya da "
             "R değerleri maliyet dahilse --r-is-net kullan."

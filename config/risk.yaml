@@ -1,5 +1,8 @@
 # Risk defaults — change only with a written reason in docs/adr/.
 # Hard caps below are ALSO enforced in code; editing this file cannot exceed them.
+# risk_per_trade_pct is the ONE source of the per-trade risk for live operation and for every
+# portfolio-level judgement (decision backtests, Monte Carlo, Go/No-Go): user decision of 2026-11-19,
+# ADR-0010. The 0.5 in the Pine scripts is only the script's own single-strategy default (parity runs).
 risk_per_trade_pct: 0.25                 # code hard max: 0.5
 daily_cap_pct: 1.0                       # code enforces <= 0.5 * venue.daily_loss_limit_pct
 weekly_cap_pct: 3.0                      # pause all strategies until manual /devam

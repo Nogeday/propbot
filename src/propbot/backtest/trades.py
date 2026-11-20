@@ -6,12 +6,21 @@ Generic CSV format (documented in docs/monte-carlo.md):
 
 Timestamps are ISO 8601 with a UTC offset or `Z`; `r` is the trade result in R
 multiples; `mae_r` is the worst floating result during the trade (<= 0 and <= r).
+
+A list written by `propbot backtest` starts with ONE provenance line before the header
+(`TradesProvenance`): which run, data and strategies it came from. The Go/No-Go report
+(G4) accepts a Monte Carlo run only on a list with that line; a hand-made list without it
+still simulates. The line has a fixed key order and a canonical encoding, and the reader
+re-encodes what it parsed and compares: anything that is not exactly what the writer
+would produce (a reordered key, `1.00` for `1.0`, a lower-case escape) is an error, never
+"no provenance".
 """
 
 import csv
 import datetime as dt
 import math
 import re
+import urllib.parse
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -23,6 +32,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import numpy.typing as npt
 
+from propbot.backtest.model import FillModel
 from propbot.core.propday import prop_day, weekdays_between
 
 REQUIRED_COLUMNS: Final = ("entry_time", "exit_time", "r")
@@ -35,6 +45,31 @@ EVENT_EXIT: Final = 2
 _MAX_REPORTED_ERRORS: Final = 20
 _MAE_TOLERANCE: Final = 1e-9
 _TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}")
+
+PROVENANCE_PREFIX: Final = "#propbot-trades"
+PROVENANCE_VERSION: Final = "1"
+# Fixed order: the encoding is canonical, so a reordered line is a tampered line.
+PROVENANCE_KEYS: Final = (
+    "v",
+    "synthetic",
+    "cost_free",
+    "fill_model",
+    "cost_factor",
+    "data_sha256",
+    "data_file",
+    "strategy_ids",
+    "created_utc",
+)
+# A real line is a few hundred bytes; the cap keeps a garbage first line from being read whole.
+MAX_PROVENANCE_LINE: Final = 16 * 1024
+MAX_PROVENANCE_TEXT: Final = 256
+_BOOL_TEXT: Final = {True: "true", False: "false"}
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+_STAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
+_FACTOR = re.compile(r"[0-9]+\.[0-9]+(?:e[+-][0-9]+)?|[0-9]+e[+-][0-9]+")
+# Percent-encoded UTF-8: unreserved characters stay, everything else (space, comma, "=",
+# "%", newline, non-ASCII) is %XX with upper-case hex, so a value never holds a separator.
+_ENCODED = re.compile(r"(?:[A-Za-z0-9._~-]|%[0-9A-F]{2})+")
 
 
 class TradeListError(Exception):
@@ -49,6 +84,133 @@ class IntratradeModel(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class TradesProvenance:
+    """Where a trade list came from: the backtest run that wrote it.
+
+    `data_sha256` is "" for a series built in memory (synthetic data has no file).
+    """
+
+    synthetic: bool
+    cost_free: bool
+    fill_model: str  # a `FillModel` value
+    cost_factor: float  # costs of the run = configured costs x this factor
+    data_sha256: str
+    data_file: str
+    strategy_ids: tuple[str, ...]  # sorted, unique, non-empty
+    created_utc: str  # YYYY-MM-DDTHH:MM:SSZ
+
+    def __post_init__(self) -> None:
+        for name in ("synthetic", "cost_free"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} true ya da false olmalı")
+        if self.fill_model not in {model.value for model in FillModel}:
+            raise ValueError(f"bilinmeyen dolum modeli: {self.fill_model[:32]!r}")
+        if (
+            isinstance(self.cost_factor, bool)
+            or not isinstance(self.cost_factor, float)
+            or not (math.isfinite(self.cost_factor) and self.cost_factor >= 0.0)
+        ):
+            raise ValueError("cost_factor sonlu, negatif olmayan bir ondalık sayı olmalı")
+        if self.data_sha256 and _SHA256.fullmatch(self.data_sha256) is None:
+            raise ValueError("data_sha256 64 küçük onaltılık karakter ya da boş olmalı")
+        _check_text("data_file", self.data_file)
+        if not isinstance(self.strategy_ids, tuple) or not self.strategy_ids:
+            raise ValueError("strategy_ids boş olmayan bir demet olmalı")
+        for sid in self.strategy_ids:
+            _check_text("strategy_id", sid)
+            if sid != sid.strip():
+                # The CSV reader strips every field: such an id could never match its rows.
+                raise ValueError("strategy_id başında ya da sonunda boşluk olamaz")
+        if list(self.strategy_ids) != sorted(set(self.strategy_ids)):
+            raise ValueError("strategy_ids sıralı ve tekrarsız olmalı")
+        if _STAMP.fullmatch(self.created_utc) is None:
+            raise ValueError("created_utc 2026-11-18T14:30:00Z biçiminde olmalı")
+        try:
+            dt.datetime.fromisoformat(self.created_utc)  # a real date and time
+        except ValueError:
+            raise ValueError("created_utc geçersiz tarih-saat") from None
+
+    def to_line(self) -> str:
+        """The single provenance line, without a line terminator."""
+        values = (
+            PROVENANCE_VERSION,
+            _BOOL_TEXT[self.synthetic],
+            _BOOL_TEXT[self.cost_free],
+            self.fill_model,
+            repr(self.cost_factor),
+            self.data_sha256,
+            _encode(self.data_file),
+            ",".join(_encode(sid) for sid in self.strategy_ids),
+            self.created_utc,
+        )
+        pairs = " ".join(
+            f"{key}={value}" for key, value in zip(PROVENANCE_KEYS, values, strict=True)
+        )
+        return f"{PROVENANCE_PREFIX} {pairs}"
+
+    @classmethod
+    def from_line(cls, line: str) -> "TradesProvenance":
+        """Strict parse of `to_line`'s output; anything else raises ValueError."""
+        tokens = line.split(" ")
+        if tokens[0] != PROVENANCE_PREFIX or len(tokens) != len(PROVENANCE_KEYS) + 1:
+            raise ValueError(f"{len(PROVENANCE_KEYS)} alan bekleniyordu")
+        raw: dict[str, str] = {}
+        for key, token in zip(PROVENANCE_KEYS, tokens[1:], strict=True):
+            name, sep, value = token.partition("=")
+            if name != key or not sep:
+                raise ValueError(f"beklenen alan {key!r}, okunan {name[:32]!r}")
+            raw[key] = value
+        if raw["v"] != PROVENANCE_VERSION:
+            raise ValueError(f"bilinmeyen sürüm {raw['v'][:16]!r}")
+        flags = {text: flag for flag, text in _BOOL_TEXT.items()}
+        if raw["synthetic"] not in flags or raw["cost_free"] not in flags:
+            raise ValueError("synthetic ve cost_free 'true' ya da 'false' olmalı")
+        if _FACTOR.fullmatch(raw["cost_factor"]) is None:
+            raise ValueError("cost_factor sayı olmalı (ör. 1.0)")
+        if raw["data_sha256"] and _SHA256.fullmatch(raw["data_sha256"]) is None:
+            raise ValueError("data_sha256 64 küçük onaltılık karakter olmalı")
+        if not raw["strategy_ids"]:
+            raise ValueError("strategy_ids boş olamaz")
+        provenance = cls(
+            synthetic=flags[raw["synthetic"]],
+            cost_free=flags[raw["cost_free"]],
+            fill_model=raw["fill_model"],
+            cost_factor=float(raw["cost_factor"]),
+            data_sha256=raw["data_sha256"],
+            data_file=_decode(raw["data_file"]),
+            strategy_ids=tuple(_decode(part) for part in raw["strategy_ids"].split(",")),
+            created_utc=raw["created_utc"],
+        )
+        # Canonical form: only the writer's exact bytes are accepted (no second spelling
+        # of the same line that a hand edit could hide behind).
+        if provenance.to_line() != line:
+            raise ValueError("satır kanonik biçimde değil (elle düzenlenmiş olabilir)")
+        return provenance
+
+
+def _check_text(name: str, value: str) -> None:
+    if not isinstance(value, str) or not 1 <= len(value) <= MAX_PROVENANCE_TEXT:
+        raise ValueError(f"{name} 1-{MAX_PROVENANCE_TEXT} karakter olmalı")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} geçerli UTF-8 metin olmalı") from exc
+
+
+def _encode(value: str) -> str:
+    return urllib.parse.quote(value, safe="", encoding="utf-8", errors="strict")
+
+
+def _decode(value: str) -> str:
+    if _ENCODED.fullmatch(value) is None:
+        raise ValueError("geçersiz yüzde kodlaması")
+    try:
+        return urllib.parse.unquote_to_bytes(value).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("yüzde kodlaması UTF-8 değil") from exc
+
+
+@dataclass(frozen=True, slots=True)
 class Trade:
     entry_utc: dt.datetime
     exit_utc: dt.datetime
@@ -59,17 +221,43 @@ class Trade:
 
 def load_trades_csv(path: Path, *, naive_tz: ZoneInfo | None = None) -> tuple[Trade, ...]:
     """Read a trade list. Timestamps without an offset are read in `naive_tz` if given."""
+    return read_trades_csv(path, naive_tz=naive_tz)[0]
+
+
+def read_trades_csv(
+    path: Path, *, naive_tz: ZoneInfo | None = None
+) -> tuple[tuple[Trade, ...], TradesProvenance | None]:
+    """The trades and the provenance line (None when the file has none).
+
+    Only the FIRST line may be a provenance line; a malformed one is an error. Any other
+    line starting with "#" is read as CSV like before (as a header it lacks the required
+    columns, as a row it is not a timestamp), so it stays an error.
+    """
+    provenance: TradesProvenance | None = None
     try:
         with path.open(encoding="utf-8-sig", newline="") as handle:
+            first = handle.readline(MAX_PROVENANCE_LINE + 1)
+            skipped = 0
+            if first.startswith(PROVENANCE_PREFIX):
+                provenance = _parse_provenance(first, path)
+                skipped = 1
+            else:
+                handle.seek(0)
             reader = csv.DictReader(handle)
             _check_header(reader.fieldnames, path)
             trades: list[Trade] = []
             errors: list[str] = []
             for row in reader:
                 try:
-                    trades.append(_parse_row(row, naive_tz))
+                    trade = _parse_row(row, naive_tz)
+                    if provenance is not None and trade.strategy_id not in provenance.strategy_ids:
+                        raise ValueError(
+                            f"strategy_id {trade.strategy_id!r} köken satırındaki stratejiler "
+                            "arasında değil"
+                        )
+                    trades.append(trade)
                 except ValueError as exc:
-                    errors.append(f"satır {reader.line_num}: {exc}")
+                    errors.append(f"satır {reader.line_num + skipped}: {exc}")
     except FileNotFoundError as exc:
         raise TradeListError(f"{path}: dosya bulunamadı") from exc
     except (OSError, UnicodeDecodeError, csv.Error) as exc:
@@ -82,7 +270,31 @@ def load_trades_csv(path: Path, *, naive_tz: ZoneInfo | None = None) -> tuple[Tr
         raise TradeListError(f"{path}: işlem listesi geçersiz\n" + "\n".join(shown))
     if not trades:
         raise TradeListError(f"{path}: işlem yok (yalnızca başlık satırı var)")
-    return tuple(trades)
+    if provenance is not None:
+        # The line and the rows must agree both ways: a strategy the line names without a
+        # single row means rows were removed (or the line names a run it does not hold).
+        present = {trade.strategy_id for trade in trades}
+        absent = [sid for sid in provenance.strategy_ids if sid not in present]
+        if absent:
+            raise TradeListError(
+                f"{path}: köken satırındaki stratejinin listede işlemi yok: "
+                + ", ".join(repr(sid) for sid in absent[:_MAX_REPORTED_ERRORS])
+            )
+    return tuple(trades), provenance
+
+
+def _parse_provenance(first: str, path: Path) -> TradesProvenance:
+    if first.endswith("\r\n"):
+        line = first[:-2]
+    elif first.endswith("\n"):
+        line = first[:-1]
+    else:
+        # Too long for the cap, or the file has nothing after it.
+        raise TradeListError(f"{path}: köken satırı (satır 1) bozuk: satır sonu yok ya da çok uzun")
+    try:
+        return TradesProvenance.from_line(line)
+    except ValueError as exc:
+        raise TradeListError(f"{path}: köken satırı (satır 1) bozuk: {exc}") from None
 
 
 def _check_header(fieldnames: Sequence[str] | None, path: Path) -> None:

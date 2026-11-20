@@ -1,0 +1,3 @@
+# python-engine regression pin, NOT TradingView evidence: SENTETİK VERİ — python-engine regression pin on SYNTHETIC data, not evidence; strategy=mr_bb_kc_rsi2 params=pine-defaults fixture=synthetic_1m.csv sha256=1dfd8bf95a7830a63fcb83a3a8d56fd3d99bca495410bf9d19edad6b11bb2494 fill_model=pessimistic instrument=MES tick_size=0.25 point_value=5 costs=commission_per_unit_side:0.5,slippage_ticks:1,spread_points:0 initial_capital=100000
+seq,strategy_id,entry_id,exit_id,reason,setup,comment,side,qty,entry_time_utc,exit_time_utc,entry_price,exit_price,pnl,r
+0,mr_bb_kc_rsi2,Short,Exit S,stop,MR Short,,short,81.000000,2026-12-02T17:38:00.000Z,2026-12-02T17:39:00.000Z,4978.750000,4980.223301,-677.686999,-1.367857

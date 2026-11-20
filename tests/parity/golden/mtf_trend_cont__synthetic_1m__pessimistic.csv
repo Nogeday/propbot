@@ -1,0 +1,7 @@
+# python-engine regression pin, NOT TradingView evidence: SENTETİK VERİ — python-engine regression pin on SYNTHETIC data, not evidence; strategy=mtf_trend_cont params=pine-defaults fixture=synthetic_1m.csv sha256=1dfd8bf95a7830a63fcb83a3a8d56fd3d99bca495410bf9d19edad6b11bb2494 fill_model=pessimistic instrument=MES tick_size=0.25 point_value=5 costs=commission_per_unit_side:0.5,slippage_ticks:1,spread_points:0 initial_capital=100000
+seq,strategy_id,entry_id,exit_id,reason,setup,comment,side,qty,entry_time_utc,exit_time_utc,entry_price,exit_price,pnl,r
+0,mtf_trend_cont,Short,TP1,stop,Short,TP1,short,7.000000,2026-12-01T14:54:00.000Z,2026-12-01T18:28:00.000Z,4990.000000,4997.250000,-260.750000,-1.064286
+0,mtf_trend_cont,Short,Init,stop,Short,Init stop,short,7.000000,2026-12-01T14:54:00.000Z,2026-12-01T18:28:00.000Z,4990.000000,4997.250000,-260.750000,-1.064286
+1,mtf_trend_cont,Short,Stop,stop,Short,Init stop,short,33.000000,2026-12-02T14:33:00.000Z,2026-12-02T14:41:00.000Z,4985.250000,4988.750000,-610.500000,-1.138462
+2,mtf_trend_cont,Short,TP1,stop,Short,TP1,short,15.000000,2026-12-03T14:31:00.000Z,2026-12-03T14:46:00.000Z,4934.000000,4937.750000,-296.250000,-1.128571
+2,mtf_trend_cont,Short,Init,stop,Short,Init stop,short,15.000000,2026-12-03T14:31:00.000Z,2026-12-03T14:46:00.000Z,4934.000000,4937.750000,-296.250000,-1.128571

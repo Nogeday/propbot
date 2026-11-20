@@ -1,0 +1,4 @@
+Trade #,Type,Signal,Date/Time,Price USD,Contracts,Profit USD
+1,Exit Long,Init stop,2026-03-02 10:20,6815.25,2,30.00
+1,Exit Long,TP1,2026-03-02 10:01,6825.00,2,100.00
+1,Entry Long,Long,2026-03-02 09:36,6812.25,4,

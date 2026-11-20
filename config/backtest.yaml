@@ -1,0 +1,60 @@
+# Backtest settings — instruments, costs, samples and the Go/No-Go thresholds (SPEC §6, §9; ADR-0008).
+# Nothing here is a prop-firm rule (those live in venues/*.yaml). Go/No-Go thresholds can only be
+# made STRICTER here: the SPEC §9 values are floors enforced in code.
+
+default_instrument: MES
+
+instruments:
+  MES:                                # CME Micro E-mini S&P 500 — the profile the Pine scripts' header documents
+    kind: futures                     # bars are trade prices; whole contracts
+    tick_size: 0.25
+    point_value: 5.0                  # USD per 1.00 index point per contract (1 tick = 1.25 USD)
+    qty_step: 1
+    min_qty: 1
+    costs:
+      commission_per_unit_side: 0.50  # USD per contract PER SIDE (Pine commission_value)
+      slippage_ticks: 1               # on every market and stop fill (Pine slippage)
+      spread_points: 0
+      spread_windows: []
+  US500.cash:                         # FTMO MT5 index CFD — every null is VERIFY: read it in the terminal
+    kind: cfd                         # (Symbol specification) before any backtest on this instrument.
+    tick_size: null                   # A profile with a null cannot be used; the run stops and says so.
+    point_value: null                 # account currency per 1.00 point per 1.00 lot
+    qty_step: null
+    min_qty: null
+    costs:
+      commission_per_unit_side: null
+      slippage_ticks: null
+      spread_points: null             # typical spread outside the windows below, in index points
+      spread_windows: []              # e.g. - {start: "09:25", end: "09:40", spread_points: 1.2}  (session.tz clock)
+
+session:
+  tz: America/New_York                # session logic and spread windows (CLAUDE.md invariant 9)
+  min_gap_minutes: 30                 # a pause this long between two bars ends a session (ADR-0008 item 6)
+
+samples:
+  oos_start: "2025-01-01"             # in-sample ends / out-of-sample starts (UTC midnight; Pine "oosStart")
+
+walk_forward:                         # rolling windows over ONE run's trades; no parameter search (ADR-0008 item 9)
+  is_days: 180
+  oos_days: 60
+  step_days: 60                       # >= oos_days, so no trade is counted in two out-of-sample windows
+
+cost_factors: [1.0, 1.5, 2.0]         # cost sensitivity matrix: every cost multiplied by each factor
+
+go_no_go:                             # SPEC §9 — floors in code; a looser value here is a load error
+  min_data_years: 2.0                 # G1
+  required_tf_seconds: 60             # G1: 1-minute data
+  min_oos_t_stat: 2.0                 # G2
+  min_oos_to_is_ratio: 0.5            # G3
+  min_p_pass_all_phases: 0.60         # G4
+  max_p_breach: 0.20                  # G4
+  min_parity_rate: 0.98               # G6
+  # The next six are NOT SPEC §9 values: engineering choices; approved by the user on 2026-11-19 (unchanged).
+  # Their values below are also floors in code (a smaller minimum or a larger maximum age is a load error).
+  min_oos_trades: 30                  # G2/G3: engineering choice; approved by the user on 2026-11-19 (t-stat needs ~30 trades)
+  min_bar_hours_per_year: 1500        # G1: engineering choice; approved by the user on 2026-11-19 (NY session ~1,638 h/year)
+  min_mc_paths: 5000                  # G4: engineering choice; approved by the user on 2026-11-19
+  min_mc_trades: 100                  # G4: engineering choice; approved by the user on 2026-11-19
+  max_artifact_age_days: 30           # G1-G4, G6: engineering choice; approved by the user on 2026-11-19 (a MAXIMUM)
+  min_parity_trades: 100              # G6: engineering choice; approved by the user on 2026-11-19 (0 of 100 differing -> true rate >= ~97 %, 95 % bound)

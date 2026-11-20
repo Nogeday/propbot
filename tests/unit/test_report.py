@@ -253,3 +253,14 @@ def test_horizon_note_only_appears_when_paths_are_undecided() -> None:
 
     assert "--max-days büyütülürse" in render_report(context(), SUMMARY)
     assert "--max-days büyütülürse" not in render_report(context(), decided)
+
+
+def test_a_cost_free_list_is_said_loudly_and_never_called_after_costs() -> None:
+    # Cross-cutting review H (2026-11-19): the provenance line wins over --r-is-net.
+    report = render_report(context(r_is_net=True, cost_r=0.0, trades_cost_free=True), SUMMARY)
+    assert "MALİYETSİZ işlem listesi" in report
+    assert "maliyet dahil" not in report
+    assert "(maliyet sonrası)" not in report
+    with_cost = render_report(context(cost_r=0.05, trades_cost_free=True), SUMMARY)
+    assert "MALİYETSİZ işlem listesi" in with_cost
+    assert "(maliyet sonrası)" not in with_cost

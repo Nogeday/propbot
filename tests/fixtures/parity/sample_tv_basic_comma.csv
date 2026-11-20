@@ -1,0 +1,6 @@
+Trade #,Type,Signal,Date/Time,Price USD,Contracts,Profit USD,Profit %,Cum. Profit USD,Cum. Profit %,Run-up USD,Run-up %,Drawdown USD,Drawdown %
+3,Entry Long,Long,2026-03-04 09:45,"6,801.00",1,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00
+2,Exit Short,EOD close,2026-03-03 15:59,"6,785.00",2,55.00,0.08,332.50,0.33,80.00,0.12,20.00,0.03
+2,Entry Short,Short,2026-03-03 09:41,"6,790.50",2,,,,,,,,
+1,Exit Long,Exit L,2026-03-02 10:05,"6,830.75",3,277.50,0.27,277.50,0.28,300.00,0.29,15.00,0.01
+1,Entry Long,Long,2026-03-02 09:36,"6,812.25",3,,,,,,,,

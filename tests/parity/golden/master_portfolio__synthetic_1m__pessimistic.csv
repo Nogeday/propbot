@@ -1,0 +1,7 @@
+# python-engine regression pin, NOT TradingView evidence: SENTETİK VERİ — python-engine regression pin on SYNTHETIC data, not evidence; strategy=master_portfolio params=pine-defaults fixture=synthetic_1m.csv sha256=1dfd8bf95a7830a63fcb83a3a8d56fd3d99bca495410bf9d19edad6b11bb2494 fill_model=pessimistic instrument=MES tick_size=0.25 point_value=5 costs=commission_per_unit_side:0.5,slippage_ticks:1,spread_points:0 initial_capital=100000
+seq,strategy_id,entry_id,exit_id,reason,setup,comment,side,qty,entry_time_utc,exit_time_utc,entry_price,exit_price,pnl,r
+0,master_asian_sweep,S2 Long,S2 ExitL,stop,S2 Long,,long,133.000000,2026-12-01T09:24:00.000Z,2026-12-01T09:30:00.000Z,4999.250000,4998.000000,-964.250000,-1.450000
+1,master_ny_orb_fvg,S1 Short,S1 ExitS,stop,S1 Short,,short,36.000000,2026-12-01T14:50:00.000Z,2026-12-01T15:16:00.000Z,4991.750000,4989.250000,414.000000,0.766667
+2,master_asian_sweep,S2 Short,S2 ExitS,stop,S2 Short,,short,66.000000,2026-12-02T09:40:00.000Z,2026-12-02T11:11:00.000Z,4981.000000,4983.000000,-726.000000,-1.257143
+3,master_ny_orb_fvg,S1 Short,S1 ExitS,target,S1 Short,,short,80.000000,2026-12-02T14:47:00.000Z,2026-12-02T15:10:00.000Z,4988.250000,4985.250000,1120.000000,1.866667
+4,master_ny_orb_fvg,S1 Short,S1 ExitS,stop,S1 Short,,short,133.000000,2026-12-03T14:44:00.000Z,2026-12-03T14:45:00.000Z,4934.000000,4935.250000,-964.250000,-1.450000

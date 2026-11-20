@@ -1,0 +1,6 @@
+# python-engine regression pin, NOT TradingView evidence: SENTETİK VERİ — python-engine regression pin on SYNTHETIC data, not evidence; strategy=ict_silver_bullet params=pine-defaults fixture=synthetic_5m.csv sha256=04c42f5e060c10d8a0c161024a35ff544b8eb19f8ec853942e71c5eaa3d12be6 fill_model=pessimistic instrument=MES tick_size=0.25 point_value=5 costs=commission_per_unit_side:0.5,slippage_ticks:1,spread_points:0 initial_capital=100000
+seq,strategy_id,entry_id,exit_id,reason,setup,comment,side,qty,entry_time_utc,exit_time_utc,entry_price,exit_price,pnl,r
+0,ict_silver_bullet,Long,Exit L,stop,,,long,42.000000,2026-10-21T18:35:00.000Z,2026-10-21T18:45:00.000Z,4961.875000,4959.250000,-593.250000,-1.189474
+1,ict_silver_bullet,Short,Exit S,target,,,short,40.000000,2026-11-03T19:20:00.000Z,2026-11-03T20:35:00.000Z,5057.750000,5052.750000,960.000000,1.920000
+2,ict_silver_bullet,Short,,close,,EOD flat,short,30.000000,2026-11-04T19:55:00.000Z,2026-11-04T20:55:00.000Z,5062.250000,5061.750000,45.000000,0.092308
+3,ict_silver_bullet,Short,Exit S,stop,,,short,114.000000,2026-11-05T15:15:00.000Z,2026-11-05T15:20:00.000Z,5064.375000,5065.500000,-755.250000,-1.514286
