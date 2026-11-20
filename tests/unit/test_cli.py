@@ -33,6 +33,8 @@ QUICK = [
     "200",
     "--dd-days",
     "60",
+    # The artifact is tested on its own below; these runs would write into ./reports.
+    "--no-artifact",
 ]
 
 
@@ -218,7 +220,7 @@ def test_montecarlo_refuses_a_null_min_trading_days_without_an_assumption(
     venue = UNVERIFIED_DIR / "venues" / "sample_unverified.yaml"
     arguments = ["montecarlo", "--trades", str(SYNTHETIC), "--venue", str(venue)]
     arguments += ["--risk-config", str(UNVERIFIED_DIR / "risk.yaml"), "--paths", "200"]
-    arguments += ["--max-days", "100", "--dd-days", "50", "--cost-r", "0.05"]
+    arguments += ["--max-days", "100", "--dd-days", "50", "--cost-r", "0.05", "--no-artifact"]
 
     refused = main(arguments)
     refusal = capsys.readouterr()
@@ -291,7 +293,7 @@ def test_montecarlo_rejects_an_inconsistent_config(capsys: pytest.CaptureFixture
     broken = CONFIG_FIXTURES / "invalid" / "cross" / "daily_cap_above_half_limit"
     arguments = ["montecarlo", "--trades", str(SYNTHETIC)]
     arguments += ["--venue", str(broken / "venues" / "sample_2step.yaml")]
-    arguments += ["--risk-config", str(broken / "risk.yaml")]
+    arguments += ["--risk-config", str(broken / "risk.yaml"), "--no-artifact"]
 
     code = main(arguments)
 
@@ -347,3 +349,95 @@ def test_risk_steps_are_parsed_from_pairs() -> None:
 def test_malformed_risk_steps_are_rejected(text: str) -> None:
     with pytest.raises(SimulationInputError, match="--dd-risk-steps biçimi"):
         parse_risk_steps(text)
+
+
+# --- dashboard ----------------------------------------------------------------------------
+
+
+def _dashboard(tmp_path: Path, *extra: str) -> list[str]:
+    return [
+        "dashboard",
+        "--config-dir",
+        str(CONFIG_FIXTURES / "valid"),
+        "--db",
+        str(tmp_path / "propbot.db"),
+        "--no-env-file",
+        "--reports-dir",
+        str(tmp_path / "reports"),
+        *extra,
+    ]
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "192.168.1.10", "::", "localhost", "example.com"])
+def test_dashboard_refuses_a_non_loopback_host(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], host: str
+) -> None:
+    code = main(_dashboard(tmp_path, "--host", host, "--port", "0"))
+
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "reddedildi" in err
+    assert "SSH tüneli" in err
+    assert not (tmp_path / "propbot.db").exists()
+
+
+def test_dashboard_reports_a_busy_port(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    import socket
+
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        port = taken.getsockname()[1]
+
+        code = main(_dashboard(tmp_path, "--port", str(port)))
+
+    captured = capsys.readouterr()
+    assert code == 1
+    assert f"127.0.0.1:{port} dinlenemiyor" in captured.err
+    assert "PropBot paneli" not in captured.out
+    assert not (tmp_path / "propbot.db").exists()
+
+
+def test_dashboard_prints_the_banner_and_stays_read_only_without_secrets(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from propbot.dashboard import command
+
+    for name in (
+        "TELEGRAM_BOT_TOKEN",
+        "TELEGRAM_ALLOWED_CHAT_ID",
+        "TV_WEBHOOK_TOKEN",
+        "PROPBOT_PIN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    served: list[int] = []
+
+    def fake_serve(_server: object, listener: object) -> None:
+        import socket
+
+        assert isinstance(listener, socket.socket)
+        served.append(listener.getsockname()[1])
+
+    monkeypatch.setattr(command, "serve", fake_serve)
+    # Process-wide hooks: kept out of the rest of the test session.
+    monkeypatch.setattr("propbot.logging_setup.configure_logging", lambda **_kwargs: None)
+    monkeypatch.setattr("propbot.signals.service.install_exception_logging", lambda: None)
+
+    code = main(_dashboard(tmp_path, "--port", "0"))
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert len(served) == 1
+    assert f"PropBot paneli · http://127.0.0.1:{served[0]}/" in out
+    assert "kontroller: KAPALI, panel salt-okunur" in out
+    assert "veritabanı henüz yok" in out
+    assert not (tmp_path / "propbot.db").exists()
+
+
+def test_dashboard_with_an_unknown_venue_is_an_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = main(_dashboard(tmp_path, "--venue", "nope", "--port", "0"))
+
+    assert code == 1
+    assert "venue profili bulunamadı" in capsys.readouterr().err
