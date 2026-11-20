@@ -1,4 +1,6 @@
 .env
+.env.*
+!.env.example
 .venv/
 __pycache__/
 *.pyc
@@ -7,9 +9,13 @@ __pycache__/
 .ruff_cache/
 .hypothesis/
 dist/
-data/
-reports/
+/data/
+/reports/
 *.db
 *.db-wal
 *.db-shm
+*.sqlite
+*.sqlite3
+*.pem
+*.key
 *.log
